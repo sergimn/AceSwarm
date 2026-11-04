@@ -2,13 +2,14 @@
 # Broadcasts a dummy live stream with a real Acestream engine (x86_64 Linux engine 3.2.11), for the
 # multi-machine E2E tests. ffmpeg makes a test pattern with a tone and serves it as HTTP MPEG-TS;
 # the engine runs as a broadcast source ("--stream-source") on the host network and writes the
-# transport file (test.acelive), which is served over HTTP for players.
+# transport file (test.acelive), which is served over HTTP for players. The source's built-in
+# tracker refuses every announce, so it announces to e2e/multi/tracker.ts instead.
 #
-#   broadcast.sh start HOST     HOST: the address players reach this machine on (internal tracker)
-#   broadcast.sh wait           waits for the transport file and prints its infohash
+#   broadcast.sh start HOST     HOST: the address players reach this machine on
+#   broadcast.sh wait           waits until the source reads its input and the transport file exists
 #   broadcast.sh stop
 #
-# Ports: 7764 (P2P and internal tracker), 18000 (HTTP source, local only), 18001 (transport file).
+# Ports: 7764 (P2P), 7700 (tracker), 18000 (HTTP source, local only), 18001 (transport file).
 set -euo pipefail
 
 BC_DIR="${BC_DIR:-${RUNNER_TEMP:-/tmp}/broadcast}"
@@ -42,6 +43,8 @@ start() {
   echo $! >"$BC_DIR/source.pid"
   nohup python3 -m http.server 18001 --directory "$BC_DIR/publish" >"$BC_DIR/http.log" 2>&1 &
   echo $! >"$BC_DIR/http.pid"
+  nohup node "$(dirname "$0")/tracker.ts" --port 7700 >"$BC_DIR/tracker.log" 2>&1 &
+  echo $! >"$BC_DIR/tracker.pid"
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   # PYCRYPTODOME_INTEGER=native: the image's pycryptodome 4 rejects the negative intermediate values
   # the engine's RSA key generation (for the broadcast's signing key) relies on.
@@ -49,10 +52,10 @@ start() {
     -v "$BC_DIR:/broadcast" --entrypoint /app/start-engine "$ENGINE_IMAGE" \
     --stream-source --name test --title "AceSwarm E2E" --quality SD --category entertaining \
     --source http://127.0.0.1:18000/live.ts --bitrate 175000 \
-    --host "$host" --port 7764 \
+    --skip-internal-tracker --tracker "http://$host:7700/announce" --port 7764 \
     --publish-dir /broadcast/publish --cache-dir /broadcast/cache --state-dir /broadcast/state \
     --log-stdout >/dev/null
-  log "broadcast source starting (tracker http://$host:7764/announce)"
+  log "broadcast source starting (tracker http://$host:7700/announce)"
 }
 
 wait_ready() {
@@ -74,7 +77,7 @@ wait_ready() {
 stop() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   local name
-  for name in source http; do
+  for name in source http tracker; do
     if [[ -f "$BC_DIR/$name.pid" ]]; then
       pkill -P "$(cat "$BC_DIR/$name.pid")" 2>/dev/null || true
       kill "$(cat "$BC_DIR/$name.pid")" 2>/dev/null || true

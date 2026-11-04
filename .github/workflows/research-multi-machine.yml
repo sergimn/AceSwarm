@@ -84,6 +84,8 @@ jobs:
           sudo wg show || true
           echo "--- who fetched files (direct = 192.168.233.3, through the VPN = 192.168.233.1)"
           cat "$RUNNER_TEMP/broadcast/http.log" || true
+          echo "--- tracker"
+          cat "$RUNNER_TEMP/broadcast/tracker.log" || true
           echo "--- broadcaster"
           docker logs aceswarm-broadcast 2>&1 | grep -v 'disk/by-id' | grep -v raven | tail -60 || true
 
@@ -140,7 +142,7 @@ jobs:
           for _ in $(seq 1 60); do curl -sf -o /dev/null http://192.168.233.2:18001/test.acelive && break; sleep 2; done
           play() {
             local query="$1" out="$2" resp url stat
-            resp=$(curl -s -m 90 "$api/ace/getstream?$query&format=json")
+            resp=$(curl -s -m 150 "$api/ace/getstream?$query&format=json")
             echo "$resp"
             url=$(jq -r '.response.playback_url // empty' <<<"$resp")
             stat=$(jq -r '.response.stat_url // empty' <<<"$resp")
