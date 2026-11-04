@@ -17,6 +17,8 @@ const schema = z.object({
   /** Monthly DB-IP Lite country database (CC BY 4.0), downloaded when missing or outdated. */
   GEOIP_URL_TEMPLATE: z.string().default("https://download.db-ip.com/free/dbip-country-lite-{YYYY}-{MM}.mmdb.gz"),
   GEOIP_DOWNLOAD: envBool(true),
+  /** Fixed countries for some addresses, as `ip=CC` items (for tests and private peers). */
+  GEOIP_STATIC: envList([]),
   /** Remote ports that are services rather than peers (DNS, HTTP, HTTPS). */
   IGNORED_PEER_PORTS: envList(["53", "80", "443"]),
   /** Use wireguard-go when the kernel has no WireGuard module (needs /dev/net/tun). */

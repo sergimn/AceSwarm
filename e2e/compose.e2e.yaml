@@ -1,8 +1,26 @@
 # End-to-end test stack: the real services, with the mock engine instead of Acestream, fake peers
 # on a fake internet and a throwaway WireGuard server. e2e/run.sh builds the images and runs it.
 #
-#   egress (198.51.100.0/24)  netgw, peer-a, peer-b, wg-server   <- the "direct" path reaches these
+#   egress (198.51.100.0/24)  netgw, peer-a (.10), peer-b (.11), wg-server   <- the "direct" path reaches these
 #   vpn (203.0.113.0/24)      wg-server, vpn-peer                <- only reachable through WireGuard
+
+# Fake internet peers. Docker 28+ drops packets addressed to a container's IP when they arrive from
+# another bridge, and with br_netfilter that includes the engine traffic the gateway forwards. A
+# real peer is never a local container, so each fake peer answers on an extra address (PEER_ADDRESS)
+# that Docker doesn't manage, and the engines are pointed at those addresses. Replies must come from
+# that address too, or the gateway's connection tracking never sees them.
+x-fake-peer: &fake-peer
+  image: aceswarm-mock-engine:e2e
+  cap_add: [NET_ADMIN]
+  entrypoint:
+    - /bin/sh
+    - -ec
+    - >-
+      bb=/usr/local/lib/aceswarm/busybox;
+      dev=$$($$bb ip -o -4 addr show | $$bb awk '$$4 ~ /^198[.]51[.]100[.]/ { print $$2; exit }');
+      $$bb ip addr add "$$PEER_ADDRESS/24" dev "$$dev";
+      $$bb ip route replace 198.51.100.0/24 dev "$$dev" src "$$PEER_ADDRESS";
+      exec /usr/local/lib/aceswarm/entrypoint.sh
 
 services:
   controller:
@@ -34,6 +52,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     environment:
       GEOIP_DOWNLOAD: "false"
+      GEOIP_STATIC: 198.51.100.10=ES,198.51.100.11=FR,203.0.113.10=SE
       PROBE_TARGETS: 198.51.100.10
       PROBE_INTERVAL_SECONDS: "3"
       PEERS_INTERVAL_SECONDS: "2"
@@ -43,20 +62,22 @@ services:
         ipv4_address: 198.51.100.2
 
   peer-a:
-    image: aceswarm-mock-engine:e2e
+    <<: *fake-peer
     environment:
       MOCK_MODE: peer
+      PEER_ADDRESS: 198.51.100.10
     networks:
       egress:
-        ipv4_address: 198.51.100.10
+        ipv4_address: 198.51.100.110
 
   peer-b:
-    image: aceswarm-mock-engine:e2e
+    <<: *fake-peer
     environment:
       MOCK_MODE: peer
+      PEER_ADDRESS: 198.51.100.11
     networks:
       egress:
-        ipv4_address: 198.51.100.11
+        ipv4_address: 198.51.100.111
 
   vpn-peer:
     image: aceswarm-mock-engine:e2e

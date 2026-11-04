@@ -3,7 +3,7 @@ import { createService, runService } from "@aceswarm/shared/service";
 import { loadConfig } from "./config.ts";
 import { SystemRunner } from "./exec.ts";
 import { Gateway } from "./gateway.ts";
-import { GeoIpDatabase } from "./geoip.ts";
+import { GeoIpDatabase, StaticGeoLookup } from "./geoip.ts";
 import { detectInterfaces, Firewall } from "./network.ts";
 import { PeerTracker } from "./peers.ts";
 import { Prober } from "./probe.ts";
@@ -19,6 +19,7 @@ const interfaces = await detectInterfaces(runner, config.ENGINE_SUBNET);
 logger.info(interfaces, "interfaces detected");
 
 const geo = new GeoIpDatabase(config.GEOIP_DB, logger);
+const peerGeo = new StaticGeoLookup(StaticGeoLookup.parse(config.GEOIP_STATIC), geo);
 const tunnels = new TunnelManager(
   runner,
   config.WIREGUARD_DIR,
@@ -31,7 +32,7 @@ const gateway = new Gateway({
   router: new Router(runner, config.ENGINE_SUBNET, (pathId) => tunnels.byPath(pathId), logger),
   peers: new PeerTracker(
     runner,
-    geo,
+    peerGeo,
     config.ENGINE_SUBNET,
     config.IGNORED_PEER_PORTS.map((port) => Number.parseInt(port, 10)),
   ),

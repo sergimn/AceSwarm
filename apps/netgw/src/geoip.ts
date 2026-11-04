@@ -10,6 +10,36 @@ export interface GeoLookup {
   country(ip: string): string | undefined;
 }
 
+/**
+ * Fixed address-to-country entries, consulted before the database. Used by the end-to-end tests
+ * (whose fake peers live in documentation ranges no database knows) and for private peers.
+ */
+export class StaticGeoLookup implements GeoLookup {
+  private readonly entries: ReadonlyMap<string, string>;
+  private readonly fallback: GeoLookup;
+
+  constructor(entries: ReadonlyMap<string, string>, fallback: GeoLookup) {
+    this.entries = entries;
+    this.fallback = fallback;
+  }
+
+  /** Parses `ip=CC` items, ignoring malformed ones. */
+  static parse(items: readonly string[]): Map<string, string> {
+    const entries = new Map<string, string>();
+    for (const item of items) {
+      const match = /^([\d.]+)=([a-z]{2})$/i.exec(item.trim());
+      if (match?.[1] !== undefined && match[2] !== undefined) {
+        entries.set(match[1], match[2].toUpperCase());
+      }
+    }
+    return entries;
+  }
+
+  country(ip: string): string | undefined {
+    return this.entries.get(ip) ?? this.fallback.country(ip);
+  }
+}
+
 const MAX_AGE_MS = 35 * 24 * 60 * 60 * 1000;
 
 function monthUrl(template: string, date: Date): string {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/exec.ts";
-import type { GeoLookup } from "../src/geoip.ts";
+import { StaticGeoLookup, type GeoLookup } from "../src/geoip.ts";
 import { parseConntrack, PeerTracker } from "../src/peers.ts";
 
 const ENGINE = "172.31.250.130";
@@ -68,5 +68,16 @@ describe("PeerTracker", () => {
     const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [], () => 0);
     tracker.update(parseConntrack(udp("1.1.1.1", 0).replaceAll(/ packets=\d+ bytes=\d+/g, "")));
     expect(tracker.get(ENGINE)).toMatchObject({ connected: 1, active: null, countries: [{ code: "AU", count: 1 }] });
+  });
+});
+
+describe("StaticGeoLookup", () => {
+  it("answers fixed entries first and falls back to the database", () => {
+    const entries = StaticGeoLookup.parse(["198.51.100.10=es", "bad", "203.0.113.10 = SE", "1.2.3.4=USA"]);
+    expect([...entries]).toEqual([["198.51.100.10", "ES"]]);
+    const lookup = new StaticGeoLookup(entries, geo);
+    expect(lookup.country("198.51.100.10")).toBe("ES");
+    expect(lookup.country("1.1.1.1")).toBe("AU");
+    expect(lookup.country("5.5.5.5")).toBeUndefined();
   });
 });
