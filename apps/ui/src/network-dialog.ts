@@ -87,13 +87,14 @@ export class NetworkDialog {
       this.update(snapshot);
     }
     this.errors.hidden = true;
-    this.dialog.showModal();
+    // Open the layer first: it remembers the focused element, and showModal() moves focus.
     this.navigator.open({
       root: this.dialog,
       close: () => {
         this.dialog.close();
       },
     });
+    this.dialog.showModal();
     this.navigator.focusFirst(this.dialog);
     void this.loadProfiles();
   }

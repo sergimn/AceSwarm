@@ -52,13 +52,14 @@ export class AddStreamDialog {
   open(): void {
     this.form.reset();
     this.error.hidden = true;
-    this.dialog.showModal();
+    // Open the layer first: it remembers the focused element, and showModal() moves focus.
     this.navigator.open({
       root: this.dialog,
       close: () => {
         this.dialog.close();
       },
     });
+    this.dialog.showModal();
     this.aceId.focus();
   }
 
