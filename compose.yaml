@@ -224,7 +224,8 @@ services:
       - backend
       - docker-logs
 
-  # Read-only Docker API for Alloy: container list and logs, nothing else.
+  # Read-only Docker API for Alloy: containers, their logs and the network list (Alloy's Docker
+  # discovery reads networks to label targets and finds nothing without it). No POST.
   docker-proxy-logs:
     <<: *hardening
     profiles: [logs]
@@ -232,6 +233,7 @@ services:
     environment:
       DISABLE_IPV6: 1
       CONTAINERS: 1
+      NETWORKS: 1
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
     tmpfs:
