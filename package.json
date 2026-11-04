@@ -1,0 +1,42 @@
+{
+  "name": "aceswarm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Acestream aggregator with stream health monitoring, network stabilization and a TV-friendly web UI",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=26.13.0"
+  },
+  "packageManager": "npm@11.20.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/ui/tsconfig.json",
+    "lint": "eslint --max-warnings=0 .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "build:ui": "npm run build --workspace @aceswarm/ui",
+    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "@vitest/coverage-v8": "5.1.0",
+    "eslint": "10.14.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-unicorn": "79.0.0",
+    "globals": "17.14.0",
+    "jiti": "2.7.0",
+    "prettier": "3.9.10",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.1.0"
+  }
+}

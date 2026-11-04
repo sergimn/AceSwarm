@@ -1,0 +1,98 @@
+# End-to-end test stack: the real services, with the mock engine instead of Acestream, fake peers
+# on a fake internet and a throwaway WireGuard server. e2e/run.sh builds the images and runs it.
+#
+#   egress (198.51.100.0/24)  netgw, peer-a, peer-b, wg-server   <- the "direct" path reaches these
+#   vpn (203.0.113.0/24)      wg-server, vpn-peer                <- only reachable through WireGuard
+
+services:
+  controller:
+    image: aceswarm-controller:e2e
+    environment:
+      ENGINE_IMAGE: aceswarm-mock-engine:e2e
+      ENGINE_MEMORY_MB: "256"
+      ENGINE_DNS: ""
+      ENGINE_READY_TIMEOUT_SECONDS: "30"
+      STARTUP_GRACE_SECONDS: "20"
+      STALL_SECONDS: "8"
+      TICK_MS: "1000"
+      RECOVERY_BASE_DELAY_SECONDS: "1"
+      RECOVERY_MAX_DELAY_SECONDS: "4"
+      PATH_MIN_DWELL_SECONDS: "0"
+    ports: !override
+      - ${E2E_HTTP_PORT:-18080}:8080
+
+  transcoder:
+    image: aceswarm-transcoder:e2e
+    environment:
+      PREVIEW_FPS: "10"
+      PREVIEW_HEIGHT: "180"
+
+  netgw:
+    image: aceswarm-netgw:e2e
+    # Lets the gateway fall back to wireguard-go on hosts without the kernel module.
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      GEOIP_DOWNLOAD: "false"
+      PROBE_TARGETS: 198.51.100.10
+      PROBE_INTERVAL_SECONDS: "3"
+      PEERS_INTERVAL_SECONDS: "2"
+      HANDSHAKE_MAX_AGE_SECONDS: "60"
+    networks:
+      egress:
+        ipv4_address: 198.51.100.2
+
+  peer-a:
+    image: aceswarm-mock-engine:e2e
+    environment:
+      MOCK_MODE: peer
+    networks:
+      egress:
+        ipv4_address: 198.51.100.10
+
+  peer-b:
+    image: aceswarm-mock-engine:e2e
+    environment:
+      MOCK_MODE: peer
+    networks:
+      egress:
+        ipv4_address: 198.51.100.11
+
+  vpn-peer:
+    image: aceswarm-mock-engine:e2e
+    environment:
+      MOCK_MODE: peer
+    networks:
+      vpn:
+        ipv4_address: 203.0.113.10
+
+  # Throwaway WireGuard server. It writes the client profile the tests upload to /state.
+  wg-server:
+    image: aceswarm-wg-server:e2e
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: 1
+    volumes:
+      - wg-state:/state
+    networks:
+      egress:
+        ipv4_address: 198.51.100.20
+      vpn:
+        ipv4_address: 203.0.113.2
+
+networks:
+  egress:
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+          gateway: 198.51.100.1
+  vpn:
+    internal: true
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+
+volumes:
+  wg-state: {}

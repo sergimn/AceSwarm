@@ -1,0 +1,70 @@
+// Ships the logs of this stack's containers (services and the engines the controller creates) to
+// Loki. Docker access goes through a read-only socket proxy.
+
+discovery.docker "containers" {
+  host             = "tcp://docker-proxy-logs:2375"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  // Keep the compose services of this stack and the engines it created.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project", "__meta_docker_container_label_aceswarm_stack"]
+    separator     = ";"
+    regex         = sys.env("ACESWARM_STACK_NAME") + ";.*|.*;" + sys.env("ACESWARM_STACK_NAME")
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_aceswarm_role"]
+    target_label  = "role"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_aceswarm_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "tcp://docker-proxy-logs:2375"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.process.levels.receiver]
+}
+
+// The services log JSON; promote the level so dashboards can filter warnings and errors cheaply.
+loki.process "levels" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.match {
+    selector = "{role!=\"engine\"}"
+
+    stage.json {
+      expressions = { level = "level" }
+    }
+
+    stage.labels {
+      values = { level = "" }
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

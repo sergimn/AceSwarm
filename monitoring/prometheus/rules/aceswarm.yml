@@ -1,0 +1,48 @@
+groups:
+  - name: aceswarm-stability
+    interval: 1m
+    rules:
+      # Share of time each stream delivered new frames, kept for long-term stability history.
+      - record: aceswarm:stream_up:ratio_1h
+        expr: avg_over_time(aceswarm_stream_up[1h])
+      - record: aceswarm:stream_recoveries:increase_1h
+        expr: sum by (stream, action) (increase(aceswarm_stream_recoveries_total[1h]))
+      - record: aceswarm:path_up:ratio_1h
+        expr: avg_over_time(aceswarm_path_up[1h])
+
+  - name: aceswarm-alerts
+    rules:
+      - alert: AceSwarmStreamDown
+        expr: aceswarm_stream_up == 0 and on (stream) (aceswarm_stream_info{enabled="true"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stream {{ $labels.stream }} has delivered no new frames for 5 minutes"
+      - alert: AceSwarmStreamFlapping
+        expr: sum by (stream) (increase(aceswarm_stream_recoveries_total[1h])) > 6
+        labels:
+          severity: info
+        annotations:
+          summary: "Stream {{ $labels.stream }} needed more than 6 recoveries in the last hour"
+      - alert: AceSwarmPathDown
+        expr: aceswarm_path_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Network path {{ $labels.path }} is down"
+      - alert: AceSwarmNoPathUp
+        expr: sum(aceswarm_path_up) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No network path is up: every stream is offline"
+      - alert: AceSwarmServiceDown
+        expr: up{job="aceswarm"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} is not answering metrics scrapes"
