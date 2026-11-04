@@ -88,9 +88,11 @@ export class Router {
 
   /** Re-applies every assignment after tunnels changed; engines on removed paths go direct. */
   async reapply(): Promise<void> {
-    for (const [ip, path] of this.assignments) {
+    // Iterate over a copy: assign() writes to the map, and a Map iterator also visits keys that
+    // are re-inserted while it runs, which would never end.
+    const current = [...this.assignments];
+    for (const [ip, path] of current) {
       const target = path === DIRECT_PATH || this.tunnel(path) !== undefined ? path : DIRECT_PATH;
-      this.assignments.delete(ip);
       await this.assign(ip, target);
     }
   }
