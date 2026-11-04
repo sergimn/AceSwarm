@@ -20,7 +20,10 @@ COPY --chmod=0755 engine/start-arm64.sh /usr/local/lib/aceswarm/start-engine
 
 # hadolint ignore=DL3006
 FROM engine-${TARGETARCH}
-USER root
+# The entrypoint needs root to point the default route at the gateway; it then drops to an
+# unprivileged user without capabilities before the engine starts.
+# hadolint ignore=DL3002
+USER 0:0
 COPY --from=busybox /bin/busybox /usr/local/lib/aceswarm/busybox
 COPY --chmod=0755 engine/entrypoint.sh /usr/local/lib/aceswarm/entrypoint.sh
 ENV ACESWARM_ENGINE_USER=1000:1000 \

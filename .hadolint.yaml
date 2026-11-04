@@ -1,0 +1,5 @@
+failure-threshold: style
+ignored:
+  # Alpine removes old package versions, so pinned apk versions break rebuilds; base images are
+  # pinned by digest and Renovate updates them.
+  - DL3018

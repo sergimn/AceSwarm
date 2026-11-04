@@ -1,0 +1,10 @@
+config:
+  default: true
+  # Prettier owns line wrapping.
+  MD013: false
+  MD033:
+    allowed_elements: [details, summary, br, img]
+ignores:
+  - "**/node_modules/**"
+  - playwright-report/**
+  - test-results/**

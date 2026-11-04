@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests", "helpers:pinGitHubActionDigests", ":pinDevDependencies"],
+  "minimumReleaseAge": "30 days",
+  "internalChecksFilter": "strict",
+  "prConcurrentLimit": 10,
+  "pre-commit": {
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "typescript-eslint supports TypeScript < 6.1; lift this once it supports newer versions.",
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "<6.1.0"
+    },
+    {
+      "description": "Keep Node.js in step everywhere: .node-version, package.json engines and the runtime image.",
+      "matchPackageNames": ["node", "docker.io/library/node"],
+      "groupName": "Node.js"
+    },
+    {
+      "description": "Monitoring images are optional and change together.",
+      "matchPackageNames": [
+        "docker.io/prom/prometheus",
+        "docker.io/grafana/loki",
+        "docker.io/grafana/alloy",
+        "docker.io/grafana/grafana"
+      ],
+      "groupName": "monitoring images"
+    },
+    {
+      "description": "Engine base images: an update changes the Acestream engine, so review it on its own.",
+      "matchPackageNames": ["ghcr.io/martinbjeldbak/acestream-http-proxy", "docker.io/jopsis/acestream"],
+      "groupName": "Acestream engine images",
+      "automerge": false
+    }
+  ]
+}

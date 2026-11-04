@@ -70,7 +70,8 @@ COPY apps/controller/src apps/controller/src
 COPY --from=ui /app/apps/controller/public apps/controller/public
 COPY --from=manifests --chown=node:node /out/data /data
 WORKDIR /app/apps/controller
-USER node
+# The node image's "node" user.
+USER 1000:1000
 EXPOSE 8080
 CMD ["node", "src/main.ts"]
 
@@ -81,7 +82,8 @@ COPY apps/transcoder/package.json apps/transcoder/
 COPY apps/transcoder/src apps/transcoder/src
 COPY --from=manifests --chown=node:node /out/hls /hls
 WORKDIR /app/apps/transcoder
-USER node
+# The node image's "node" user.
+USER 1000:1000
 EXPOSE 8081
 CMD ["node", "src/main.ts"]
 
