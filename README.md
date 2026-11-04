@@ -122,7 +122,9 @@ flowchart LR
   - Rootless Docker or rootless Podman limits what that could reach.
   - A proxy that filters container settings is a possible follow-up.
 - **Container privileges.** The controller and transcoder run read-only, as non-root, with no capabilities. The gateway keeps only `NET_ADMIN`, `NET_RAW` and `DAC_READ_SEARCH`.
-- **Engines are untrusted.** They can't change their routes, and the gateway, controller and transcoder refuse their requests.
+- **Engines are untrusted.** They can't change their routes, and they can't reach the gateway, controller or transcoder directly.
+  - Like any device on your network, an engine can still reach the host's published ports (the UI and, when enabled, the monitoring ports), which have no login.
+  - Blocking engine-to-host traffic with a host firewall rule is a possible follow-up.
 - **No authentication.** Keep the UI on a trusted network. The same goes for the monitoring ports: Prometheus, Loki and Grafana are published on every interface, and Grafana's admin password comes from `GRAFANA_ADMIN_PASSWORD`.
 
 ## Development
