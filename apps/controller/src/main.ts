@@ -4,6 +4,7 @@ import { AcestreamClient } from "./acestream.ts";
 import { NetgwClient, TranscoderClient } from "./clients.ts";
 import { loadConfig } from "./config.ts";
 import { DockerClient } from "./docker.ts";
+import { EngineResourceMonitor } from "./engine-resources.ts";
 import { EngineManager } from "./engines.ts";
 import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -36,8 +37,23 @@ const engines = new EngineManager(
   logger,
 );
 
+const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
+  docker,
+  {
+    stack: config.STACK_NAME,
+    onOomKill: (stream) => {
+      metrics.engineOomKills.inc({ stream });
+    },
+  },
+  logger,
+);
+
 // The metrics read the orchestrator lazily at scrape time, after it exists.
-const metrics: ControllerMetrics = new ControllerMetrics(service.registry, () => orchestrator.snapshot());
+const metrics: ControllerMetrics = new ControllerMetrics(
+  service.registry,
+  () => orchestrator.snapshot(),
+  () => engineResources.latest(),
+);
 const orchestrator: Orchestrator = new Orchestrator({
   store: new StreamStore(config.DATA_DIR),
   wireguard: new WireguardStore(config.DATA_DIR),
@@ -62,5 +78,15 @@ const orchestrator: Orchestrator = new Orchestrator({
 
 await registerRoutes(service, orchestrator, { uiDir: config.UI_DIR, transcoderUrl: config.TRANSCODER_URL });
 await orchestrator.start();
-await runService(service, config.PORT, logger, () => orchestrator.stop());
+const sampleEngines = (): void => {
+  void engineResources.sample().catch((error: unknown) => {
+    logger.debug({ err: error }, "could not sample engine resources");
+  });
+};
+sampleEngines();
+const engineResourceTimer = setInterval(sampleEngines, config.ENGINE_STATS_SECONDS * 1000);
+await runService(service, config.PORT, logger, async () => {
+  clearInterval(engineResourceTimer);
+  await orchestrator.stop();
+});
 logger.info({ port: config.PORT, strategy: config.PATH_STRATEGY }, "controller ready");

@@ -39,6 +39,19 @@ groups:
           severity: critical
         annotations:
           summary: "No network path is up: every stream is offline"
+      - alert: AceSwarmEngineMemoryHigh
+        expr: aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Engine {{ $labels.engine }} uses {{ $value | humanizePercentage }} of its memory limit; raise ENGINE_MEMORY_MB"
+      - alert: AceSwarmEngineOomKilled
+        expr: increase(aceswarm_engine_oom_kills_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "An engine of stream {{ $labels.stream }} was killed for running out of memory; raise ENGINE_MEMORY_MB"
       - alert: AceSwarmServiceDown
         expr: up{job="aceswarm"} == 0
         for: 2m

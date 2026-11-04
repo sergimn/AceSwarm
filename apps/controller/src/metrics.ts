@@ -1,5 +1,6 @@
 import { STREAM_STATES, type PathStatus, type StreamView } from "@aceswarm/shared/api-types";
 import { Counter, Gauge, type Registry } from "@prometheus-io/client";
+import type { EngineMemory } from "./engine-resources.ts";
 
 /**
  * Prometheus metrics of the controller. Gauges are filled at scrape time from the current
@@ -9,8 +10,13 @@ export class ControllerMetrics {
   readonly recoveries: Counter<"stream" | "action">;
   readonly pathSwitches: Counter<"stream" | "from" | "to">;
   readonly engineStarts: Counter<"stream">;
+  readonly engineOomKills: Counter<"stream">;
 
-  constructor(registry: Registry, snapshot: () => { streams: StreamView[]; paths: PathStatus[] }) {
+  constructor(
+    registry: Registry,
+    snapshot: () => { streams: StreamView[]; paths: PathStatus[] },
+    engineMemory: () => EngineMemory[] = () => [],
+  ) {
     const registers = [registry];
     this.recoveries = new Counter({
       name: "aceswarm_stream_recoveries_total",
@@ -27,6 +33,12 @@ export class ControllerMetrics {
     this.engineStarts = new Counter({
       name: "aceswarm_engine_starts_total",
       help: "Engine containers created per stream",
+      labelNames: ["stream"],
+      registers,
+    });
+    this.engineOomKills = new Counter({
+      name: "aceswarm_engine_oom_kills_total",
+      help: "Engines killed for exceeding their memory limit (ENGINE_MEMORY_MB)",
       labelNames: ["stream"],
       registers,
     });
@@ -80,6 +92,19 @@ export class ControllerMetrics {
       registers,
     });
 
+    const memory = new Gauge({
+      name: "aceswarm_engine_memory_bytes",
+      help: "Memory used by each engine container, without reclaimable page cache",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
+    const memoryLimit = new Gauge({
+      name: "aceswarm_engine_memory_limit_bytes",
+      help: "Memory limit of each engine container",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
+
     // prom-client calls collect() on every scrape; one gauge refreshes all of them.
     const total: Gauge = new Gauge({
       name: "aceswarm_streams",
@@ -87,7 +112,7 @@ export class ControllerMetrics {
       registers,
       collect: () => {
         const current = snapshot();
-        for (const gauge of [info, state, up, frameAge, peers, countries, speed, path]) {
+        for (const gauge of [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -119,6 +144,11 @@ export class ControllerMetrics {
           if (stream.path !== null) {
             path.set({ ...labels, path: stream.path }, 1);
           }
+        }
+        for (const engine of engineMemory()) {
+          const labels = { stream: engine.stream, engine: engine.engine };
+          memory.set(labels, engine.usedBytes);
+          memoryLimit.set(labels, engine.limitBytes);
         }
         total.set(current.streams.length);
       },

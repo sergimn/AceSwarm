@@ -12,9 +12,28 @@ export interface ContainerSummary {
 export interface ContainerDetails {
   Id: string;
   Name: string;
-  State: { Running: boolean; Status: string; ExitCode: number; StartedAt: string };
+  State: {
+    Running: boolean;
+    Status: string;
+    ExitCode: number;
+    StartedAt: string;
+    FinishedAt: string;
+    /** Whether the last exit was a kill by the kernel for exceeding the memory limit. */
+    OOMKilled: boolean;
+  };
   Config: { Labels: Record<string, string> };
   NetworkSettings: { Networks: Record<string, { IPAddress: string } | undefined> };
+}
+
+/** Memory of a running container, as `docker stats` reports it. */
+export interface MemoryUsage {
+  usedBytes: number;
+  limitBytes: number;
+}
+
+/** Subset of `GET /containers/{id}/stats`. */
+interface RawStats {
+  memory_stats?: { usage?: number; limit?: number; stats?: Record<string, number | undefined> };
 }
 
 export interface ContainerSpec {
@@ -65,6 +84,28 @@ export class DockerClient {
       return undefined;
     }
     return (await response.json()) as ContainerDetails;
+  }
+
+  /** Current memory use and limit; undefined when the container is gone or not running. */
+  async memoryUsage(id: string): Promise<MemoryUsage | undefined> {
+    const response = await this.call(
+      "GET",
+      `/containers/${encodeURIComponent(id)}/stats?stream=false&one-shot=true`,
+      undefined,
+      [200, 404, 409],
+    );
+    if (response.status !== 200) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    const memory = ((await response.json()) as RawStats).memory_stats;
+    if (memory?.usage === undefined || memory.limit === undefined) {
+      return undefined;
+    }
+    // Like `docker stats`: page cache the kernel can reclaim does not count as used (Docker
+    // reports it as inactive_file on cgroup v2 and total_inactive_file on v1; Podman leaves it out).
+    const reclaimable = memory.stats?.["inactive_file"] ?? memory.stats?.["total_inactive_file"] ?? 0;
+    return { usedBytes: Math.max(0, memory.usage - reclaimable), limitBytes: memory.limit };
   }
 
   async createContainer(name: string, spec: ContainerSpec): Promise<string> {

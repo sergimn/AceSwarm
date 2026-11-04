@@ -20,7 +20,9 @@ const schema = z.object({
   /** Address of the network gateway on the engines network; engines use it as default route. */
   ENGINE_GATEWAY_IP: z.ipv4().default("172.31.250.2"),
   ENGINE_HTTP_PORT: envInt(6878),
-  ENGINE_MEMORY_MB: envInt(768),
+  ENGINE_MEMORY_MB: envInt(2048),
+  /** How often engine memory is sampled for the metrics. */
+  ENGINE_STATS_SECONDS: envInt(15),
   ENGINE_EXTRA_FLAGS: z.string().default(""),
   /** DNS servers for engines, reached through the gateway like the rest of their traffic. */
   ENGINE_DNS: z.string().default("1.1.1.1,9.9.9.9"),

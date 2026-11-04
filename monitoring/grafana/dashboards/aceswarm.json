@@ -676,6 +676,210 @@
     },
     {
       "type": "row",
+      "title": "Engines",
+      "id": 27,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine memory",
+      "id": 28,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Memory used by each stream's engine. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB if it gets close.",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "max(aceswarm_engine_memory_limit_bytes{stream=~\"$stream\"})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Limit",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Limit"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine memory, share of the limit",
+      "id": 29,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 10,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "stat",
+      "title": "Out-of-memory kills in range",
+      "id": 30,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(aceswarm_engine_oom_kills_total[$__range])) or vector(0)",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "row",
       "title": "Network paths",
       "id": 17,
       "collapsed": false,
@@ -683,7 +887,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 56
       },
       "panels": []
     },
@@ -699,7 +903,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 57
       },
       "targets": [
         {
@@ -767,7 +971,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 54
+        "y": 63
       },
       "targets": [
         {
@@ -802,7 +1006,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 54
+        "y": 63
       },
       "targets": [
         {
@@ -837,7 +1041,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 54
+        "y": 63
       },
       "targets": [
         {
@@ -874,7 +1078,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 71
       },
       "targets": [
         {
@@ -915,7 +1119,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 71
       },
       "targets": [
         {
@@ -951,7 +1155,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 79
       },
       "panels": []
     },
@@ -967,7 +1171,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 80
       },
       "targets": [
         {
@@ -1001,7 +1205,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 90
       },
       "targets": [
         {
