@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Ace Swarm</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <nav class="rail" aria-label="Actions">
+        <div class="brand" aria-hidden="true">
+          <svg viewBox="0 0 32 32">
+            <path
+              d="M16 3 4 10v12l12 7 12-7V10z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linejoin="round"
+            />
+            <circle cx="16" cy="16" r="4" fill="currentColor" />
+          </svg>
+        </div>
+        <button class="rail-button" type="button" data-action="add" title="Add a stream">
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          <span>Add</span>
+        </button>
+        <button class="rail-button" type="button" data-action="streams" title="Manage streams">
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+          </svg>
+          <span>Streams</span>
+        </button>
+        <button class="rail-button" type="button" data-action="network" title="Network paths and WireGuard profiles">
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 3 4 6v6c0 5 3.5 8.5 8 9 4.5-.5 8-4 8-9V6z" />
+            <path d="m9 12 2 2 4-4" />
+          </svg>
+          <span>Network</span>
+        </button>
+      </nav>
+      <main class="content">
+        <header class="topbar">
+          <h1>Ace Swarm</h1>
+          <p id="summary" class="summary"></p>
+          <span id="connection" class="connection" data-status="connecting">Connecting…</span>
+        </header>
+        <section id="grid" class="grid" aria-label="Streams"></section>
+        <div id="empty" class="empty" hidden>
+          <h2>No streams yet</h2>
+          <p>Add an Acestream ID to start watching. Streams you add are kept across restarts.</p>
+          <button class="button primary" type="button" data-action="empty-add">Add a stream</button>
+        </div>
+        <footer class="footer">
+          Peer locations: <a href="https://db-ip.com" rel="noopener">IP Geolocation by DB-IP</a> (<a
+            href="https://creativecommons.org/licenses/by/4.0/"
+            rel="noopener"
+            >CC BY 4.0</a
+          >)
+        </footer>
+      </main>
+    </div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

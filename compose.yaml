@@ -1,0 +1,312 @@
+# Ace Swarm: Acestream aggregator with stream health monitoring and network path failover.
+#
+#   cp .env.example .env && docker compose up -d
+#
+# Works with rootful and rootless Docker (set DOCKER_SOCKET for rootless). Monitoring is optional:
+# COMPOSE_PROFILES in .env picks `metrics` (Prometheus), `logs` (Alloy + Loki) and `grafana`.
+
+name: aceswarm
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  logging: *logging
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # Web UI, REST API and orchestration. Creates one engine container per stream on demand.
+  controller:
+    <<: *hardening
+    image: ${ACESWARM_IMAGE_PREFIX:-ghcr.io/sergimn/aceswarm}-controller:${ACESWARM_VERSION:-latest}
+    build:
+      context: .
+      target: controller
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    cap_drop: [ALL]
+    depends_on:
+      docker-proxy:
+        condition: service_started
+      transcoder:
+        condition: service_healthy
+      netgw:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+      STACK_NAME: ${ACESWARM_STACK_NAME:-aceswarm}
+      ENGINE_IMAGE: ${ENGINE_IMAGE:-ghcr.io/sergimn/aceswarm-engine:latest}
+      ENGINE_NETWORK: ${ACESWARM_ENGINE_NETWORK:-aceswarm_engines}
+      ENGINE_GATEWAY_IP: 172.31.250.2
+      ENGINE_IP_RANGE: 172.31.250.128/25
+      ENGINE_MEMORY_MB: ${ENGINE_MEMORY_MB:-2048}
+      ENGINE_EXTRA_FLAGS: ${ENGINE_EXTRA_FLAGS:-}
+      ENGINE_DNS: ${ENGINE_DNS:-1.1.1.1,9.9.9.9}
+      PATH_STRATEGY: ${PATH_STRATEGY:-sticky-best}
+      PATH_HYSTERESIS: ${PATH_HYSTERESIS:-0.15}
+      PATH_MIN_DWELL_SECONDS: ${PATH_MIN_DWELL_SECONDS:-300}
+      STALL_SECONDS: ${STALL_SECONDS:-20}
+      STARTUP_GRACE_SECONDS: ${STARTUP_GRACE_SECONDS:-90}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - ${ACESWARM_HTTP_PORT:-8080}:8080
+    volumes:
+      - data:/data
+      - wireguard:/data/wireguard
+    tmpfs:
+      - /tmp:size=16m
+    networks:
+      - frontend
+      - backend
+      - docker-api
+      - engines
+
+  # Only the Docker API sections the controller needs. It is the only client, on an internal network.
+  docker-proxy:
+    <<: *hardening
+    image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    environment:
+      DISABLE_IPV6: 1
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 1
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    tmpfs:
+      - /run
+    networks:
+      - docker-api
+
+  # ffmpeg per stream: full-quality HLS for the player, small previews and thumbnails for the grid.
+  transcoder:
+    <<: *hardening
+    image: ${ACESWARM_IMAGE_PREFIX:-ghcr.io/sergimn/aceswarm}-transcoder:${ACESWARM_VERSION:-latest}
+    build:
+      context: .
+      target: transcoder
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    cap_drop: [ALL]
+    environment:
+      PREVIEW_MODE: ${PREVIEW_MODE:-video}
+      PREVIEW_HEIGHT: ${PREVIEW_HEIGHT:-360}
+      PREVIEW_FPS: ${PREVIEW_FPS:-15}
+      PREVIEW_BITRATE_KBPS: ${PREVIEW_BITRATE_KBPS:-600}
+      FULL_TRANSCODE_MAX_HEIGHT: ${FULL_TRANSCODE_MAX_HEIGHT:-1080}
+      ENGINE_IP_RANGE: 172.31.250.128/25
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    tmpfs:
+      # Writable by the transcoder user on both Docker and Podman (Podman rejects uid=/gid= here).
+      - /hls:mode=1777,size=${HLS_TMPFS_SIZE:-512m}
+      - /tmp:size=16m
+    networks:
+      # The controller calls the API by this backend-only name. Requests from the engines network
+      # are refused.
+      backend:
+        aliases: [transcoder-api]
+      engines: {}
+
+  # Routes every engine through the direct path or a WireGuard tunnel and tracks their peers.
+  netgw:
+    <<: *hardening
+    image: ${ACESWARM_IMAGE_PREFIX:-ghcr.io/sergimn/aceswarm}-netgw:${ACESWARM_VERSION:-latest}
+    build:
+      context: .
+      target: netgw
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8082/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    cap_drop: [ALL]
+    # NET_ADMIN: tunnels, routes, iptables, conntrack. NET_RAW: ping probes. DAC_READ_SEARCH: read
+    # the WireGuard profiles, which the controller stores readable by its own user only.
+    cap_add: [NET_ADMIN, NET_RAW, DAC_READ_SEARCH]
+    # Lets the gateway fall back to wireguard-go on hosts without the WireGuard kernel module.
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: 1
+      net.ipv4.conf.all.rp_filter: 2
+      net.ipv4.conf.default.rp_filter: 2
+      net.ipv4.conf.all.src_valid_mark: 1
+      net.netfilter.nf_conntrack_acct: 1
+    environment:
+      ENGINE_SUBNET: 172.31.250.0/24
+      PROBE_TARGETS: ${PROBE_TARGETS:-1.1.1.1,9.9.9.9}
+      GEOIP_DOWNLOAD: ${GEOIP_DOWNLOAD:-true}
+      IPTABLES: ${IPTABLES:-iptables}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - wireguard:/config/wireguard:ro
+      - geoip:/var/lib/aceswarm/geoip
+    tmpfs:
+      - /run/aceswarm:mode=0700,size=1m
+      - /run/wireguard:mode=0700,size=1m
+      - /tmp:size=16m
+    networks:
+      egress: {}
+      # The controller calls the API by this backend-only name. Engines can't reach the API: it
+      # refuses the engines network, and the firewall drops new connections from it.
+      backend:
+        aliases: [netgw-api]
+      engines:
+        ipv4_address: 172.31.250.2
+
+  # Build-only service for the engine image. Engines are started on demand by the controller, so
+  # this never runs; `docker compose --profile build build` builds every image locally.
+  engine:
+    image: ${ENGINE_IMAGE:-ghcr.io/sergimn/aceswarm-engine:latest}
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    profiles: [build]
+
+  # ---- Monitoring (optional) ------------------------------------------------------------------
+
+  prometheus:
+    <<: *hardening
+    profiles: [metrics]
+    image: docker.io/prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-90d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-2GB}
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus:/prometheus
+    ports:
+      - ${PROMETHEUS_PORT:-9090}:9090
+    networks:
+      - backend
+      - frontend
+
+  loki:
+    <<: *hardening
+    profiles: [logs]
+    image: docker.io/grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    command: -config.file=/etc/loki/config.yaml -config.expand-env=true
+    environment:
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}
+    volumes:
+      - ./monitoring/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki:/loki
+    ports:
+      - ${LOKI_PORT:-3100}:3100
+    networks:
+      - backend
+      - frontend
+
+  # Ships the logs of every container in this stack (engines included) to Loki.
+  alloy:
+    <<: *hardening
+    profiles: [logs]
+    image: docker.io/grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy /etc/alloy/config.alloy
+    environment:
+      ACESWARM_STACK_NAME: ${ACESWARM_STACK_NAME:-aceswarm}
+    depends_on: [loki, docker-proxy-logs]
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy:/var/lib/alloy
+    networks:
+      - backend
+      - docker-logs
+
+  # Read-only Docker API for Alloy: containers, their logs and the network list (Alloy's Docker
+  # discovery reads networks to label targets and finds nothing without it). No POST.
+  docker-proxy-logs:
+    <<: *hardening
+    profiles: [logs]
+    image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    environment:
+      DISABLE_IPV6: 1
+      CONTAINERS: 1
+      NETWORKS: 1
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    tmpfs:
+      - /run
+    networks:
+      - docker-logs
+
+  grafana:
+    <<: *hardening
+    profiles: [grafana]
+    image: docker.io/grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - ${GRAFANA_PORT:-3000}:3000
+    networks:
+      - backend
+      - frontend
+
+networks:
+  # Published ports.
+  frontend: {}
+  # Service to service APIs and metrics.
+  backend:
+    internal: true
+  docker-api:
+    internal: true
+  docker-logs:
+    internal: true
+  # The gateway's way out (the "direct" path) and the carrier for WireGuard tunnels.
+  egress: {}
+  # Engines live here. Their entrypoint points the default route at the gateway and then drops
+  # every capability, so an engine cannot route around the gateway (or a VPN).
+  # Docker needs a normal network (it drops off-subnet traffic on internal ones). Podman needs an
+  # internal one (otherwise netavark may masquerade engine traffic before it reaches the gateway,
+  # hiding which engine sent it): set ACESWARM_ENGINES_INTERNAL=true there.
+  engines:
+    name: ${ACESWARM_ENGINE_NETWORK:-aceswarm_engines}
+    internal: ${ACESWARM_ENGINES_INTERNAL:-false}
+    # IPv6 would give engines a second default route that bypasses the gateway.
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          # Containers get addresses from ip_range, engines included, and the controller and
+          # transcoder refuse requests from it. The bridge gets .1, outside that range, because
+          # published ports can reach the controller through it.
+          ip_range: 172.31.250.128/25
+          gateway: 172.31.250.1
+
+volumes:
+  data: {}
+  wireguard: {}
+  geoip: {}
+  prometheus: {}
+  loki: {}
+  alloy: {}
+  grafana: {}

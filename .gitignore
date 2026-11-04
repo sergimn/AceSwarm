@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+apps/controller/public/
+*.tsbuildinfo
+.env
+.DS_Store
+e2e-stack.log

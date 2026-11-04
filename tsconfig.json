@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "apps/controller/src/**/*.ts",
+    "apps/controller/test/**/*.ts",
+    "apps/transcoder/src/**/*.ts",
+    "apps/transcoder/test/**/*.ts",
+    "apps/netgw/src/**/*.ts",
+    "apps/netgw/test/**/*.ts",
+    "apps/mock-engine/src/**/*.ts",
+    "apps/mock-engine/test/**/*.ts",
+    "e2e/**/*.ts",
+    "*.config.ts"
+  ]
+}

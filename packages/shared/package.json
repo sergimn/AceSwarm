@@ -1,0 +1,22 @@
+{
+  "name": "@aceswarm/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./ace-id": "./src/ace-id.ts",
+    "./api-types": "./src/api-types.ts",
+    "./env": "./src/env.ts",
+    "./http": "./src/http.ts",
+    "./ipv4": "./src/ipv4.ts",
+    "./logger": "./src/logger.ts",
+    "./service": "./src/service.ts",
+    "./wireguard": "./src/wireguard.ts"
+  },
+  "dependencies": {
+    "@prometheus-io/client": "0.16.1",
+    "fastify": "5.12.8",
+    "pino": "10.4.0",
+    "zod": "4.6.7"
+  }
+}
