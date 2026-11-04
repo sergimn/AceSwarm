@@ -19,6 +19,12 @@ const schema = z.object({
   ENGINE_NETWORK: z.string().default("aceswarm_engines"),
   /** Address of the network gateway on the engines network; engines use it as default route. */
   ENGINE_GATEWAY_IP: z.ipv4().default("172.31.250.2"),
+  /**
+   * Addresses Docker gives containers on the engines network (its ip_range), engines included.
+   * Requests from them are refused: engines run untrusted P2P software. The network's gateway
+   * address is outside the range, because published ports can arrive through it.
+   */
+  ENGINE_IP_RANGE: z.cidrv4().default("172.31.250.128/25"),
   ENGINE_HTTP_PORT: envInt(6878),
   ENGINE_MEMORY_MB: envInt(2048),
   /** How often engine memory is sampled for the metrics. */
@@ -27,8 +33,9 @@ const schema = z.object({
   /** DNS servers for engines, reached through the gateway like the rest of their traffic. */
   ENGINE_DNS: z.string().default("1.1.1.1,9.9.9.9"),
   ENGINE_READY_TIMEOUT_SECONDS: envInt(90),
-  TRANSCODER_URL: z.string().default("http://transcoder:8081"),
-  NETGW_URL: z.string().default("http://netgw:8082"),
+  /** Names that exist only on the backend network, so these calls never cross the engines network. */
+  TRANSCODER_URL: z.string().default("http://transcoder-api:8081"),
+  NETGW_URL: z.string().default("http://netgw-api:8082"),
   PATH_STRATEGY: z.enum(["sticky-best", "round-robin"]).default("sticky-best"),
   /** Minimum score advantage a new path needs over the current one before a stream moves. */
   PATH_HYSTERESIS: z.coerce.number().min(0).max(1).default(0.15),

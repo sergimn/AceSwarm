@@ -55,6 +55,7 @@ let ready = false;
 const service = createService({
   name: "netgw",
   logger,
+  blockedClients: [config.ENGINE_SUBNET],
   health: () => (ready ? undefined : "starting"),
 });
 registerMetrics(service, gateway);

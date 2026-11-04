@@ -48,6 +48,7 @@ services:
       ENGINE_IMAGE: ${ENGINE_IMAGE:-ghcr.io/sergimn/aceswarm-engine:latest}
       ENGINE_NETWORK: ${ACESWARM_ENGINE_NETWORK:-aceswarm_engines}
       ENGINE_GATEWAY_IP: 172.31.250.2
+      ENGINE_IP_RANGE: 172.31.250.128/25
       ENGINE_MEMORY_MB: ${ENGINE_MEMORY_MB:-2048}
       ENGINE_EXTRA_FLAGS: ${ENGINE_EXTRA_FLAGS:-}
       ENGINE_DNS: ${ENGINE_DNS:-1.1.1.1,9.9.9.9}
@@ -110,14 +111,18 @@ services:
       PREVIEW_FPS: ${PREVIEW_FPS:-15}
       PREVIEW_BITRATE_KBPS: ${PREVIEW_BITRATE_KBPS:-600}
       FULL_TRANSCODE_MAX_HEIGHT: ${FULL_TRANSCODE_MAX_HEIGHT:-1080}
+      ENGINE_IP_RANGE: 172.31.250.128/25
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs:
       # Writable by the transcoder user on both Docker and Podman (Podman rejects uid=/gid= here).
       - /hls:mode=1777,size=${HLS_TMPFS_SIZE:-512m}
       - /tmp:size=16m
     networks:
-      - backend
-      - engines
+      # The controller calls the API by this backend-only name. Requests from the engines network
+      # are refused.
+      backend:
+        aliases: [transcoder-api]
+      engines: {}
 
   # Routes every engine through the direct path or a WireGuard tunnel and tracks their peers.
   netgw:
@@ -137,6 +142,9 @@ services:
     # NET_ADMIN: tunnels, routes, iptables, conntrack. NET_RAW: ping probes. DAC_READ_SEARCH: read
     # the WireGuard profiles, which the controller stores readable by its own user only.
     cap_add: [NET_ADMIN, NET_RAW, DAC_READ_SEARCH]
+    # Lets the gateway fall back to wireguard-go on hosts without the WireGuard kernel module.
+    devices:
+      - /dev/net/tun:/dev/net/tun
     sysctls:
       net.ipv4.ip_forward: 1
       net.ipv4.conf.all.rp_filter: 2
@@ -158,7 +166,10 @@ services:
       - /tmp:size=16m
     networks:
       egress: {}
-      backend: {}
+      # The controller calls the API by this backend-only name. Engines can't reach the API: it
+      # refuses the engines network, and the firewall drops new connections from it.
+      backend:
+        aliases: [netgw-api]
       engines:
         ipv4_address: 172.31.250.2
 
@@ -280,10 +291,16 @@ networks:
   engines:
     name: ${ACESWARM_ENGINE_NETWORK:-aceswarm_engines}
     internal: ${ACESWARM_ENGINES_INTERNAL:-false}
+    # IPv6 would give engines a second default route that bypasses the gateway.
+    enable_ipv6: false
     ipam:
       config:
         - subnet: 172.31.250.0/24
+          # Containers get addresses from ip_range, engines included, and the controller and
+          # transcoder refuse requests from it. The bridge gets .1, outside that range, because
+          # published ports can reach the controller through it.
           ip_range: 172.31.250.128/25
+          gateway: 172.31.250.1
 
 volumes:
   data: {}

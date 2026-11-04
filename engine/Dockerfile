@@ -4,7 +4,7 @@
 #
 #  - linux/amd64: the official Linux build (3.2.11), packaged by martinbjeldbak/acestream-http-proxy.
 #  - linux/arm64: the Android build (3.2.17) wrapped for Linux by jopsis/acestream. On a Raspberry Pi
-#    it needs a kernel with 4 KB pages (see docs/raspberry-pi.md).
+#    it needs a kernel with 4 KB pages (see the Raspberry Pi section of the README).
 #
 # Both variants share one entrypoint: it points the default route at the AceSwarm network gateway,
 # then drops root and every capability before the engine starts. Nothing here runs at build time,

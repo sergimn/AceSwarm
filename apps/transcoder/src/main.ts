@@ -5,7 +5,7 @@ import { PipelineManager, registerRoutes } from "./server.ts";
 
 const config = loadConfig();
 const logger = createLogger("transcoder");
-const service = createService({ name: "transcoder", logger });
+const service = createService({ name: "transcoder", logger, blockedClients: [config.ENGINE_IP_RANGE] });
 
 const manager = new PipelineManager(
   service,

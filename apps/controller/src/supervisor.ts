@@ -15,6 +15,7 @@ import { EngineError, type AcestreamClient, type EngineSession, type EngineStats
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { EngineHandle, EngineManager } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
+import { hlsUrls } from "./hls-urls.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import { initialPath, rememberHealth, switchTarget, type PathMemory } from "./path-selector.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryState } from "./recovery.ts";
@@ -259,6 +260,7 @@ export class StreamSupervisor {
       } else {
         this.engine = await this.deps.engines.revive(newest);
       }
+      await this.forgetOtherEngines(this.engine);
       await this.assignStartPath(this.engine);
       this.setState("starting", "opening stream");
       await this.startPlayback(this.engine);
@@ -349,15 +351,17 @@ export class StreamSupervisor {
   }
 
   private async recover(reason: string): Promise<void> {
-    // A dead path cannot be fixed by restarting things locally: leave it right away.
-    if (this.currentPathDown() && this.canSwitchPath()) {
-      await this.runAction("switch-path", `${reason}; path ${this.stream.path ?? "?"} is down`);
-      return;
-    }
     const decision = nextRecovery(this.recovery, this.policy(), this.canSwitchPath());
     const wait = decision.notBefore - this.now();
     if (wait > 0) {
       this.setState("stalled", `${reason}; retrying in ${String(Math.ceil(wait / 1000))}s`);
+      return;
+    }
+    // A dead path cannot be fixed by restarting things locally: leave it, without waiting for the
+    // ladder to reach a path switch. The delay above still applies, so a move that keeps failing
+    // doesn't create and remove an engine on every tick.
+    if (this.currentPathDown() && this.canSwitchPath()) {
+      await this.runAction("switch-path", `${reason}; path ${this.stream.path ?? "?"} is down`);
       return;
     }
     await this.runAction(decision.action, reason);
@@ -380,9 +384,7 @@ export class StreamSupervisor {
       } else if (action === "restart-engine") {
         await this.stopSessionQuietly();
         const restarted = await this.deps.engines.restart(engine);
-        if (restarted.ip !== engine.ip) {
-          await this.unassignQuietly(engine.ip);
-        }
+        await this.forgetOtherEngines(restarted);
         this.engine = restarted;
         await this.applyPath(restarted, this.stream.path);
         await this.startPlayback(restarted);
@@ -444,6 +446,7 @@ export class StreamSupervisor {
   private async runRestartInPlace(engine: EngineHandle): Promise<void> {
     await this.stopSessionQuietly();
     const restarted = await this.deps.engines.restart(engine);
+    await this.forgetOtherEngines(restarted);
     this.engine = restarted;
     await this.applyPath(restarted, this.stream.path);
     await this.startPlayback(restarted);
@@ -541,6 +544,19 @@ export class StreamSupervisor {
     this.assigned.set(ip, path);
   }
 
+  /**
+   * Drops the gateway paths of this stream's earlier engines (one that died, or that came back on
+   * a new address). Otherwise their addresses stay in the list sent to the gateway, which would
+   * then hand them to whichever engine gets the address next.
+   */
+  private async forgetOtherEngines(current: EngineHandle): Promise<void> {
+    for (const ip of this.assigned.keys()) {
+      if (ip !== current.ip) {
+        await this.unassignQuietly(ip);
+      }
+    }
+  }
+
   private async unassignQuietly(ip: string): Promise<void> {
     this.assigned.delete(ip);
     await this.deps.netgw.unassign(ip).catch(() => undefined);
@@ -549,8 +565,8 @@ export class StreamSupervisor {
   private async teardown(): Promise<void> {
     await this.deps.transcoder.stop(this.stream.id).catch(() => undefined);
     await this.stopSessionQuietly();
-    if (this.engine !== undefined) {
-      await this.unassignQuietly(this.engine.ip);
+    for (const ip of this.assigned.keys()) {
+      await this.unassignQuietly(ip);
     }
     await this.deps.engines.removeAllFor(this.stream.id).catch((error: unknown) => {
       this.logger.warn({ err: error }, "could not remove engines");
@@ -558,14 +574,6 @@ export class StreamSupervisor {
     this.engine = undefined;
     this.setState("stopped", null);
   }
-}
-
-export function hlsUrls(streamId: string): StreamView["hls"] {
-  return {
-    preview: `/hls/${streamId}/preview/index.m3u8`,
-    full: `/hls/${streamId}/full/index.m3u8`,
-    thumbnail: `/hls/${streamId}/thumbnail.jpg`,
-  };
 }
 
 function exitedPipeline(previous: PipelineStatus | undefined, error: string): PipelineStatus | undefined {

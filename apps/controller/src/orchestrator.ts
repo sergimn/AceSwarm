@@ -6,7 +6,8 @@ import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { EngineManager } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import type { NewStream, StreamConfig, StreamPatch, StreamStore } from "./stream-store.ts";
-import { hlsUrls, StreamSupervisor, type SupervisorSettings } from "./supervisor.ts";
+import { hlsUrls } from "./hls-urls.ts";
+import { StreamSupervisor, type SupervisorSettings } from "./supervisor.ts";
 import type { WireguardStore } from "./wireguard-store.ts";
 
 export interface OrchestratorDeps {
@@ -29,6 +30,8 @@ export class Orchestrator {
   private readonly supervisors = new Map<string, StreamSupervisor>();
   private paths: PathStatus[] = [];
   private pathTimer: NodeJS.Timeout | undefined;
+  /** Set once every stored stream has a supervisor; until then the list of engine paths is incomplete. */
+  private launched = false;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -59,6 +62,7 @@ export class Orchestrator {
         this.launch(stream);
       }
     }
+    this.launched = true;
   }
 
   /** Stops supervision but leaves engines running so a restarted controller can adopt them. */
@@ -185,7 +189,7 @@ export class Orchestrator {
    */
   private async syncAssignments(): Promise<void> {
     const supervisors = this.supervisors.values().toArray();
-    if (supervisors.some((supervisor) => !supervisor.settled)) {
+    if (!this.launched || supervisors.some((supervisor) => !supervisor.settled)) {
       return;
     }
     const known = new Set(this.paths.map((path) => path.id));

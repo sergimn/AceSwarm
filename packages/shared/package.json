@@ -8,6 +8,7 @@
     "./api-types": "./src/api-types.ts",
     "./env": "./src/env.ts",
     "./http": "./src/http.ts",
+    "./ipv4": "./src/ipv4.ts",
     "./logger": "./src/logger.ts",
     "./service": "./src/service.ts",
     "./wireguard": "./src/wireguard.ts"

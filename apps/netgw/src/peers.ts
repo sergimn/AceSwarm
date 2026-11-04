@@ -1,7 +1,7 @@
 import type { CountryCount, PeerStats } from "@aceswarm/shared/api-types";
 import type { CommandRunner } from "./exec.ts";
 import type { GeoLookup } from "./geoip.ts";
-import { inSubnet, isPrivate } from "./ipv4.ts";
+import { inSubnet, isPrivate } from "@aceswarm/shared/ipv4";
 
 export interface Flow {
   protocol: string;

@@ -1,5 +1,5 @@
 import type { CommandRunner } from "./exec.ts";
-import { inSubnet } from "./ipv4.ts";
+import { inSubnet } from "@aceswarm/shared/ipv4";
 
 export interface Interfaces {
   /** Interface on the engines network (traffic to route comes in here). */
@@ -39,6 +39,7 @@ export async function detectInterfaces(runner: CommandRunner, engineSubnet: stri
 const NAT_CHAIN = "ACESWARM-NAT";
 const MSS_CHAIN = "ACESWARM-MSS";
 const FORWARD_CHAIN = "ACESWARM-FWD";
+const INPUT_CHAIN = "ACESWARM-IN";
 
 /**
  * Owns the gateway's iptables rules: forwarding permissions per engine (fail closed), masquerading
@@ -64,8 +65,24 @@ export class Firewall {
     await this.iptables(["-P", "FORWARD", "DROP"]);
   }
 
-  async init(): Promise<void> {
+  /** Sets up the chains. `enginesIface` faces the engines, which may not open connections to the gateway itself. */
+  async init(enginesIface: string): Promise<void> {
     await this.lockdown();
+    await this.ensureChain("filter", INPUT_CHAIN, "INPUT");
+    await this.iptables(["-F", INPUT_CHAIN]);
+    await this.iptables([
+      "-A",
+      INPUT_CHAIN,
+      "-i",
+      enginesIface,
+      "-m",
+      "conntrack",
+      "--ctstate",
+      "ESTABLISHED,RELATED",
+      "-j",
+      "ACCEPT",
+    ]);
+    await this.iptables(["-A", INPUT_CHAIN, "-i", enginesIface, "-j", "DROP"]);
     await this.ensureChain("filter", FORWARD_CHAIN, "FORWARD");
     await this.iptables(["-F", FORWARD_CHAIN]);
     // Replies to connections an engine was allowed to open.
@@ -105,11 +122,13 @@ export class Firewall {
     await this.iptables(["-A", FORWARD_CHAIN, ...this.engineRule(ip, iface)]);
   }
 
-  async revoke(ip: string, iface: string): Promise<void> {
-    // Delete until none is left, in case an earlier run added duplicates.
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (!(await this.iptables(["-D", FORWARD_CHAIN, ...this.engineRule(ip, iface)], true))) {
-        return;
+  /** Removes every accept rule of an engine, for any interface (and duplicates, if any). */
+  async revoke(ip: string): Promise<void> {
+    const listing = await this.runner.run(this.command, ["-w", "5", "-S", FORWARD_CHAIN]);
+    const prefix = `-A ${FORWARD_CHAIN} -s ${ip}/32 `;
+    for (const line of listing.stdout.split("\n")) {
+      if (line.startsWith(prefix)) {
+        await this.iptables(["-D", ...line.trim().split(/\s+/).slice(1)], true);
       }
     }
   }

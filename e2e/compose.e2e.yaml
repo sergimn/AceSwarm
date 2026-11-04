@@ -47,9 +47,6 @@ services:
 
   netgw:
     image: aceswarm-netgw:e2e
-    # Lets the gateway fall back to wireguard-go on hosts without the kernel module.
-    devices:
-      - /dev/net/tun:/dev/net/tun
     environment:
       GEOIP_DOWNLOAD: "false"
       GEOIP_STATIC: 198.51.100.10=ES,198.51.100.11=FR,203.0.113.10=SE

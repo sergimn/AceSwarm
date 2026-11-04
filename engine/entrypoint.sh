@@ -8,6 +8,8 @@ bb=/usr/local/lib/aceswarm/busybox
 
 if [ -n "${ACESWARM_GATEWAY:-}" ]; then
   "$bb" ip route replace default via "$ACESWARM_GATEWAY"
+  # The gateway only routes IPv4. An IPv6 default route (if the network has IPv6) would bypass it.
+  "$bb" ip -6 route flush default 2>/dev/null || true
 fi
 
 # Engines sit on an internal network where Docker's DNS does not resolve outside names, so DNS

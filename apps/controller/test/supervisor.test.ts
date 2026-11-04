@@ -74,15 +74,31 @@ const stream: StreamConfig = {
   path: null,
 };
 
+interface Fakes {
+  /** Engines handed out by `create`, in order (the last one repeats). */
+  created?: EngineHandle[];
+  /** Fails the first session start, like an engine that dies right away. */
+  failFirstSession?: boolean;
+}
+
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
-function supervisor(paths: PathStatus[]) {
+function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const assigned: PathAssignment[] = [];
+  const unassigned: string[] = [];
+  const clock = { now: 1000 };
+  const created = [...(fakes.created ?? [engine])];
   const engines = {
     find: () => Promise.resolve([]),
-    create: () => Promise.resolve(engine),
+    create: () => Promise.resolve(created.length > 1 ? created.shift() : created[0]),
   } as unknown as EngineManager;
+  let sessions = 0;
   const ace = {
-    startSession: () => Promise.resolve(session),
+    startSession: () => {
+      sessions += 1;
+      return fakes.failFirstSession === true && sessions === 1
+        ? Promise.reject(new Error("engine died"))
+        : Promise.resolve(session);
+    },
     stats: () => Promise.resolve({ status: "dl", peers: 1, speedDown: 0, speedUp: 0, downloaded: 0, uploaded: 0 }),
   } as unknown as AcestreamClient;
   const transcoder = {
@@ -92,6 +108,10 @@ function supervisor(paths: PathStatus[]) {
   const netgw = {
     assign: (assignment: PathAssignment) => {
       assigned.push(assignment);
+      return Promise.resolve();
+    },
+    unassign: (ip: string) => {
+      unassigned.push(ip);
       return Promise.resolve();
     },
     peers: () => Promise.reject(new Error("no peers")),
@@ -109,9 +129,9 @@ function supervisor(paths: PathStatus[]) {
     settings,
     paths: () => paths,
     pathLoad: () => new Map(),
-    now: () => 1000,
+    now: () => clock.now,
   });
-  return { instance, assigned };
+  return { instance, assigned, unassigned, clock };
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -138,4 +158,22 @@ test("assigns a path once the gateway's paths are known, when the stream started
   await instance.tick();
   expect(assigned).toEqual([{ ip: engine.ip, path: "direct" }]);
   expect(instance.path).toBe("direct");
+});
+
+test("stops sending the address of an engine that was replaced", async () => {
+  const replacement: EngineHandle = { ...engine, containerId: "c2", generation: 2, ip: "172.31.250.11" };
+  const { instance, assigned, unassigned, clock } = supervisor([direct], {
+    created: [engine, replacement],
+    failFirstSession: true,
+  });
+  await instance.tick();
+  expect(instance.assignments()).toEqual([{ ip: engine.ip, path: "direct" }]);
+
+  // The engine died before playing; the next start gets a new engine on a new address.
+  clock.now += 60_000;
+  await instance.tick();
+
+  expect(assigned.at(-1)).toEqual({ ip: replacement.ip, path: "direct" });
+  expect(unassigned).toEqual([engine.ip]);
+  expect(instance.assignments()).toEqual([{ ip: replacement.ip, path: "direct" }]);
 });

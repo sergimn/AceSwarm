@@ -35,7 +35,7 @@ flowchart TB
 | controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data` |
 | transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails     |
 | netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats    |
-| docker-proxy | read-only socket                                    | lets the controller reach only the container and image API      |
+| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API      |
 | engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                            |
 
 ## Streams
@@ -80,7 +80,11 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
 
 ## Network gateway (netgw)
 
-- **Engines can't bypass it.** Engines live on their own network. The engine entrypoint replaces the default route with the gateway's address, then drops every capability, so an engine can't change its routing.
+- **Engines can't bypass it.** Engines live on their own network. The engine entrypoint replaces the default route with the gateway's address and removes any IPv6 default route, then drops every capability, so an engine can't change its routing.
+- **Engines can't reach the APIs.** Engines run third-party P2P software, so nothing trusts them:
+  - The gateway, controller and transcoder answer 403 to requests from engine addresses (the engines network's `ip_range`).
+  - The gateway's firewall also drops new connections from engines to the gateway itself.
+  - The controller calls the gateway and transcoder by names that exist only on the backend network (`netgw-api`, `transcoder-api`).
 - **Paths.** The gateway has a direct path (its egress network) and one WireGuard interface per profile.
   - It uses the kernel module, falling back to `wireguard-go`.
   - Profiles are parsed and applied with `wg setconf` and `ip`. `wg-quick` and its hooks are never used.
@@ -126,7 +130,7 @@ Engines keep their live cache in memory and have a memory limit (`ENGINE_MEMORY_
   - path down,
   - engine memory near its limit, and out-of-memory kills,
   - a service being down.
-- **Logs.** Alloy discovers the stack's containers through a second, read-only socket proxy. It labels their logs by service, role and stream, then ships them to Loki.
+- **Logs.** Alloy discovers the stack's containers through a second socket proxy that allows no changes. It labels their logs by service, role and stream, then ships them to Loki.
 - **Dashboard.** It ships as portable JSON with data source variables, so it can be imported into an existing Grafana.
 
 ## Tests

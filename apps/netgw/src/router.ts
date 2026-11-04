@@ -1,7 +1,7 @@
 import type { PathAssignment } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { CommandRunner } from "./exec.ts";
-import { inSubnet } from "./ipv4.ts";
+import { inSubnet } from "@aceswarm/shared/ipv4";
 import type { Tunnel } from "./tunnels.ts";
 
 export const DIRECT_PATH = "direct";
@@ -17,7 +17,8 @@ export class UnknownPathError extends Error {
 /** Forwarding permissions per engine (see Firewall): an engine may only leave through its path. */
 export interface PathFirewall {
   allow(ip: string, iface: string): Promise<void>;
-  revoke(ip: string, iface: string): Promise<void>;
+  /** Removes every forwarding permission of the engine, whatever interface it was for. */
+  revoke(ip: string): Promise<void>;
 }
 
 export interface RouterOptions {
@@ -49,7 +50,8 @@ interface Assignment {
  * interface of its own path, so an engine without an assignment (for example right after the
  * gateway restarted) or with a broken tunnel is cut off instead of leaking out the direct path.
  * Changing the path flushes the engine's tracked connections so they are re-established (and
- * re-NATed) through the new path.
+ * re-NATed) through the new path. Changes run one at a time, so overlapping requests (a reload
+ * and an assignment, say) can't leave rules of two paths behind.
  */
 export class Router {
   private readonly runner: CommandRunner;
@@ -60,6 +62,7 @@ export class Router {
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly assignments = new Map<string, Assignment>();
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: RouterOptions) {
     this.runner = options.runner;
@@ -85,7 +88,40 @@ export class Router {
   }
 
   /** Gives an engine a path. Asking again for the same path only confirms it, unless forced. */
-  async assign(ip: string, path: string, force = false): Promise<void> {
+  assign(ip: string, path: string, force = false): Promise<void> {
+    return this.exclusive(() => this.applyAssignment(ip, path, force));
+  }
+
+  unassign(ip: string): Promise<void> {
+    return this.exclusive(() => this.removeAssignment(ip));
+  }
+
+  /**
+   * Re-applies every assignment after the tunnels changed. Engines whose tunnel is gone lose
+   * their path (and connectivity) until the controller moves them, rather than going direct.
+   */
+  reapply(): Promise<void> {
+    return this.exclusive(() => this.reapplyAll());
+  }
+
+  /**
+   * Makes the assignments match what the controller wants: missing ones are applied, and engines
+   * the controller no longer mentions are cut off once they have gone unconfirmed for `graceMs`
+   * (which covers a single assignment racing with this call). An engine that already has a path
+   * keeps it: the list may have been built before a newer assignment, which must win.
+   */
+  sync(desired: readonly PathAssignment[], graceMs: number): Promise<RejectedAssignment[]> {
+    return this.exclusive(() => this.syncAll(desired, graceMs));
+  }
+
+  /** Runs `task` after every change queued before it has finished. */
+  private exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(task);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async applyAssignment(ip: string, path: string, force: boolean): Promise<void> {
     if (!this.isEngineIp(ip)) {
       throw new Error(`${ip} is not on the engines network ${this.subnet}`);
     }
@@ -98,9 +134,7 @@ export class Router {
     }
 
     await this.clearRules(ip);
-    if (previous !== undefined) {
-      await this.firewall.revoke(ip, previous.iface);
-    }
+    await this.firewall.revoke(ip);
     if (tunnel !== undefined) {
       await this.runner.run("ip", [
         "-4",
@@ -124,50 +158,45 @@ export class Router {
     }
   }
 
-  async unassign(ip: string): Promise<void> {
-    const previous = this.assignments.get(ip);
-    if (previous === undefined) {
+  private async removeAssignment(ip: string): Promise<void> {
+    if (!this.assignments.has(ip)) {
       return;
     }
     await this.clearRules(ip);
-    await this.firewall.revoke(ip, previous.iface);
+    await this.firewall.revoke(ip);
     this.assignments.delete(ip);
     await this.flushConnections(ip);
   }
 
-  /**
-   * Re-applies every assignment after the tunnels changed. Engines whose tunnel is gone lose
-   * their path (and connectivity) until the controller moves them, rather than going direct.
-   */
-  async reapply(): Promise<void> {
+  private async reapplyAll(): Promise<void> {
     // Iterate over a copy: assign() writes to the map, and a Map iterator also visits keys that
     // are re-inserted while it runs, which would never end.
     const current = [...this.assignments];
     for (const [ip, assignment] of current) {
       try {
-        await this.assign(ip, assignment.path, true);
+        await this.applyAssignment(ip, assignment.path, true);
       } catch (error) {
         if (!(error instanceof UnknownPathError)) {
           throw error;
         }
         this.logger.warn({ ip, path: assignment.path }, "path removed; engine blocked until it gets a new one");
-        await this.unassign(ip);
+        await this.removeAssignment(ip);
       }
     }
   }
 
-  /**
-   * Makes the assignments match what the controller wants: missing or different ones are applied,
-   * and engines the controller no longer mentions are cut off once they have gone unconfirmed for
-   * `graceMs` (which covers a single assignment racing with this call).
-   */
-  async sync(desired: readonly PathAssignment[], graceMs: number): Promise<RejectedAssignment[]> {
+  private async syncAll(desired: readonly PathAssignment[], graceMs: number): Promise<RejectedAssignment[]> {
     const rejected: RejectedAssignment[] = [];
     const wanted = new Set<string>();
     for (const { ip, path } of desired) {
       wanted.add(ip);
+      const current = this.assignments.get(ip);
+      if (current !== undefined) {
+        current.confirmedAt = this.now();
+        continue;
+      }
       try {
-        await this.assign(ip, path);
+        await this.applyAssignment(ip, path, false);
       } catch (error) {
         rejected.push({ ip, path, error: (error as Error).message });
       }
@@ -178,7 +207,7 @@ export class Router {
     for (const [ip, assignment] of current) {
       if (!wanted.has(ip) && assignment.confirmedAt < cutoff) {
         this.logger.info({ ip, path: assignment.path }, "removing stale engine assignment");
-        await this.unassign(ip);
+        await this.removeAssignment(ip);
       }
     }
     return rejected;

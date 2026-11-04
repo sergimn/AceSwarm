@@ -14,7 +14,12 @@ import { WireguardStore } from "./wireguard-store.ts";
 
 const config = loadConfig();
 const logger = createLogger("controller");
-const service = createService({ name: "controller", logger, bodyLimit: 64 * 1024 });
+const service = createService({
+  name: "controller",
+  logger,
+  bodyLimit: 64 * 1024,
+  blockedClients: [config.ENGINE_IP_RANGE],
+});
 
 const docker = new DockerClient(config.DOCKER_HOST);
 const ace = new AcestreamClient();

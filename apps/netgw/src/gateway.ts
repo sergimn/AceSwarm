@@ -37,7 +37,7 @@ export class Gateway {
   }
 
   async init(): Promise<void> {
-    await this.firewall.init();
+    await this.firewall.init(this.interfaces.engines);
     await this.tunnels.cleanup();
     await this.reload();
   }

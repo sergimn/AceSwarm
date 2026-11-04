@@ -2,7 +2,7 @@ import type { Service } from "@aceswarm/shared/service";
 import { Gauge } from "@prometheus-io/client";
 import { z } from "zod";
 import type { Gateway } from "./gateway.ts";
-import { isIpv4 } from "./ipv4.ts";
+import { isIpv4 } from "@aceswarm/shared/ipv4";
 import { UnknownPathError } from "./router.ts";
 
 const ipSchema = z.string().refine(isIpv4, "not an IPv4 address");

@@ -82,6 +82,38 @@ export function tryGatewayAssignments(): PathAssignment[] | undefined {
   }
 }
 
+/** A compose service's address on the engines network. */
+export function engineNetworkIp(service: string): string {
+  const [container] = compose("ps", "-q", service).split("\n", 1);
+  return docker(
+    "inspect",
+    "-f",
+    `{{(index .NetworkSettings.Networks "${PROJECT}_engines").IPAddress}}`,
+    container ?? service,
+  ).trim();
+}
+
+/** Fetches a URL from inside an engine container, as the engine's own user. */
+export function fetchFromEngine(engine: string, url: string): { ok: boolean; output: string } {
+  try {
+    const output = docker(
+      "exec",
+      "--user",
+      "1000:1000",
+      engine,
+      "/usr/local/lib/aceswarm/busybox",
+      "wget",
+      "-T",
+      "3",
+      "-qO-",
+      url,
+    );
+    return { ok: true, output };
+  } catch (error) {
+    return { ok: false, output: String((error as { stderr?: unknown }).stderr ?? error) };
+  }
+}
+
 /** The client profile the throwaway WireGuard server wrote for this run. */
 export function wireguardClientProfile(): string {
   return compose("exec", "-T", "wg-server", "cat", "/state/client.conf");

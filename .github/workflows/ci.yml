@@ -42,10 +42,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The Node.js hooks need node_modules and run in the "check" job instead.
+      # The Node.js hooks need node_modules and run in the "check" job instead. On pushes to main,
+      # the checkout is the main branch itself, which no-commit-to-branch would reject.
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
         env:
-          SKIP: prettier,eslint,typecheck,unit-tests
+          SKIP: prettier,eslint,typecheck,unit-tests,no-commit-to-branch
 
   images:
     name: Image ${{ matrix.image }} (amd64 + arm64)

@@ -29,8 +29,12 @@ class FakeFirewall implements PathFirewall {
     return Promise.resolve();
   }
 
-  revoke(ip: string, iface: string): Promise<void> {
-    this.allowed.delete(`${ip}>${iface}`);
+  revoke(ip: string): Promise<void> {
+    for (const rule of this.allowed) {
+      if (rule.startsWith(`${ip}>`)) {
+        this.allowed.delete(rule);
+      }
+    }
     return Promise.resolve();
   }
 }
@@ -103,6 +107,39 @@ describe("Router.assign", () => {
   });
 });
 
+describe("overlapping changes", () => {
+  it("leave exactly the rules of the last requested path", async () => {
+    const { router, firewall, runner } = setup();
+    await router.assign("172.31.250.11", "direct");
+
+    // A reload (every minute, and on every profile change) overlapping a path change.
+    await Promise.all([
+      router.reapply(),
+      router.assign("172.31.250.11", "wg:a"),
+      router.reapply(),
+      router.assign("172.31.250.11", "direct"),
+      router.assign("172.31.250.11", "wg:a"),
+    ]);
+
+    expect(router.pathOf("172.31.250.11")).toBe("wg:a");
+    expect([...firewall.allowed]).toEqual(["172.31.250.11>aswg0"]);
+    // Every `ip rule add` for the engine was preceded by deleting the previous one.
+    const rules = runner.calls.filter((call) => call.startsWith("ip -4 rule"));
+    expect(rules.at(-1)).toBe("ip -4 rule add from 172.31.250.11/32 lookup 101 priority 1000");
+    expect(rules.at(-2)).toContain("ip -4 rule del from 172.31.250.11/32");
+  });
+
+  it("revokes the engine's rules for every interface, not only the one it expects", async () => {
+    const { router, firewall } = setup();
+    await router.assign("172.31.250.11", "wg:a");
+    firewall.allowed.add("172.31.250.11>eth1"); // left behind by an earlier crash, say
+
+    await router.unassign("172.31.250.11");
+
+    expect([...firewall.allowed]).toEqual([]);
+  });
+});
+
 describe("Router.reapply", () => {
   it("finishes and keeps every assignment", async () => {
     const { router } = setup();
@@ -151,6 +188,15 @@ describe("Router.sync", () => {
     ]);
     expect(rejected).toEqual([{ ip: "172.31.250.12", path: "wg:gone", error: "unknown path wg:gone" }]);
     expect(firewall.allowed.has("172.31.250.12>eth1")).toBe(false);
+  });
+
+  it("keeps a newer path when the controller's list was built before it", async () => {
+    const { router } = setup();
+    await router.assign("172.31.250.10", "wg:a");
+
+    await router.sync([{ ip: "172.31.250.10", path: "direct" }], 30_000);
+
+    expect(router.pathOf("172.31.250.10")).toBe("wg:a");
   });
 
   it("removes engines the controller stopped mentioning, after a grace period", async () => {

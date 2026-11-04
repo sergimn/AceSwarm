@@ -3,6 +3,12 @@ import { z } from "zod";
 
 const schema = z.object({
   PORT: envInt(8081),
+  /**
+   * Addresses Docker gives containers on the engines network (its ip_range), engines included.
+   * Requests from them are refused: engines run untrusted P2P software. The network's gateway
+   * address is outside the range, because published ports can arrive through it.
+   */
+  ENGINE_IP_RANGE: z.cidrv4().default("172.31.250.128/25"),
   HLS_DIR: z.string().default("/hls"),
   FFMPEG_PATH: z.string().default("ffmpeg"),
   /**
