@@ -112,7 +112,8 @@ services:
       FULL_TRANSCODE_MAX_HEIGHT: ${FULL_TRANSCODE_MAX_HEIGHT:-1080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs:
-      - /hls:uid=1000,gid=1000,mode=0755,size=${HLS_TMPFS_SIZE:-512m}
+      # Writable by the transcoder user on both Docker and Podman (Podman rejects uid=/gid= here).
+      - /hls:mode=1777,size=${HLS_TMPFS_SIZE:-512m}
       - /tmp:size=16m
     networks:
       - backend
