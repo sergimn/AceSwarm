@@ -1,9 +1,12 @@
 import { expect, test } from "@playwright/test";
 import {
   addStream,
+  compose,
   docker,
   engineContainers,
+  gatewayAssignments,
   mockId,
+  snapshot,
   resetStack,
   streamById,
   waitForPlaying,
@@ -68,6 +71,25 @@ test("moves a stream to a WireGuard path when only the VPN can reach its peers",
   const playing = await waitForPlaying(request, stream.id, 120_000);
   expect(playing.path).toBe("wg:e2e-vpn");
   expect(playing.peers.countries.map((country) => country.code)).toContain("SE");
+});
+
+test("restores VPN paths after the gateway restarts, failing closed meanwhile", async ({ request }) => {
+  const stream = (await snapshot(request)).streams.find(
+    (candidate) => candidate.aceId === mockId("beef", "content-id", 24),
+  );
+  expect(stream?.path).toBe("wg:e2e-vpn");
+  const [engine] = engineContainers(stream!.id);
+  const ip = docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", engine!).trim();
+
+  compose("restart", "netgw");
+  // Nothing is forwarded for an engine until it has a path again.
+  expect(compose("exec", "-T", "netgw", "iptables", "-S", "FORWARD")).toContain("-P FORWARD DROP");
+  // The controller re-sends every engine's path, so the stream stays on its VPN.
+  await expect
+    .poll(() => gatewayAssignments().find((assignment) => assignment.ip === ip)?.path, { timeout: 60_000 })
+    .toBe("wg:e2e-vpn");
+  const playing = await waitForPlaying(request, stream!.id, 120_000);
+  expect(playing.path).toBe("wg:e2e-vpn");
 });
 
 test("rejects WireGuard profiles with hooks", async ({ page }) => {

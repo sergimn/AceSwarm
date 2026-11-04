@@ -56,7 +56,6 @@ services:
       PROBE_TARGETS: 198.51.100.10
       PROBE_INTERVAL_SECONDS: "3"
       PEERS_INTERVAL_SECONDS: "2"
-      HANDSHAKE_MAX_AGE_SECONDS: "60"
     networks:
       egress:
         ipv4_address: 198.51.100.2

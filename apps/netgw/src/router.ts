@@ -14,47 +14,93 @@ export class UnknownPathError extends Error {
   }
 }
 
+/** Forwarding permissions per engine (see Firewall): an engine may only leave through its path. */
+export interface PathFirewall {
+  allow(ip: string, iface: string): Promise<void>;
+  revoke(ip: string, iface: string): Promise<void>;
+}
+
+export interface RouterOptions {
+  runner: CommandRunner;
+  /** The engines network. */
+  subnet: string;
+  /** Interface of the direct path. */
+  directIface: string;
+  tunnel: (pathId: string) => Tunnel | undefined;
+  firewall: PathFirewall;
+  logger: Logger;
+  now?: () => number;
+}
+
+export interface RejectedAssignment extends PathAssignment {
+  error: string;
+}
+
+interface Assignment {
+  path: string;
+  iface: string;
+  /** Last time the controller asked for this assignment. */
+  confirmedAt: number;
+}
+
 /**
- * Policy routing per engine: `ip rule add from <engine> lookup <tunnel table>`. Engines without a
- * rule use the main table, which is the direct path. Changing the path flushes the engine's
- * tracked connections so they are re-established (and re-NATed) through the new path.
+ * Per-engine paths. Tunnels get a policy rule (`ip rule add from <engine> lookup <table>`) and
+ * the direct path uses the main table. The firewall only forwards an engine's traffic out of the
+ * interface of its own path, so an engine without an assignment (for example right after the
+ * gateway restarted) or with a broken tunnel is cut off instead of leaking out the direct path.
+ * Changing the path flushes the engine's tracked connections so they are re-established (and
+ * re-NATed) through the new path.
  */
 export class Router {
   private readonly runner: CommandRunner;
   private readonly subnet: string;
+  private readonly directIface: string;
   private readonly tunnel: (pathId: string) => Tunnel | undefined;
+  private readonly firewall: PathFirewall;
   private readonly logger: Logger;
-  private readonly assignments = new Map<string, string>();
+  private readonly now: () => number;
+  private readonly assignments = new Map<string, Assignment>();
 
-  constructor(runner: CommandRunner, subnet: string, tunnel: (pathId: string) => Tunnel | undefined, logger: Logger) {
-    this.runner = runner;
-    this.subnet = subnet;
-    this.tunnel = tunnel;
-    this.logger = logger.child({ component: "router" });
+  constructor(options: RouterOptions) {
+    this.runner = options.runner;
+    this.subnet = options.subnet;
+    this.directIface = options.directIface;
+    this.tunnel = options.tunnel;
+    this.firewall = options.firewall;
+    this.logger = options.logger.child({ component: "router" });
+    this.now = options.now ?? Date.now;
   }
 
   list(): PathAssignment[] {
-    return [...this.assignments].map(([ip, path]) => ({ ip, path }));
+    return [...this.assignments].map(([ip, assignment]) => ({ ip, path: assignment.path }));
   }
 
-  pathOf(ip: string): string {
-    return this.assignments.get(ip) ?? DIRECT_PATH;
+  /** The engine's path, or undefined when it has none (and cannot reach the internet). */
+  pathOf(ip: string): string | undefined {
+    return this.assignments.get(ip)?.path;
   }
 
   isEngineIp(ip: string): boolean {
     return inSubnet(ip, this.subnet);
   }
 
-  async assign(ip: string, path: string): Promise<void> {
+  /** Gives an engine a path. Asking again for the same path only confirms it, unless forced. */
+  async assign(ip: string, path: string, force = false): Promise<void> {
     if (!this.isEngineIp(ip)) {
       throw new Error(`${ip} is not on the engines network ${this.subnet}`);
     }
-    const tunnel = path === DIRECT_PATH ? undefined : this.tunnel(path);
-    if (path !== DIRECT_PATH && tunnel === undefined) {
-      throw new UnknownPathError(path);
-    }
+    const tunnel = this.usableTunnel(path);
+    const iface = tunnel?.iface ?? this.directIface;
     const previous = this.assignments.get(ip);
+    if (!force && previous?.path === path && previous.iface === iface) {
+      previous.confirmedAt = this.now();
+      return;
+    }
+
     await this.clearRules(ip);
+    if (previous !== undefined) {
+      await this.firewall.revoke(ip, previous.iface);
+    }
     if (tunnel !== undefined) {
       await this.runner.run("ip", [
         "-4",
@@ -68,33 +114,86 @@ export class Router {
         String(ENGINE_RULE_PRIORITY),
       ]);
     }
-    this.assignments.set(ip, path);
-    if (previous !== undefined && previous !== path) {
+    await this.firewall.allow(ip, iface);
+    this.assignments.set(ip, { path, iface, confirmedAt: this.now() });
+    if (previous !== undefined && previous.path !== path) {
       await this.flushConnections(ip);
     }
-    if (previous !== path) {
-      this.logger.info({ ip, from: previous ?? DIRECT_PATH, to: path }, "engine path assigned");
+    if (previous?.path !== path) {
+      this.logger.info({ ip, from: previous?.path ?? null, to: path }, "engine path assigned");
     }
   }
 
   async unassign(ip: string): Promise<void> {
-    if (!this.assignments.has(ip)) {
+    const previous = this.assignments.get(ip);
+    if (previous === undefined) {
       return;
     }
     await this.clearRules(ip);
+    await this.firewall.revoke(ip, previous.iface);
     this.assignments.delete(ip);
     await this.flushConnections(ip);
   }
 
-  /** Re-applies every assignment after tunnels changed; engines on removed paths go direct. */
+  /**
+   * Re-applies every assignment after the tunnels changed. Engines whose tunnel is gone lose
+   * their path (and connectivity) until the controller moves them, rather than going direct.
+   */
   async reapply(): Promise<void> {
     // Iterate over a copy: assign() writes to the map, and a Map iterator also visits keys that
     // are re-inserted while it runs, which would never end.
     const current = [...this.assignments];
-    for (const [ip, path] of current) {
-      const target = path === DIRECT_PATH || this.tunnel(path) !== undefined ? path : DIRECT_PATH;
-      await this.assign(ip, target);
+    for (const [ip, assignment] of current) {
+      try {
+        await this.assign(ip, assignment.path, true);
+      } catch (error) {
+        if (!(error instanceof UnknownPathError)) {
+          throw error;
+        }
+        this.logger.warn({ ip, path: assignment.path }, "path removed; engine blocked until it gets a new one");
+        await this.unassign(ip);
+      }
     }
+  }
+
+  /**
+   * Makes the assignments match what the controller wants: missing or different ones are applied,
+   * and engines the controller no longer mentions are cut off once they have gone unconfirmed for
+   * `graceMs` (which covers a single assignment racing with this call).
+   */
+  async sync(desired: readonly PathAssignment[], graceMs: number): Promise<RejectedAssignment[]> {
+    const rejected: RejectedAssignment[] = [];
+    const wanted = new Set<string>();
+    for (const { ip, path } of desired) {
+      wanted.add(ip);
+      try {
+        await this.assign(ip, path);
+      } catch (error) {
+        rejected.push({ ip, path, error: (error as Error).message });
+      }
+    }
+    const cutoff = this.now() - graceMs;
+    // A copy again, because unassign() deletes from the map.
+    const current = [...this.assignments];
+    for (const [ip, assignment] of current) {
+      if (!wanted.has(ip) && assignment.confirmedAt < cutoff) {
+        this.logger.info({ ip, path: assignment.path }, "removing stale engine assignment");
+        await this.unassign(ip);
+      }
+    }
+    return rejected;
+  }
+
+  /** The tunnel behind a path (undefined for the direct path); throws for unusable paths. */
+  private usableTunnel(path: string): Tunnel | undefined {
+    if (path === DIRECT_PATH) {
+      return undefined;
+    }
+    const tunnel = this.tunnel(path);
+    if (tunnel?.error !== null) {
+      throw new UnknownPathError(path);
+    }
+    return tunnel;
   }
 
   private async clearRules(ip: string): Promise<void> {

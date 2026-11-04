@@ -38,11 +38,12 @@ export async function detectInterfaces(runner: CommandRunner, engineSubnet: stri
 
 const NAT_CHAIN = "ACESWARM-NAT";
 const MSS_CHAIN = "ACESWARM-MSS";
+const FORWARD_CHAIN = "ACESWARM-FWD";
 
 /**
- * Owns the gateway's iptables rules: masquerading for each outgoing path and MSS clamping so
- * TCP works through tunnels with a smaller MTU. Rules live in dedicated chains that are rebuilt
- * as a whole, which keeps updates idempotent.
+ * Owns the gateway's iptables rules: forwarding permissions per engine (fail closed), masquerading
+ * for each outgoing path and MSS clamping so TCP works through tunnels with a smaller MTU. Rules
+ * live in dedicated chains, which keeps updates idempotent.
  */
 export class Firewall {
   private readonly runner: CommandRunner;
@@ -55,7 +56,31 @@ export class Firewall {
     this.command = command;
   }
 
+  /**
+   * Stops all forwarding. Runs first thing at startup, so engines that are still running while the
+   * gateway restarts cannot slip out through the direct path before their paths are known again.
+   */
+  async lockdown(): Promise<void> {
+    await this.iptables(["-P", "FORWARD", "DROP"]);
+  }
+
   async init(): Promise<void> {
+    await this.lockdown();
+    await this.ensureChain("filter", FORWARD_CHAIN, "FORWARD");
+    await this.iptables(["-F", FORWARD_CHAIN]);
+    // Replies to connections an engine was allowed to open.
+    await this.iptables([
+      "-A",
+      FORWARD_CHAIN,
+      "-d",
+      this.engineSubnet,
+      "-m",
+      "conntrack",
+      "--ctstate",
+      "ESTABLISHED,RELATED",
+      "-j",
+      "ACCEPT",
+    ]);
     await this.ensureChain("nat", NAT_CHAIN, "POSTROUTING");
     await this.ensureChain("mangle", MSS_CHAIN, "FORWARD");
     await this.iptables(["-t", "mangle", "-F", MSS_CHAIN]);
@@ -73,6 +98,24 @@ export class Firewall {
       "TCPMSS",
       "--clamp-mss-to-pmtu",
     ]);
+  }
+
+  /** Lets an engine open connections through one interface (its path). */
+  async allow(ip: string, iface: string): Promise<void> {
+    await this.iptables(["-A", FORWARD_CHAIN, ...this.engineRule(ip, iface)]);
+  }
+
+  async revoke(ip: string, iface: string): Promise<void> {
+    // Delete until none is left, in case an earlier run added duplicates.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (!(await this.iptables(["-D", FORWARD_CHAIN, ...this.engineRule(ip, iface)], true))) {
+        return;
+      }
+    }
+  }
+
+  private engineRule(ip: string, iface: string): string[] {
+    return ["-s", `${ip}/32`, "-o", iface, "-j", "ACCEPT"];
   }
 
   /** Masquerades engine traffic leaving through any of the given interfaces. */

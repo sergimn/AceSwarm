@@ -15,6 +15,8 @@ const config = loadConfig();
 const logger = createLogger("netgw");
 const runner = new SystemRunner();
 
+const firewall = new Firewall(runner, config.ENGINE_SUBNET, config.IPTABLES);
+await firewall.lockdown();
 const interfaces = await detectInterfaces(runner, config.ENGINE_SUBNET);
 logger.info(interfaces, "interfaces detected");
 
@@ -29,14 +31,21 @@ const tunnels = new TunnelManager(
 );
 const gateway = new Gateway({
   tunnels,
-  router: new Router(runner, config.ENGINE_SUBNET, (pathId) => tunnels.byPath(pathId), logger),
+  router: new Router({
+    runner,
+    subnet: config.ENGINE_SUBNET,
+    directIface: interfaces.egress,
+    tunnel: (pathId) => tunnels.byPath(pathId),
+    firewall,
+    logger,
+  }),
   peers: new PeerTracker(
     runner,
     peerGeo,
     config.ENGINE_SUBNET,
     config.IGNORED_PEER_PORTS.map((port) => Number.parseInt(port, 10)),
   ),
-  firewall: new Firewall(runner, config.ENGINE_SUBNET, config.IPTABLES),
+  firewall,
   prober: new Prober(runner, config.PROBE_TARGETS, config.HANDSHAKE_MAX_AGE_SECONDS),
   interfaces,
   logger,

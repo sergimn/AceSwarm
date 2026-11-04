@@ -6,6 +6,7 @@ import type {
   PipelineStatus,
   StreamState,
   StreamView,
+  PathAssignment,
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
@@ -78,6 +79,9 @@ export class StreamSupervisor {
   private lastSwitchAt = 0;
   private recoveries = 0;
   private forceRestart = false;
+  /** Paths this supervisor gave its engines at the gateway, by engine IP. */
+  private readonly assigned = new Map<string, string>();
+  private bootstrapped = false;
 
   private timer: NodeJS.Timeout | undefined;
   private running = false;
@@ -98,6 +102,16 @@ export class StreamSupervisor {
 
   get path(): string | null {
     return this.stream.path;
+  }
+
+  /** What this stream's engines should use at the gateway (re-sent periodically). */
+  assignments(): PathAssignment[] {
+    return [...this.assigned].map(([ip, path]) => ({ ip, path }));
+  }
+
+  /** True once the first start attempt finished, so `assignments()` is complete. */
+  get settled(): boolean {
+    return this.bootstrapped || !this.running;
   }
 
   get isPlaying(): boolean {
@@ -240,21 +254,48 @@ export class StreamSupervisor {
       } else {
         this.engine = await this.deps.engines.revive(newest);
       }
-      const path = initialPath({
-        strategy: this.deps.settings.pathStrategy,
-        paths: this.deps.paths(),
-        memory: this.memory,
-        load: this.deps.pathLoad(),
-        remembered: this.stream.path,
-      });
-      await this.applyPath(this.engine, path ?? null);
+      await this.applyPath(this.engine, this.startPath() ?? null);
       this.setState("starting", "opening stream");
       await this.startPlayback(this.engine);
     } catch (error) {
       this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
       this.setState("error", describeError(error));
       this.logger.warn({ err: error }, "could not start stream");
+    } finally {
+      this.bootstrapped = true;
     }
+  }
+
+  /**
+   * Path for a start attempt. A stream that cannot even start on its path (for example because
+   * the direct connection blocks it) tries the next best path every second failed attempt, like
+   * the recovery ladder does for a stream that was playing.
+   */
+  private startPath(): string | undefined {
+    const paths = this.deps.paths();
+    const preferred = initialPath({
+      strategy: this.deps.settings.pathStrategy,
+      paths,
+      memory: this.memory,
+      load: this.deps.pathLoad(),
+      remembered: this.stream.path,
+    });
+    const { failures } = this.recovery;
+    if (preferred === undefined || failures < 2 || failures % 2 !== 0) {
+      return preferred;
+    }
+    const alternative = switchTarget({
+      strategy: this.deps.settings.pathStrategy,
+      paths,
+      memory: this.memory,
+      current: preferred,
+      // Any other path that is up beats one the stream cannot start on, even with a lower score.
+      hysteresis: -Infinity,
+    });
+    if (alternative !== undefined) {
+      this.logger.info({ from: preferred, to: alternative, failures }, "stream does not start; trying another path");
+    }
+    return alternative ?? preferred;
   }
 
   private async poll(): Promise<void> {
@@ -283,9 +324,14 @@ export class StreamSupervisor {
     };
   }
 
+  /** The stream's path is down, or gone (its WireGuard profile was removed). */
   private currentPathDown(): boolean {
-    const path = this.deps.paths().find((candidate) => candidate.id === this.stream.path);
-    return path !== undefined && !path.up;
+    const paths = this.deps.paths();
+    if (this.stream.path === null || paths.length === 0) {
+      return false;
+    }
+    const path = paths.find((candidate) => candidate.id === this.stream.path);
+    return path?.up !== true;
   }
 
   private canSwitchPath(): boolean {
@@ -366,7 +412,7 @@ export class StreamSupervisor {
     const next = await this.deps.engines.create(this.stream.id, engine.generation + 1);
     this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
     try {
-      await this.deps.netgw.assign({ ip: next.ip, path: target });
+      await this.assignEngine(next.ip, target);
       const session = await this.openSession(next.baseUrl);
       await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl }, true);
       await this.waitForHandover(session.playbackUrl);
@@ -453,7 +499,7 @@ export class StreamSupervisor {
       return;
     }
     try {
-      await this.deps.netgw.assign({ ip: engine.ip, path });
+      await this.assignEngine(engine.ip, path);
       await this.persistPath(path);
     } catch (error) {
       this.logger.warn({ err: error, path }, "could not assign network path");
@@ -477,7 +523,13 @@ export class StreamSupervisor {
     this.session = undefined;
   }
 
+  private async assignEngine(ip: string, path: string): Promise<void> {
+    await this.deps.netgw.assign({ ip, path });
+    this.assigned.set(ip, path);
+  }
+
   private async unassignQuietly(ip: string): Promise<void> {
+    this.assigned.delete(ip);
     await this.deps.netgw.unassign(ip).catch(() => undefined);
   }
 

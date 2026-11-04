@@ -5,8 +5,13 @@ import type { Gateway } from "./gateway.ts";
 import { isIpv4 } from "./ipv4.ts";
 import { UnknownPathError } from "./router.ts";
 
-const ipParams = z.object({ ip: z.string().refine(isIpv4, "not an IPv4 address") });
-const assignBody = z.object({ path: z.string().min(1).max(64) });
+const ipSchema = z.string().refine(isIpv4, "not an IPv4 address");
+const pathSchema = z.string().min(1).max(64);
+const ipParams = z.object({ ip: ipSchema });
+const assignBody = z.object({ path: pathSchema });
+const syncBody = z.object({ assignments: z.array(z.object({ ip: ipSchema, path: pathSchema })) });
+/** How long an assignment the controller stops mentioning survives (covers in-flight requests). */
+const SYNC_GRACE_MS = 30_000;
 
 export function registerMetrics(service: Service, gateway: Gateway): void {
   const registers = [service.registry];
@@ -97,6 +102,17 @@ export function registerRoutes(service: Service, gateway: Gateway): void {
   app.post("/reload", async () => {
     await gateway.reload();
     return gateway.paths();
+  });
+
+  // The controller's complete view of which engine uses which path, sent periodically. It restores
+  // assignments after a gateway restart and removes the ones of engines that are gone.
+  app.put("/assignments", async (request, reply) => {
+    const body = syncBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "expected { assignments: [{ ip, path }] }" });
+    }
+    const rejected = await gateway.router.sync(body.data.assignments, SYNC_GRACE_MS);
+    return { assignments: gateway.router.list(), rejected };
   });
 
   app.put("/assignments/:ip", async (request, reply) => {

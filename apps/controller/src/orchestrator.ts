@@ -172,6 +172,33 @@ export class Orchestrator {
     } catch (error) {
       this.logger.debug({ err: describeError(error) }, "network gateway unreachable");
       this.paths = [];
+      return;
+    }
+    await this.syncAssignments();
+  }
+
+  /**
+   * Sends the gateway every engine's path. The gateway keeps them only in memory and blocks
+   * engines it has no path for, so this restores them after a gateway restart and lets it drop
+   * engines that are gone. It waits until every stream finished starting, so a controller restart
+   * never sends an incomplete list.
+   */
+  private async syncAssignments(): Promise<void> {
+    const supervisors = this.supervisors.values().toArray();
+    if (supervisors.some((supervisor) => !supervisor.settled)) {
+      return;
+    }
+    const known = new Set(this.paths.map((path) => path.id));
+    const assignments = supervisors
+      .flatMap((supervisor) => supervisor.assignments())
+      .filter((assignment) => known.has(assignment.path));
+    try {
+      const rejected = await this.deps.netgw.sync(assignments);
+      if (rejected.length > 0) {
+        this.logger.warn({ rejected }, "the network gateway refused some engine paths");
+      }
+    } catch (error) {
+      this.logger.debug({ err: describeError(error) }, "could not sync engine paths");
     }
   }
 

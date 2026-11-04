@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { expect, type APIRequestContext } from "@playwright/test";
-import type { Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
+import type { PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
 
@@ -65,6 +65,12 @@ export function engineContainers(streamId: string): string[] {
   return docker("ps", "-q", "--filter", `label=aceswarm.stream=${streamId}`, "--format", "{{.Names}}")
     .split("\n")
     .filter((name) => name.length > 0);
+}
+
+/** The gateway's current engine-to-path assignments. */
+export function gatewayAssignments(): PathAssignment[] {
+  const output = compose("exec", "-T", "netgw", "wget", "-qO-", "http://127.0.0.1:8082/assignments");
+  return JSON.parse(output) as PathAssignment[];
 }
 
 /** The client profile the throwaway WireGuard server wrote for this run. */

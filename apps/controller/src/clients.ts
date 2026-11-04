@@ -67,6 +67,15 @@ export class NetgwClient {
     });
   }
 
+  /** Sends the complete list of engine paths; returns the ones the gateway refused. */
+  async sync(assignments: PathAssignment[]): Promise<(PathAssignment & { error: string })[]> {
+    const result = await requestJson<{ rejected: (PathAssignment & { error: string })[] }>(
+      `${this.baseUrl}/assignments`,
+      { method: "PUT", body: { assignments }, timeoutMs: 10_000 },
+    );
+    return result.rejected;
+  }
+
   async unassign(ip: string): Promise<void> {
     await requestOk(`${this.baseUrl}/assignments/${encodeURIComponent(ip)}`, { method: "DELETE" });
   }
