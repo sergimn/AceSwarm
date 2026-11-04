@@ -89,10 +89,11 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
   - An engine on a tunnel gets an `ip rule` for its address.
   - Moving an engine flushes its tracked connections, so they reconnect through the new path.
 - **Fail closed.**
-  - The `FORWARD` policy is `DROP` from the gateway's first moment.
+  - The gateway's first command, before Node.js starts, sets the `FORWARD` policy to `DROP`.
   - Each engine gets one accept rule, for the interface of its own path.
   - An engine without a path (for example right after the gateway restarted) or whose tunnel was removed can't reach anything.
   - The controller sends the complete list of engine paths every few seconds (`PUT /assignments`). This restores them after a gateway restart and removes the ones of engines that are gone.
+  - A stream that starts while the gateway is unreachable gets its path as soon as the gateway answers again.
 - **Probes.**
   - Every path is pinged at an interval, and its loss and latency become a 0–1 score.
   - A tunnel without a WireGuard handshake in the last three minutes counts as down.

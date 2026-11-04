@@ -183,6 +183,11 @@ export class StreamSupervisor {
       await this.runAction("restart-engine", "manual restart");
       return;
     }
+    if (!this.assigned.has(this.engine.ip)) {
+      // The gateway blocks an engine until it has a path. This one started while the gateway's
+      // paths were unknown (for example while it restarted), or its last assignment failed.
+      await this.assignStartPath(this.engine);
+    }
     await this.poll();
     const health = evaluateHealth({
       now: this.now(),
@@ -254,7 +259,7 @@ export class StreamSupervisor {
       } else {
         this.engine = await this.deps.engines.revive(newest);
       }
-      await this.applyPath(this.engine, this.startPath() ?? null);
+      await this.assignStartPath(this.engine);
       this.setState("starting", "opening stream");
       await this.startPlayback(this.engine);
     } catch (error) {
@@ -492,6 +497,14 @@ export class StreamSupervisor {
       }
     }
     throw lastError;
+  }
+
+  /** Gives the engine the path for a start attempt, once the gateway's paths are known. */
+  private async assignStartPath(engine: EngineHandle): Promise<void> {
+    if (this.deps.paths().length === 0) {
+      return;
+    }
+    await this.applyPath(engine, this.startPath() ?? null);
   }
 
   private async applyPath(engine: EngineHandle, path: string | null): Promise<void> {

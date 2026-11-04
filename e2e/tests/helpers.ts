@@ -73,6 +73,15 @@ export function gatewayAssignments(): PathAssignment[] {
   return JSON.parse(output) as PathAssignment[];
 }
 
+/** Like `gatewayAssignments`, but undefined while the gateway is not answering. */
+export function tryGatewayAssignments(): PathAssignment[] | undefined {
+  try {
+    return gatewayAssignments();
+  } catch {
+    return undefined;
+  }
+}
+
 /** The client profile the throwaway WireGuard server wrote for this run. */
 export function wireguardClientProfile(): string {
   return compose("exec", "-T", "wg-server", "cat", "/state/client.conf");

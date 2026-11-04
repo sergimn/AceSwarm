@@ -9,6 +9,7 @@ import {
   snapshot,
   resetStack,
   streamById,
+  tryGatewayAssignments,
   waitForPlaying,
   wireguardClientProfile,
 } from "./helpers.ts";
@@ -73,7 +74,7 @@ test("moves a stream to a WireGuard path when only the VPN can reach its peers",
   expect(playing.peers.countries.map((country) => country.code)).toContain("SE");
 });
 
-test("restores VPN paths after the gateway restarts, failing closed meanwhile", async ({ request }) => {
+test("blocks engines while the gateway has no path for them, then restores their VPN path", async ({ request }) => {
   const stream = (await snapshot(request)).streams.find(
     (candidate) => candidate.aceId === mockId("beef", "content-id", 24),
   );
@@ -81,12 +82,23 @@ test("restores VPN paths after the gateway restarts, failing closed meanwhile", 
   const [engine] = engineContainers(stream!.id);
   const ip = docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", engine!).trim();
 
-  compose("restart", "netgw");
-  // Nothing is forwarded for an engine until it has a path again.
-  expect(compose("exec", "-T", "netgw", "iptables", "-S", "FORWARD")).toContain("-P FORWARD DROP");
-  // The controller re-sends every engine's path, so the stream stays on its VPN.
+  // Freeze the controller, so it can't send the paths again, to see what the gateway does alone.
+  compose("pause", "controller");
+  try {
+    compose("restart", "netgw");
+    await expect.poll(() => tryGatewayAssignments(), { timeout: 60_000 }).toBeDefined();
+    expect(gatewayAssignments().map((assignment) => assignment.ip)).not.toContain(ip);
+    const rules = compose("exec", "-T", "netgw", "iptables", "-S");
+    expect(rules).toContain("-P FORWARD DROP");
+    // No accept rule for the engine: it can't reach anything, not even through the direct path.
+    expect(rules).not.toContain(`-s ${ip}/32`);
+  } finally {
+    compose("unpause", "controller");
+  }
+
+  // The controller sends every engine's path again, so the stream goes back to its VPN.
   await expect
-    .poll(() => gatewayAssignments().find((assignment) => assignment.ip === ip)?.path, { timeout: 60_000 })
+    .poll(() => tryGatewayAssignments()?.find((assignment) => assignment.ip === ip)?.path, { timeout: 60_000 })
     .toBe("wg:e2e-vpn");
   const playing = await waitForPlaying(request, stream!.id, 120_000);
   expect(playing.path).toBe("wg:e2e-vpn");

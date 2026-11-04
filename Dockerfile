@@ -104,7 +104,9 @@ COPY apps/netgw/package.json apps/netgw/
 COPY apps/netgw/src apps/netgw/src
 WORKDIR /app/apps/netgw
 EXPOSE 8082
-CMD ["node", "src/main.ts"]
+# Fail closed before anything else runs. The network namespace starts with forwarding on (the
+# ip_forward sysctl) and an ACCEPT policy, and Node.js takes a moment to start.
+CMD ["/bin/sh", "-c", "\"${IPTABLES:-iptables}\" -P FORWARD DROP && exec node src/main.ts"]
 
 # Fake Acestream engine for development and end-to-end tests. It uses the same entrypoint as the
 # real engine image, so the tests also cover routing through the gateway and dropping privileges.
