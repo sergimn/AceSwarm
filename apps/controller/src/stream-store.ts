@@ -1,11 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import type { AceIdKind } from "@aceswarm/shared/ace-id";
 import { z } from "zod";
 import { Mutex, readJsonFile, writeJsonFile } from "./json-file.ts";
 
 const streamSchema = z.object({
   id: z.string().regex(/^[a-z0-9]{6,32}$/),
-  contentId: z.string().regex(/^[0-9a-f]{40}$/),
+  /** Acestream content ID or infohash. */
+  aceId: z.string().regex(/^[0-9a-f]{40}$/),
+  /** What `aceId` is, once known (the engine accepted it as that kind). */
+  aceIdKind: z.enum(["content-id", "infohash"]).nullable().default(null),
   name: z.string().min(1).max(80),
   enabled: z.boolean(),
   createdAt: z.string(),
@@ -21,18 +25,19 @@ const fileSchema = z.object({
 export type StreamConfig = z.infer<typeof streamSchema>;
 
 export class DuplicateStreamError extends Error {
-  constructor(contentId: string) {
-    super(`stream ${contentId} is already in the list`);
+  constructor(aceId: string) {
+    super(`stream ${aceId} is already in the list`);
     this.name = "DuplicateStreamError";
   }
 }
 
 export interface NewStream {
-  contentId: string;
+  aceId: string;
+  aceIdKind?: AceIdKind | null;
   name?: string | undefined;
 }
 
-export type StreamPatch = Partial<Pick<StreamConfig, "name" | "enabled" | "path">>;
+export type StreamPatch = Partial<Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind">>;
 
 /**
  * Persists the list of streams in `<data>/streams.json`. The file is the source of truth, so
@@ -63,14 +68,15 @@ export class StreamStore {
 
   async add(input: NewStream): Promise<StreamConfig> {
     return this.mutex.run(async () => {
-      if (this.streams.some((stream) => stream.contentId === input.contentId)) {
-        throw new DuplicateStreamError(input.contentId);
+      if (this.streams.some((stream) => stream.aceId === input.aceId)) {
+        throw new DuplicateStreamError(input.aceId);
       }
       const name = input.name?.trim();
       const stream: StreamConfig = {
         id: randomBytes(5).toString("hex"),
-        contentId: input.contentId,
-        name: name === undefined || name.length === 0 ? `Stream ${input.contentId.slice(0, 6)}` : name,
+        aceId: input.aceId,
+        aceIdKind: input.aceIdKind ?? null,
+        name: name === undefined || name.length === 0 ? `Stream ${input.aceId.slice(0, 6)}` : name,
         enabled: true,
         createdAt: new Date().toISOString(),
         path: null,

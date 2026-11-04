@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./ace-id": "./src/ace-id.ts",
     "./api-types": "./src/api-types.ts",
-    "./content-id": "./src/content-id.ts",
     "./env": "./src/env.ts",
     "./http": "./src/http.ts",
     "./logger": "./src/logger.ts",

@@ -26,6 +26,15 @@ export function behaviorFor(contentId: string): Behavior {
   return PREFIXES.find(([prefix]) => id.startsWith(prefix))?.[1] ?? "normal";
 }
 
+/**
+ * Like the real engine, the mock tells content IDs and infohashes apart and rejects the wrong
+ * query parameter. Which one a value "is" follows its last hex digit: 0-7 is a content ID, 8-f an
+ * infohash, so tests can pick either.
+ */
+export function idKindFor(id: string): "content-id" | "infohash" {
+  return Number.parseInt(id.slice(-1), 16) < 8 ? "content-id" : "infohash";
+}
+
 /** A stable hue per content ID so tiles of different streams look different. */
 export function hueFor(contentId: string): number {
   let hash = 0;

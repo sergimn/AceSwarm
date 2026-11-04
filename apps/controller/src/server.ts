@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
-import { normalizeContentId } from "@aceswarm/shared/content-id";
+import { parseAceId } from "@aceswarm/shared/ace-id";
 import { describeError } from "@aceswarm/shared/http";
 import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
@@ -13,7 +13,7 @@ import { DuplicateStreamError } from "./stream-store.ts";
 import { InvalidProfileError } from "./wireguard-store.ts";
 
 const newStreamSchema = z.object({
-  contentId: z.string().min(1).max(300),
+  aceId: z.string().min(1).max(300),
   name: z.string().max(80).optional(),
 });
 
@@ -58,14 +58,17 @@ export async function registerRoutes(
   app.post("/api/streams", async (request, reply) => {
     const parsed = newStreamSchema.safeParse(request.body);
     if (!parsed.success) {
-      return badRequest(reply, "expected { contentId, name? }");
+      return badRequest(reply, "expected { aceId, name? }");
     }
-    const contentId = normalizeContentId(parsed.data.contentId);
-    if (contentId === undefined) {
-      return badRequest(reply, "that does not look like an Acestream ID (40 hex characters)");
+    const ace = parseAceId(parsed.data.aceId);
+    if (ace === undefined) {
+      return badRequest(
+        reply,
+        "that does not look like an Acestream ID or infohash (40 hex characters, an acestream:// or a magnet link)",
+      );
     }
     try {
-      const stream = await orchestrator.addStream({ contentId, name: parsed.data.name });
+      const stream = await orchestrator.addStream({ aceId: ace.id, aceIdKind: ace.kind, name: parsed.data.name });
       return await reply.code(201).send(stream);
     } catch (error) {
       if (error instanceof DuplicateStreamError) {

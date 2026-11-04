@@ -28,6 +28,12 @@ services:
       context: .
       target: controller
     read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     cap_drop: [ALL]
     depends_on:
       docker-proxy:
@@ -67,7 +73,7 @@ services:
   # Only the Docker API sections the controller needs. It is the only client, on an internal network.
   docker-proxy:
     <<: *hardening
-    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     environment:
       DISABLE_IPV6: 1
       CONTAINERS: 1
@@ -91,6 +97,12 @@ services:
       context: .
       target: transcoder
     read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     cap_drop: [ALL]
     environment:
       PREVIEW_MODE: ${PREVIEW_MODE:-video}
@@ -114,6 +126,12 @@ services:
       context: .
       target: netgw
     read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8082/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     cap_drop: [ALL]
     # NET_ADMIN: tunnels, routes, iptables, conntrack. NET_RAW: ping probes. DAC_READ_SEARCH: read
     # the WireGuard profiles, which the controller stores readable by its own user only.
@@ -143,12 +161,21 @@ services:
       engines:
         ipv4_address: 172.31.250.2
 
+  # Build-only service for the engine image. Engines are started on demand by the controller, so
+  # this never runs; `docker compose --profile build build` builds every image locally.
+  engine:
+    image: ${ENGINE_IMAGE:-ghcr.io/sergimn/aceswarm-engine:latest}
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    profiles: [build]
+
   # ---- Monitoring (optional) ------------------------------------------------------------------
 
   prometheus:
     <<: *hardening
     profiles: [metrics]
-    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    image: docker.io/prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -167,7 +194,7 @@ services:
   loki:
     <<: *hardening
     profiles: [logs]
-    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    image: docker.io/grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     command: -config.file=/etc/loki/config.yaml -config.expand-env=true
     environment:
       LOKI_RETENTION: ${LOKI_RETENTION:-720h}
@@ -184,7 +211,7 @@ services:
   alloy:
     <<: *hardening
     profiles: [logs]
-    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+    image: docker.io/grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy /etc/alloy/config.alloy
     environment:
       ACESWARM_STACK_NAME: ${ACESWARM_STACK_NAME:-aceswarm}
@@ -200,7 +227,7 @@ services:
   docker-proxy-logs:
     <<: *hardening
     profiles: [logs]
-    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     environment:
       DISABLE_IPV6: 1
       CONTAINERS: 1
@@ -214,7 +241,7 @@ services:
   grafana:
     <<: *hardening
     profiles: [grafana]
-    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    image: docker.io/grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_ANALYTICS_REPORTING_ENABLED: "false"

@@ -34,7 +34,7 @@ export class ControllerMetrics {
     const info = new Gauge({
       name: "aceswarm_stream_info",
       help: "Configured streams (value is always 1)",
-      labelNames: ["stream", "name", "content_id", "enabled"],
+      labelNames: ["stream", "name", "ace_id", "enabled"],
       registers,
     });
     const state = new Gauge({
@@ -93,7 +93,7 @@ export class ControllerMetrics {
         const now = Date.now();
         for (const stream of current.streams) {
           const labels = { stream: stream.id };
-          info.set({ ...labels, name: stream.name, content_id: stream.contentId, enabled: String(stream.enabled) }, 1);
+          info.set({ ...labels, name: stream.name, ace_id: stream.aceId, enabled: String(stream.enabled) }, 1);
           for (const candidate of STREAM_STATES) {
             state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
           }

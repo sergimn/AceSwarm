@@ -9,7 +9,8 @@ import type {
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
+import { kindsToTry } from "@aceswarm/shared/ace-id";
+import { EngineError, type AcestreamClient, type EngineSession, type EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { EngineHandle, EngineManager } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
@@ -85,7 +86,7 @@ export class StreamSupervisor {
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
     this.stream = stream;
     this.deps = deps;
-    this.logger = deps.logger.child({ stream: stream.id, contentId: stream.contentId });
+    this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? defaultSleep;
     this.stateSince = this.now();
@@ -135,7 +136,8 @@ export class StreamSupervisor {
     const statsPeers = this.stats?.peers;
     return {
       id: this.stream.id,
-      contentId: this.stream.contentId,
+      aceId: this.stream.aceId,
+      aceIdKind: this.stream.aceIdKind,
       name: this.stream.name,
       enabled: this.stream.enabled,
       createdAt: this.stream.createdAt,
@@ -365,7 +367,7 @@ export class StreamSupervisor {
     this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
     try {
       await this.deps.netgw.assign({ ip: next.ip, path: target });
-      const session = await this.deps.ace.startSession(next.baseUrl, this.stream.contentId, randomUUID());
+      const session = await this.openSession(next.baseUrl);
       await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl }, true);
       await this.waitForHandover(session.playbackUrl);
       const oldSession = this.session;
@@ -413,11 +415,37 @@ export class StreamSupervisor {
   }
 
   private async startPlayback(engine: EngineHandle): Promise<void> {
-    const session = await this.deps.ace.startSession(engine.baseUrl, this.stream.contentId, randomUUID());
+    const session = await this.openSession(engine.baseUrl);
     this.session = session;
     this.attemptStartedAt = this.now();
     this.stats = undefined;
     this.pipeline = await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl });
+  }
+
+  /**
+   * Starts an engine session. A bare 40 character value can be a content ID or an infohash, and
+   * the engine rejects the wrong kind quickly, so the other kind is tried next and the one that
+   * works is remembered.
+   */
+  private async openSession(baseUrl: string): Promise<EngineSession> {
+    let lastError: unknown;
+    for (const kind of kindsToTry(this.stream.aceIdKind)) {
+      try {
+        const session = await this.deps.ace.startSession(baseUrl, this.stream.aceId, kind, randomUUID());
+        if (this.stream.aceIdKind !== kind) {
+          this.logger.info({ kind }, "engine accepted the stream identifier");
+          this.stream = { ...this.stream, aceIdKind: kind };
+          await this.deps.store.update(this.stream.id, { aceIdKind: kind });
+        }
+        return session;
+      } catch (error) {
+        if (!(error instanceof EngineError)) {
+          throw error;
+        }
+        lastError = error;
+      }
+    }
+    throw lastError;
   }
 
   private async applyPath(engine: EngineHandle, path: string | null): Promise<void> {

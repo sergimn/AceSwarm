@@ -42,8 +42,8 @@ async function json(method: string, path: string, body?: unknown): Promise<unkno
 
 export const api = {
   snapshot: async (): Promise<Snapshot> => (await json("GET", "/api/snapshot")) as Snapshot,
-  addStream: async (contentId: string, name: string): Promise<StreamView> =>
-    (await json("POST", "/api/streams", name.length > 0 ? { contentId, name } : { contentId })) as StreamView,
+  addStream: async (aceId: string, name: string): Promise<StreamView> =>
+    (await json("POST", "/api/streams", name.length > 0 ? { aceId, name } : { aceId })) as StreamView,
   updateStream: async (id: string, patch: { name?: string; enabled?: boolean }): Promise<StreamView> =>
     (await json("PATCH", `/api/streams/${encodeURIComponent(id)}`, patch)) as StreamView,
   removeStream: async (id: string): Promise<void> => {

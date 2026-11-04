@@ -21,6 +21,8 @@ const schema = z.object({
   PLAYLIST_SIZE: envInt(6),
   THUMBNAIL_INTERVAL_SECONDS: envInt(10),
   HANDOVER_TIMEOUT_SECONDS: envInt(120),
+  /** ffmpeg waits this long for data from the engine before giving up. */
+  INPUT_TIMEOUT_SECONDS: envInt(60),
 });
 
 export type Config = z.infer<typeof schema>;

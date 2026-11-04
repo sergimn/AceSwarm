@@ -86,7 +86,7 @@ export class Orchestrator {
 
   async addStream(input: NewStream): Promise<StreamView> {
     const stream = await this.deps.store.add(input);
-    this.logger.info({ stream: stream.id, contentId: stream.contentId }, "stream added");
+    this.logger.info({ stream: stream.id, aceId: stream.aceId }, "stream added");
     this.launch(stream);
     return this.view(stream);
   }
@@ -199,7 +199,8 @@ export class Orchestrator {
     }
     return {
       id: stream.id,
-      contentId: stream.contentId,
+      aceId: stream.aceId,
+      aceIdKind: stream.aceIdKind,
       name: stream.name,
       enabled: stream.enabled,
       createdAt: stream.createdAt,

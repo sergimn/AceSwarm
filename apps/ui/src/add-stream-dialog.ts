@@ -7,7 +7,7 @@ export class AddStreamDialog {
   private readonly navigator: Navigator;
   private readonly dialog: HTMLDialogElement;
   private readonly form: HTMLFormElement;
-  private readonly contentId: HTMLInputElement;
+  private readonly aceId: HTMLInputElement;
   private readonly name: HTMLInputElement;
   private readonly error: HTMLElement;
 
@@ -17,14 +17,14 @@ export class AddStreamDialog {
       this.navigator.back();
     });
     this.dialog = shell.dialog;
-    this.contentId = h("input", {
+    this.aceId = h("input", {
       className: "input mono",
       attrs: {
-        name: "contentId",
+        name: "aceId",
         required: true,
         autocomplete: "off",
         spellcheck: "false",
-        placeholder: "40 character ID or acestream:// link",
+        placeholder: "Content ID, infohash, acestream:// or magnet: link",
       },
     });
     this.name = h("input", { className: "input", attrs: { name: "name", maxlength: "80", placeholder: "Optional" } });
@@ -34,7 +34,7 @@ export class AddStreamDialog {
       this.navigator.back();
     });
     this.form = h("form", { className: "form" }, [
-      h("label", { className: "field" }, [h("span", { text: "Acestream ID" }), this.contentId]),
+      h("label", { className: "field" }, [h("span", { text: "Acestream ID or infohash" }), this.aceId]),
       h("label", { className: "field" }, [h("span", { text: "Name" }), this.name]),
       this.error,
       h("div", { className: "form-actions" }, [
@@ -59,7 +59,7 @@ export class AddStreamDialog {
         this.dialog.close();
       },
     });
-    this.contentId.focus();
+    this.aceId.focus();
   }
 
   private async submit(): Promise<void> {
@@ -68,7 +68,7 @@ export class AddStreamDialog {
       submit.disabled = true;
     }
     try {
-      const stream = await api.addStream(this.contentId.value.trim(), this.name.value.trim());
+      const stream = await api.addStream(this.aceId.value.trim(), this.name.value.trim());
       toast(`Added ${stream.name}`);
       this.navigator.back();
     } catch (error) {

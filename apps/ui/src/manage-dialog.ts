@@ -5,9 +5,12 @@ import { STATE_LABELS } from "./format.ts";
 import type { Navigator } from "./navigation.ts";
 import type { PreviewMode } from "./previews.ts";
 
+const KIND_LABELS = { "content-id": " · content ID", infohash: " · infohash", unknown: "" } as const;
+
 interface Row {
   element: HTMLElement;
   name: HTMLElement;
+  identifier: HTMLElement;
   state: HTMLElement;
   toggle: HTMLButtonElement;
 }
@@ -78,6 +81,7 @@ export class ManageDialog {
         this.list.append(row.element);
       }
       row.name.textContent = stream.name;
+      row.identifier.textContent = `${stream.aceId}${KIND_LABELS[stream.aceIdKind ?? "unknown"]}`;
       const state = stream.enabled ? stream.state : "stopped";
       row.state.textContent = STATE_LABELS[state];
       row.state.className = `badge state-${state}`;
@@ -124,11 +128,12 @@ export class ManageDialog {
       await api.removeStream(stream.id);
       toast("Stream removed");
     });
+    const identifier = h("span", { className: "row-sub mono", text: stream.aceId });
     const element = h("li", { className: "row" }, [
-      h("div", { className: "row-main" }, [name, h("span", { className: "row-sub mono", text: stream.contentId })]),
+      h("div", { className: "row-main" }, [name, identifier]),
       state,
       h("div", { className: "row-actions" }, [restart, toggle, remove]),
     ]);
-    return { element, name, state, toggle };
+    return { element, name, identifier, state, toggle };
   }
 }

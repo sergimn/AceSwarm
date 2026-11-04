@@ -15,6 +15,8 @@ export interface FfmpegPlan {
   segmentSeconds: number;
   playlistSize: number;
   thumbnailIntervalSeconds: number;
+  /** Give up on the source after this long without data. Real engines can take 30+ s to start. */
+  inputTimeoutSeconds: number;
 }
 
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
@@ -67,7 +69,7 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     "-probesize",
     "5000000",
     "-rw_timeout",
-    "15000000",
+    String(plan.inputTimeoutSeconds * 1_000_000),
   ];
   if (plan.previewMode === "keyframes") {
     // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame.

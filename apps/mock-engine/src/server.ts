@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { Service } from "@aceswarm/shared/service";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
-import { behaviorFor, buildSourceArgs, hueFor, type SourcePlan } from "./behavior.ts";
+import { behaviorFor, buildSourceArgs, hueFor, idKindFor, type SourcePlan } from "./behavior.ts";
 import type { PeerPinger } from "./peers.ts";
 import type { Session, SessionStore } from "./sessions.ts";
 
@@ -19,11 +19,12 @@ export interface MockOptions {
 const getstreamQuery = z.object({
   id: z.string().optional(),
   content_id: z.string().optional(),
+  infohash: z.string().optional(),
   format: z.string().optional(),
   pid: z.string().max(128).optional(),
 });
 
-const sessionParams = z.object({ session: z.string().regex(/^[0-9a-f]{32}$/) });
+const sessionParams = z.object({ session: z.string().regex(/^[0-9a-f]{32}$/) }).loose();
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -75,13 +76,15 @@ export function registerRoutes(
 
   app.get("/ace/getstream", async (request) => {
     const query = getstreamQuery.safeParse(request.query);
-    const contentId = (query.data?.id ?? query.data?.content_id ?? "").toLowerCase();
+    const asInfohash = query.data?.infohash !== undefined;
+    const contentId = (query.data?.infohash ?? query.data?.id ?? query.data?.content_id ?? "").toLowerCase();
     if (!query.success || !/^[0-9a-f]{40}$/.test(contentId)) {
       return failure("invalid content id");
     }
     const behavior = behaviorFor(contentId);
     await sleep(options.loadDelayMs);
-    if (behavior === "dead") {
+    // The wrong parameter (an infohash sent as `id=` or the reverse) fails like on a real engine.
+    if (behavior === "dead" || (idKindFor(contentId) === "infohash") !== asInfohash) {
       return failure("failed to load content");
     }
     if (behavior === "vpn-only" && !(await waitForVpnPeer(pinger, options.peerWaitMs))) {
@@ -117,7 +120,17 @@ export function registerRoutes(
     return sessions.stop(params.data.session) ? ok("ok") : failure("unknown playback session id");
   });
 
+  // Real engines answer the playback URL with a redirect to /content/<infohash>/..., so clients
+  // must follow redirects; the mock does the same.
   app.get("/ace/r/:session", (request, reply) => {
+    const params = sessionParams.safeParse(request.params);
+    const session = params.success ? sessions.get(params.data.session) : undefined;
+    return session === undefined
+      ? reply.code(404).send({ error: "unknown playback session id" })
+      : reply.redirect(`/content/${session.contentId}/${session.id}`, 302);
+  });
+
+  app.get("/content/:infohash/:session", (request, reply) => {
     const params = sessionParams.safeParse(request.params);
     const session = params.success ? sessions.get(params.data.session) : undefined;
     if (session === undefined) {

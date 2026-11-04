@@ -3,6 +3,10 @@
  * field is plain data (timestamps are ISO strings).
  */
 
+import type { AceIdKind } from "./ace-id.ts";
+
+export type { AceIdKind } from "./ace-id.ts";
+
 /** Lifecycle of a stream as seen by the controller. */
 export type StreamState =
   "starting" | "buffering" | "playing" | "stalled" | "recovering" | "switching" | "stopped" | "error";
@@ -35,7 +39,10 @@ export interface PeerSummary {
 
 export interface StreamView {
   id: string;
-  contentId: string;
+  /** Acestream content ID or infohash (40 hex characters). */
+  aceId: string;
+  /** Which of the two `aceId` turned out to be; null until the engine accepted it. */
+  aceIdKind: AceIdKind | null;
   name: string;
   enabled: boolean;
   createdAt: string;

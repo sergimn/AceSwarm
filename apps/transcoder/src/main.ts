@@ -23,6 +23,7 @@ const manager = new PipelineManager(
       segmentSeconds: config.SEGMENT_SECONDS,
       playlistSize: config.PLAYLIST_SIZE,
       thumbnailIntervalSeconds: config.THUMBNAIL_INTERVAL_SECONDS,
+      inputTimeoutSeconds: config.INPUT_TIMEOUT_SECONDS,
     },
   },
   logger,

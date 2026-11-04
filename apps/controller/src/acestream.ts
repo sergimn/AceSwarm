@@ -1,3 +1,4 @@
+import { getstreamParameter, type AceIdKind } from "@aceswarm/shared/ace-id";
 import { requestJson } from "@aceswarm/shared/http";
 
 /** Error reported by the engine itself (for example "failed to load content"). */
@@ -68,8 +69,8 @@ export class AcestreamClient {
   }
 
   /** Starts a playback session. Loading content can take a while, hence the long timeout. */
-  async startSession(baseUrl: string, contentId: string, playerId: string): Promise<EngineSession> {
-    const query = new URLSearchParams({ id: contentId, format: "json", pid: playerId });
+  async startSession(baseUrl: string, aceId: string, kind: AceIdKind, playerId: string): Promise<EngineSession> {
+    const query = new URLSearchParams({ [getstreamParameter(kind)]: aceId, format: "json", pid: playerId });
     const body = await requestJson<Envelope<RawSession>>(`${baseUrl}/ace/getstream?${query.toString()}`, {
       timeoutMs: 90_000,
     });
