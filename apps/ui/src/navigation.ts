@@ -68,6 +68,7 @@ export class Navigator {
   private readonly base: HTMLElement;
   private readonly layers: OpenLayer[] = [];
   private backPending = false;
+  private lastRestored: HTMLElement | undefined;
 
   constructor(base: HTMLElement) {
     this.base = base;
@@ -76,6 +77,9 @@ export class Navigator {
     });
     addEventListener("popstate", () => {
       this.onPopState();
+    });
+    document.addEventListener("fullscreenchange", () => {
+      this.recoverFocus();
     });
   }
 
@@ -117,8 +121,27 @@ export class Navigator {
       return;
     }
     layer.close();
-    if (layer.restoreFocus instanceof HTMLElement && layer.restoreFocus.isConnected) {
-      layer.restoreFocus.focus();
+    this.lastRestored = layer.restoreFocus instanceof HTMLElement ? layer.restoreFocus : undefined;
+    this.recoverFocus(true);
+    // Leaving full screen finishes after the layer closed and can drop focus on the document.
+    requestAnimationFrame(() => {
+      this.recoverFocus();
+    });
+  }
+
+  /** Puts focus back where it was before the last layer opened, if focus was lost (or always). */
+  private recoverFocus(always = false): void {
+    const active = document.activeElement;
+    // Focus is lost when it sits on the document or still inside a layer that has closed. While an
+    // element is full screen, Chromium keeps the rest of the page inert, so the first attempt can
+    // fail and this runs again once full screen has ended.
+    const lost = active === null || active === document.body || !this.root().contains(active);
+    if (!always && !lost) {
+      return;
+    }
+    const target = this.lastRestored;
+    if (target?.isConnected === true && this.root().contains(target)) {
+      target.focus();
     } else {
       this.focusFirst();
     }
