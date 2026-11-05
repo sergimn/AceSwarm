@@ -83,7 +83,11 @@ test("moves the stream to the VPN when the direct path loses the broadcast", asy
   expect(playing.path).toBe(VPN_PATH);
   expect(playing.recoveries).toBeGreaterThan(before.recoveries);
   // The swarm is still the broadcast runner, now reached through the tunnel.
-  expect(playing.peers.countries.map(({ code }) => code)).toContain("ES");
+  await expect
+    .poll(async () => (await streamById(request, run.streamId))?.peers.countries.map(({ code }) => code), {
+      timeout: 60_000,
+    })
+    .toContain("ES");
 
   // The engine's traffic now leaves through the WireGuard server's runner.
   await expect

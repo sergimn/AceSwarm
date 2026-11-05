@@ -2,11 +2,12 @@
 
 The end-to-end tests drive the real AceSwarm services (controller, transcoder, network gateway) through the UI and the REST API with Playwright. Nothing is mocked: real Acestream engines play real broadcasts from another machine, directly or through a real WireGuard server on a third machine.
 
-| Runs in                    | Engines                                      | Machines                | Command                                        |
+| Runs in                    | Engines                                      | Machines                | When                                           |
 | -------------------------- | -------------------------------------------- | ----------------------- | ---------------------------------------------- |
 | Workflow "E2E" (`e2e.yml`) | real Acestream engines (`engine/Dockerfile`) | 3 GitHub-hosted runners | every PR and push to `main`, or "Run workflow" |
 
-The suite needs three machines that can reach Acestream's lookup service, so it doesn't run on one machine. To try a branch, push it and start the workflow with "Run workflow".
+- **No single-machine run.** The broadcasts and the WireGuard server need their own hosts, joined to AceSwarm's by the mesh, so the suite runs on the CI runners only. To try a branch, push it and start the workflow with "Run workflow".
+- **It needs Acestream's lookup service.** Engines resolve both content IDs and infohashes through it, so an Acestream outage fails the whole run.
 
 ## Architecture
 
@@ -220,7 +221,7 @@ sequenceDiagram
   AS->>AS: no new frames: restart pipeline, restart engine, ...
   T->>AS: recoveries went up, not playing
   T->>FW: remove the DROP rule
-  AS->>SRC: the next engine restart plays again
+  AS->>SRC: the next recovery step plays again
   T->>AS: playing on the direct path
 ```
 

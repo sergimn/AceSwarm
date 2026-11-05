@@ -12,7 +12,7 @@ export interface GeoLookup {
 
 /**
  * Fixed address-to-country entries, consulted before the database. Used by the end-to-end tests
- * (whose fake peers live in documentation ranges no database knows) and for private peers.
+ * (whose runners reach each other on 192.0.2.0/24, which no database knows) and for private peers.
  */
 export class StaticGeoLookup implements GeoLookup {
   private readonly entries: ReadonlyMap<string, string>;

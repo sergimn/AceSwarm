@@ -144,7 +144,8 @@ test("the gateway keeps engines off the direct path on its own", () => {
 test("streams wait instead of going direct while no WireGuard path is up", async ({ page, request }) => {
   const vpnOnly = await addStream(request, bc[1]!.contentId, "Needs the VPN");
   run.vpnOnlyId = vpnOnly.id;
-  expect((await waitForPlaying(request, vpnOnly.id)).path).toBe(VPN_PATH);
+  const before = await waitForPlaying(request, vpnOnly.id);
+  expect(before.path).toBe(VPN_PATH);
 
   // Make the WireGuard server unreachable: the tunnel stops carrying anything, its probes fail and
   // the path goes down, while the direct path stays up.
@@ -157,15 +158,15 @@ test("streams wait instead of going direct while no WireGuard path is up", async
     // WireGuard only off, its first recovery would move it to the direct path, which is up and
     // scores better. Watch for the stall, that recovery and a few more ladder steps.
     const watchStart = Date.now();
-    let recoveries = 0;
-    while (Date.now() - watchStart < 30_000 || (recoveries < 1 && Date.now() - watchStart < 150_000)) {
+    let recoveries = before.recoveries;
+    while (Date.now() - watchStart < 30_000 || (recoveries <= before.recoveries && Date.now() - watchStart < 150_000)) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const current = await streamById(request, vpnOnly.id);
       expect(current?.path).toBe(VPN_PATH);
       expect(gatewayAssignments().map(({ path }) => path)).not.toContain("direct");
       recoveries = current?.recoveries ?? 0;
     }
-    expect(recoveries).toBeGreaterThanOrEqual(1);
+    expect(recoveries).toBeGreaterThan(before.recoveries);
 
     const waiting = await addStream(request, bc[2]!.infohash, "Waits for VPN");
     run.waitingId = waiting.id;

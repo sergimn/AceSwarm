@@ -157,7 +157,7 @@ case "${1:-}" in
   logs) logs ;;
   stop) stop ;;
   *)
-    sed -n '2,21p' "$0" >&2
+    sed -n '2,20p' "$0" >&2
     exit 2
     ;;
 esac
