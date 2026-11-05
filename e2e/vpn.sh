@@ -18,7 +18,7 @@ CLIENT_MTU=1280
 here="$(cd "$(dirname "$0")" && pwd)"
 
 build() {
-  docker build -q -t "$IMAGE" "$here/../wg-server" >/dev/null
+  docker build -q -t "$IMAGE" "$here/wg-server" >/dev/null
 }
 
 start() {
