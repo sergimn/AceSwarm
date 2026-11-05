@@ -45,8 +45,8 @@ const DESTINATION_CHAIN = "ACESWARM-DST";
 /**
  * Destinations engines may never reach, whatever their path: the host and its published ports
  * (rootless Podman exposes them on 169.254.1.2), the LAN, other containers and VPN-internal
- * addresses. Peers live on the public internet. The documentation ranges (192.0.2.0/24,
- * 198.51.100.0/24, 203.0.113.0/24) stay reachable on purpose: the E2E suites use them as the internet.
+ * addresses. Peers live on the public internet. Documentation ranges such as 192.0.2.0/24 are not
+ * private, so they stay reachable: the E2E runners reach each other on it as their internet.
  */
 export const PRIVATE_NETWORKS: readonly string[] = [
   "0.0.0.0/8",

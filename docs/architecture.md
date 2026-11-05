@@ -153,17 +153,16 @@ Engines keep their live cache in memory and have a memory limit (`ENGINE_MEMORY_
 
 ## Tests
 
-| Kind          | Where                            | What                                                                               |
-| ------------- | -------------------------------- | ---------------------------------------------------------------------------------- |
-| Unit          | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers  |
-| End to end    | `e2e/`                           | Playwright against the real services with a mock engine (see below)                |
-| Multi-machine | `e2e/multi/`                     | three CI runners: real engines, a real dummy broadcast and a real WireGuard server |
-| Real streams  | by hand                          | the full stack with real engines, on Docker and Podman                             |
+| Kind         | Where                            | What                                                                                                      |
+| ------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Unit         | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers                         |
+| End to end   | `e2e/`                           | Playwright on three CI runners: real engines, real dummy broadcasts and a real WireGuard server, no mocks |
+| Real streams | by hand                          | the full stack with real engines and real streams, on Docker and Podman                                   |
 
-The E2E stack has no Acestream and no internet:
+The end-to-end tests make failures for real instead of faking them:
 
-- **Fake peers.** The mock engine pings fake peers on a fake internet. The peers answer on addresses Docker doesn't manage, because Docker 28+ drops packets routed to another network's container addresses.
-- **VPN-only peer.** A throwaway WireGuard server provides a VPN that is the only way to reach one of the peers.
-- **Fixed countries.** `GEOIP_STATIC` gives the fake peers countries.
+- **A swarm that dries up, or an ISP that blocks peers.** A firewall rule on the AceSwarm runner drops engine traffic to the broadcast runner.
+- **A VPN provider that went away.** A firewall rule drops the gateway's WireGuard packets to the WireGuard server.
+- **Fixed countries.** `GEOIP_STATIC` places the other runners in countries.
 
-[e2e/README.md](../e2e/README.md) describes both end-to-end suites with diagrams.
+[e2e/README.md](../e2e/README.md) describes the suite with diagrams.

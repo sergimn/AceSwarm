@@ -102,30 +102,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
-  e2e:
-    name: End-to-end tests (mock engine)
-    runs-on: ubuntu-24.04
-    needs: check
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .node-version
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium ffmpeg
-      # Containers cannot load kernel modules; without it the gateway falls back to wireguard-go.
-      - run: sudo modprobe wireguard || true
-      - run: e2e/run.sh
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: e2e-results
-          path: |
-            playwright-report/
-            test-results/
-            e2e-stack.log
-          retention-days: 14

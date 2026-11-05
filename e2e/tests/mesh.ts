@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { expect, type APIRequestContext } from "@playwright/test";
 
 /**
- * The other runners, as this runner reaches them through the mesh (e2e/multi/mesh.sh). Each one
+ * The other runners, as this runner reaches them through the mesh (e2e/mesh.sh). Each one
  * shares files on port 18999; the broadcast runner also runs the tracker on port 7700.
  */
 export const MESH = {
@@ -24,11 +24,23 @@ export async function remoteWireguardProfile(): Promise<string> {
   return await fetchText(`http://${MESH.wg}:18999/client.conf`);
 }
 
-/** Infohash of the dummy broadcast on the broadcast runner. */
-export async function broadcastInfohash(): Promise<string> {
-  const infohash = (await fetchText(`http://${MESH.source}:18999/infohash`)).trim();
-  expect(infohash).toMatch(/^[0-9a-f]{40}$/);
-  return infohash;
+export interface Broadcast {
+  /** The source's name on the broadcast runner (bc1, bc2, ...). */
+  name: string;
+  infohash: string;
+  /** What acestream:// links carry. Players resolve it through Acestream's lookup service. */
+  contentId: string;
+}
+
+/** The dummy broadcasts on the broadcast runner (e2e/broadcast.sh), at least `count` of them. */
+export async function broadcasts(count: number): Promise<Broadcast[]> {
+  const list = JSON.parse(await fetchText(`http://${MESH.source}:18999/broadcasts.json`)) as Broadcast[];
+  expect(list.length).toBeGreaterThanOrEqual(count);
+  for (const broadcast of list) {
+    expect(broadcast.infohash).toMatch(/^[0-9a-f]{40}$/);
+    expect(broadcast.contentId).toMatch(/^[0-9a-f]{40}$/);
+  }
+  return list;
 }
 
 export interface Announce {
@@ -54,13 +66,9 @@ export async function lastAnnounce(infohash: string, ip: string): Promise<string
   return times.toSorted((a, b) => a.localeCompare(b, "en")).at(-1) ?? "";
 }
 
-/**
- * Drops traffic from this runner's containers to the broadcast runner, like an ISP blocking the
- * swarm. It only affects forwarded traffic (DOCKER-USER), so the gateway's direct path loses the
- * broadcast while WireGuard (to the other runner) and this test's own requests still work.
- */
-export function setDirectPathBlocked(blocked: boolean): void {
-  const rule = ["DOCKER-USER", "-d", `${MESH.source}/32`, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
+/** Adds or removes a DROP rule for traffic this runner's containers forward (DOCKER-USER). */
+function setForwardDrop(match: string[], drop: boolean): void {
+  const rule = ["DOCKER-USER", ...match, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
   const present = (): boolean => {
     try {
       execFileSync("sudo", ["iptables", "-C", ...rule], { stdio: "ignore" });
@@ -69,12 +77,30 @@ export function setDirectPathBlocked(blocked: boolean): void {
       return false;
     }
   };
-  if (blocked && !present()) {
+  if (drop && !present()) {
     execFileSync("sudo", ["iptables", "-I", ...rule]);
   }
-  while (!blocked && present()) {
+  while (!drop && present()) {
     execFileSync("sudo", ["iptables", "-D", ...rule]);
   }
+}
+
+/**
+ * Drops traffic from this runner's containers to the broadcast runner, like an ISP blocking the
+ * swarm. It only affects forwarded traffic, so the gateway's direct path loses the broadcasts
+ * while WireGuard (to the other runner) and the tests' own requests still work. The direct path
+ * still answers the gateway's pings, which go to the WireGuard server's runner.
+ */
+export function setDirectPathBlocked(blocked: boolean): void {
+  setForwardDrop(["-d", `${MESH.source}/32`], blocked);
+}
+
+/**
+ * Drops the gateway's WireGuard packets to the WireGuard server, like a VPN provider that went
+ * away: the tunnel stops working and its path goes down. The direct path keeps working.
+ */
+export function setVpnServerUnreachable(unreachable: boolean): void {
+  setForwardDrop(["-d", `${MESH.wg}/32`, "-p", "udp", "--dport", "51820"], unreachable);
 }
 
 /** Fetches the stream's full-quality HLS playlist and its newest segment. */

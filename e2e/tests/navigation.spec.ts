@@ -1,12 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
-import { addStream, mockId, resetStack, waitForPlaying } from "./helpers.ts";
+import { addStream, resetStack, waitForPlaying } from "./helpers.ts";
+import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({ request }) => {
   await resetStack(request);
-  for (const seed of [11, 12, 13]) {
-    const stream = await addStream(request, mockId("c", "content-id", seed), `Channel ${String(seed)}`);
+  const [first, second, third] = await broadcasts(3);
+  const streams = [
+    await addStream(request, first!.infohash, "Channel 11"),
+    await addStream(request, second!.contentId, "Channel 12"),
+    await addStream(request, third!.infohash, "Channel 13"),
+  ];
+  // The engines start side by side.
+  for (const stream of streams) {
     await waitForPlaying(request, stream.id);
   }
 });

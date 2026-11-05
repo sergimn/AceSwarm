@@ -1,9 +1,9 @@
 /**
- * A minimal BitTorrent HTTP tracker for the multi-machine E2E tests. The Acestream broadcast
+ * A minimal BitTorrent HTTP tracker for the end-to-end tests. The Acestream broadcast
  * source's built-in tracker refuses announces ("Requested download is not authorized for use with
  * this tracker"), so the source announces to this one instead and players find it here.
  *
- *   node e2e/multi/tracker.ts --port 7700 [--host 0.0.0.0]
+ *   node e2e/tracker.ts --port 7700 [--host 0.0.0.0]
  *
  * It keeps the peers of every info hash in memory and answers with compact peer lists. A peer's
  * address is the connection's source address, which on the mesh is the runner's mesh address.
