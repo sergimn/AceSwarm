@@ -122,15 +122,16 @@ export class Orchestrator {
   async setNetworkPolicy(policy: NetworkPolicy): Promise<NetworkPolicy> {
     return this.networkChanges.run(async () => {
       const changed = policy.wireguardOnly !== this.deps.policy.get().wireguardOnly;
-      if (changed && policy.wireguardOnly) {
+      // A file that could not be read is written again even with the same value, so the gateway
+      // stops reporting it. Writing "on" always needs a profile.
+      const save = changed || this.deps.policy.needsSave;
+      if (save && policy.wireguardOnly) {
         const profiles = await this.deps.wireguard.list();
         if (profiles.length === 0) {
           throw new NetworkPolicyError("Add a WireGuard profile before turning on WireGuard only.");
         }
       }
-      // A file that could not be read is written again even with the same value, so the gateway
-      // stops reporting it.
-      if (changed || this.deps.policy.needsSave) {
+      if (save) {
         await this.deps.policy.save(policy);
         this.logger.info({ wireguardOnly: policy.wireguardOnly }, "network policy saved");
       }

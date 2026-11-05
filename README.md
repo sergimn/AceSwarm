@@ -91,7 +91,7 @@ Turn on **WireGuard only** under **Network** to stop using the direct connection
 - Streams on the direct path move to a WireGuard path right away. New streams only start on WireGuard.
 - If every WireGuard path is down, new streams wait and say so, and streams already on WireGuard keep recovering there. None fall back to the direct connection.
 - The gateway enforces it too: it refuses to route any engine through the direct connection.
-- Engines on a WireGuard path reach everything through the tunnel, including the networks in `ENGINE_ALLOWED_PRIVATE`. With this on, a LAN DNS server in `ENGINE_DNS` or LAN peers only work if the VPN routes to them.
+- Engines on a WireGuard path reach everything through the tunnel, including the networks in `ENGINE_ALLOWED_PRIVATE`, and a VPN provider can't reach your LAN. Keep `ENGINE_DNS` on public resolvers: with a LAN DNS server, engines can't resolve anything and no stream starts.
 - Turning it off allows the direct connection again. Streams stay on their current path until they have a reason to move.
 
 ## Monitoring

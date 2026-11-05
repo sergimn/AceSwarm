@@ -137,6 +137,18 @@ describe("WireGuard only", () => {
     expect(policy.needsSave).toBe(false);
   });
 
+  it("needs a profile to rewrite a policy file it could not understand as on", async () => {
+    const { orchestrator, policy, policyFile } = await setup();
+    await writeFile(policyFile, "{ broken");
+    await policy.load();
+    await expect(orchestrator.setNetworkPolicy({ wireguardOnly: true })).rejects.toThrow(NetworkPolicyError);
+    expect(await readFile(policyFile, "utf8")).toBe("{ broken");
+
+    // Turning it off still works, and fixes the file.
+    expect(await orchestrator.setNetworkPolicy({ wireguardOnly: false })).toEqual({ wireguardOnly: false });
+    expect(policy.needsSave).toBe(false);
+  });
+
   it("stays on when the policy file can't be understood", async () => {
     const directory = await tempDirectory();
     await writeFile(join(directory, "policy.json"), "{ broken");

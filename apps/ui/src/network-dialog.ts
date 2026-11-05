@@ -11,7 +11,7 @@ const STRATEGY_LABELS = {
 
 const WIREGUARD_ONLY_HINTS = {
   off: "Off: streams may use the direct connection.",
-  on: "On: streams only use WireGuard. If every WireGuard path is down, they wait instead of going direct.",
+  on: "On: streams never use the direct connection. New streams wait for a WireGuard path if none is up.",
   unavailable: "Add a WireGuard profile first.",
 } as const;
 
