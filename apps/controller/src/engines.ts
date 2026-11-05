@@ -6,10 +6,13 @@ import type { ContainerDetails, DockerClient } from "./docker.ts";
 export interface EngineHandle {
   containerId: string;
   name: string;
+  /** The stream that owns the engine; empty for a shared engine. */
   streamId: string;
   generation: number;
   ip: string;
   baseUrl: string;
+  /** The network path of a shared engine, which every stream on that path uses; null for a stream's own engine. */
+  sharedPath: string | null;
 }
 
 /**
@@ -37,6 +40,12 @@ const ROLE_LABEL = "aceswarm.role";
 const STACK_LABEL = "aceswarm.stack";
 const STREAM_LABEL = "aceswarm.stream";
 const GENERATION_LABEL = "aceswarm.generation";
+const SHARED_PATH_LABEL = "aceswarm.shared-path";
+
+/** A path id ("direct", "wg:<profile>") as it can appear in a container name. */
+function nameSafe(path: string): string {
+  return path.replaceAll(/[^a-zA-Z0-9_.-]/g, "-");
+}
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -44,10 +53,11 @@ const sleep = (ms: number): Promise<void> =>
   });
 
 /**
- * Creates one engine container per stream on demand through the Docker socket proxy. Engines are
- * labelled with the stack and stream so the controller can adopt them after a restart and remove
- * orphans. A stream can briefly have two engines (two "generations") while it moves to another
- * network path.
+ * Creates engine containers on demand through the Docker socket proxy: one per stream, or one per
+ * network path that every stream on it shares (see `SharedEngines`). Engines are labelled with the
+ * stack and their stream or path, so the controller can adopt them after a restart and remove
+ * orphans. A stream or path can briefly have two engines (two "generations") while streams move
+ * from one to the other.
  */
 export class EngineManager {
   private readonly docker: DockerClient;
@@ -88,9 +98,48 @@ export class EngineManager {
     return handles.toSorted((a, b) => b.generation - a.generation);
   }
 
-  /** Creates and starts an engine, then waits until its HTTP API answers. */
+  /** Creates and starts a stream's own engine, then waits until its HTTP API answers. */
   async create(streamId: string, generation: number, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     const name = `${this.options.stack}-engine-${streamId}-${String(generation)}`;
+    const handle = await this.createContainer(name, { [STREAM_LABEL]: streamId }, generation, onAddress);
+    this.logger.info({ streamId, generation, container: name }, "engine started");
+    return handle;
+  }
+
+  /** Creates and starts the shared engine of a network path, then waits until its HTTP API answers. */
+  async createShared(path: string, generation: number, onAddress?: OnEngineAddress): Promise<EngineHandle> {
+    const name = `${this.options.stack}-engine-shared-${nameSafe(path)}-${String(generation)}`;
+    const handle = await this.createContainer(name, { [SHARED_PATH_LABEL]: path }, generation, onAddress);
+    this.logger.info({ path, generation, container: name }, "shared engine started");
+    return handle;
+  }
+
+  /** Shared engines that already exist, newest generation first; all of them, or those of one path. */
+  async findShared(path?: string): Promise<EngineHandle[]> {
+    const containers = await this.docker.listContainers({
+      [STACK_LABEL]: this.options.stack,
+      [ROLE_LABEL]: "engine",
+      ...(path !== undefined && { [SHARED_PATH_LABEL]: path }),
+    });
+    const handles: EngineHandle[] = [];
+    for (const container of containers) {
+      if (container.Labels[SHARED_PATH_LABEL] === undefined) {
+        continue;
+      }
+      const details = await this.docker.inspectContainer(container.Id);
+      if (details !== undefined) {
+        handles.push(this.toHandle(details));
+      }
+    }
+    return handles.toSorted((a, b) => b.generation - a.generation);
+  }
+
+  private async createContainer(
+    name: string,
+    owner: Record<string, string>,
+    generation: number,
+    onAddress?: OnEngineAddress,
+  ): Promise<EngineHandle> {
     const existing = await this.docker.inspectContainer(name);
     if (existing !== undefined) {
       await this.docker.removeContainer(existing.Id);
@@ -105,7 +154,7 @@ export class EngineManager {
       Labels: {
         [STACK_LABEL]: this.options.stack,
         [ROLE_LABEL]: "engine",
-        [STREAM_LABEL]: streamId,
+        ...owner,
         [GENERATION_LABEL]: String(generation),
       },
       HostConfig: {
@@ -120,12 +169,11 @@ export class EngineManager {
       },
     });
     await this.docker.startContainer(id);
-    this.logger.info({ streamId, generation, container: name }, "engine started");
     return this.waitReady(id, onAddress);
   }
 
   async restart(handle: EngineHandle, onAddress?: OnEngineAddress): Promise<EngineHandle> {
-    this.logger.info({ streamId: handle.streamId, container: handle.name }, "restarting engine");
+    this.logger.info({ container: handle.name }, "restarting engine");
     await this.docker.restartContainer(handle.containerId);
     return this.waitReady(handle.containerId, onAddress);
   }
@@ -154,7 +202,10 @@ export class EngineManager {
     }
   }
 
-  /** Removes engines of this stack whose stream is no longer configured. */
+  /**
+   * Removes engines of this stack whose stream is no longer configured. Shared engines belong to a
+   * path rather than a stream: `SharedEngines` removes the ones nobody uses.
+   */
   async removeOrphans(knownStreamIds: ReadonlySet<string>): Promise<number> {
     const containers = await this.docker.listContainers({
       [STACK_LABEL]: this.options.stack,
@@ -162,6 +213,9 @@ export class EngineManager {
     });
     let removed = 0;
     for (const container of containers) {
+      if (container.Labels[SHARED_PATH_LABEL] !== undefined) {
+        continue;
+      }
       const streamId = container.Labels[STREAM_LABEL];
       if (streamId !== undefined && knownStreamIds.has(streamId)) {
         continue;
@@ -211,6 +265,7 @@ export class EngineManager {
       generation: Number.parseInt(details.Config.Labels[GENERATION_LABEL] ?? "0", 10),
       ip,
       baseUrl: `http://${ip}:${String(this.options.httpPort)}`,
+      sharedPath: details.Config.Labels[SHARED_PATH_LABEL] ?? null,
     };
   }
 }

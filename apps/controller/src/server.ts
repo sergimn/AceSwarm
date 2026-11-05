@@ -10,6 +10,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { NetworkPolicyError, type Orchestrator } from "./orchestrator.ts";
 import { DuplicateStreamError } from "./stream-store.ts";
+import { describeDevice } from "./viewers.ts";
 import { InvalidProfileError } from "./wireguard-store.ts";
 
 const newStreamSchema = z.object({
@@ -31,7 +32,14 @@ const profileSchema = z.object({
 
 const networkSchema = z.object({ wireguardOnly: z.boolean() }).strict();
 
-const idParams = z.object({ id: z.string().regex(/^[a-z0-9]{6,32}$/) });
+const settingsSchema = z.object({ sharedEngines: z.boolean().optional() }).strict();
+
+const streamIdSchema = z.string().regex(/^[a-z0-9]{6,32}$/);
+const viewerSchema = z.object({ stream: streamIdSchema.nullable() }).strict();
+/** Random ids that players make up for one visit. */
+const viewerParams = z.object({ viewer: z.string().regex(/^[a-z0-9]{8,32}$/) });
+
+const idParams = z.object({ id: streamIdSchema });
 const nameParams = z.object({ name: z.string().min(1).max(64) });
 
 const HOP_HEADERS = ["content-type", "content-length", "cache-control", "last-modified"];
@@ -128,6 +136,36 @@ export async function registerRoutes(
       throw error;
     }
   });
+
+  app.get("/api/settings", () => orchestrator.getSettings());
+
+  app.patch("/api/settings", async (request, reply) => {
+    const parsed = settingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, "expected { sharedEngines? }");
+    }
+    return parsed.data.sharedEngines === undefined
+      ? orchestrator.getSettings()
+      : orchestrator.updateSettings({ sharedEngines: parsed.data.sharedEngines });
+  });
+
+  // Players report the stream they show full screen about once a minute, and `null` once they
+  // close it. Also sent with navigator.sendBeacon, which can only POST.
+  app.post("/api/viewers/:viewer", async (request, reply) => {
+    const params = viewerParams.safeParse(request.params);
+    const body = viewerSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return badRequest(reply, "expected { stream } (a stream id or null)");
+    }
+    const known = orchestrator.reportViewer(
+      params.data.viewer,
+      body.data.stream,
+      describeDevice(request.headers["user-agent"]),
+    );
+    return known ? reply.code(204).send() : reply.code(404).send({ error: "stream not found" });
+  });
+
+  app.get("/api/viewers", () => orchestrator.viewers());
 
   app.get("/api/wireguard", () => orchestrator.listProfiles());
 

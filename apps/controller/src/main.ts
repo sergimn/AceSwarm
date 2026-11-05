@@ -10,7 +10,10 @@ import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { registerRoutes } from "./server.ts";
 import { NetworkPolicyStore } from "./network-policy-store.ts";
+import { SettingsStore } from "./settings-store.ts";
+import { SharedEngines } from "./shared-engines.ts";
 import { StreamStore } from "./stream-store.ts";
+import { Viewers } from "./viewers.ts";
 import { WireguardStore } from "./wireguard-store.ts";
 
 const config = loadConfig();
@@ -59,12 +62,32 @@ const metrics: ControllerMetrics = new ControllerMetrics(
   service.registry,
   () => orchestrator.snapshot(),
   () => engineResources.latest(),
+  {
+    viewers: () => orchestrator.viewers(),
+    sharedEngines: () => sharedEngines.view(),
+  },
 );
+const sharedEngines = new SharedEngines({
+  engines,
+  netgw,
+  metrics,
+  logger,
+  settings: {
+    maxFailures: config.SHARED_ENGINE_MAX_FAILURES,
+    failureWindowMs: config.SHARED_ENGINE_FAILURE_WINDOW_SECONDS * 1000,
+    // Every stream gets a handover's time to leave a replaced engine, plus a minute to retry.
+    retireTimeoutMs: (config.HANDOVER_TIMEOUT_SECONDS + 60) * 1000,
+    idleTimeoutMs: 30_000,
+  },
+});
 const wireguard = new WireguardStore(config.DATA_DIR);
 const orchestrator: Orchestrator = new Orchestrator({
   store: new StreamStore(config.DATA_DIR),
   wireguard,
   policy: new NetworkPolicyStore(wireguard.directory),
+  settingsStore: new SettingsStore(config.DATA_DIR),
+  shared: sharedEngines,
+  viewers: new Viewers({ pingMs: config.VIEWER_PING_SECONDS * 1000 }),
   engines,
   ace,
   transcoder,

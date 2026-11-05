@@ -1,6 +1,13 @@
-import { STREAM_STATES, type PathStatus, type StreamView } from "@aceswarm/shared/api-types";
+import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
 import { Counter, Gauge, type Registry } from "@prometheus-io/client";
 import type { EngineMemory } from "./engine-resources.ts";
+import type { SharedEngineView } from "./shared-engines.ts";
+
+/** More sources for the gauges, read at scrape time. */
+export interface MetricSources {
+  viewers?: () => ViewerView[];
+  sharedEngines?: () => SharedEngineView[];
+}
 
 /**
  * Prometheus metrics of the controller. Gauges are filled at scrape time from the current
@@ -11,11 +18,13 @@ export class ControllerMetrics {
   readonly pathSwitches: Counter<"stream" | "from" | "to">;
   readonly engineStarts: Counter<"stream">;
   readonly engineOomKills: Counter<"stream">;
+  readonly sharedEngineRestarts: Counter<"path" | "reason">;
 
   constructor(
     registry: Registry,
     snapshot: () => { streams: StreamView[]; paths: PathStatus[] },
     engineMemory: () => EngineMemory[] = () => [],
+    sources: MetricSources = {},
   ) {
     const registers = [registry];
     this.recoveries = new Counter({
@@ -40,6 +49,13 @@ export class ControllerMetrics {
       name: "aceswarm_engine_oom_kills_total",
       help: "Engines killed for exceeding their memory limit (ENGINE_MEMORY_MB)",
       labelNames: ["stream"],
+      registers,
+    });
+
+    this.sharedEngineRestarts = new Counter({
+      name: "aceswarm_shared_engine_restarts_total",
+      help: "Shared engines replaced, per path and reason (watched, failures, all-failed, manual)",
+      labelNames: ["path", "reason"],
       registers,
     });
 
@@ -105,6 +121,25 @@ export class ControllerMetrics {
       registers,
     });
 
+    const viewers = new Gauge({
+      name: "aceswarm_stream_viewers",
+      help: "Players showing the stream full screen",
+      labelNames: ["stream"],
+      registers,
+    });
+    const watching = new Gauge({
+      name: "aceswarm_viewer_watching",
+      help: "What each player shows full screen (value is always 1). Viewer ids are random and last one visit.",
+      labelNames: ["viewer", "device", "stream"],
+      registers,
+    });
+    const sharedStreams = new Gauge({
+      name: "aceswarm_shared_engine_streams",
+      help: "Streams playing from each shared engine",
+      labelNames: ["path", "engine", "retiring"],
+      registers,
+    });
+
     // prom-client calls collect() on every scrape; one gauge refreshes all of them.
     const total: Gauge = new Gauge({
       name: "aceswarm_streams",
@@ -112,7 +147,8 @@ export class ControllerMetrics {
       registers,
       collect: () => {
         const current = snapshot();
-        for (const gauge of [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit]) {
+        const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
+        for (const gauge of [...gauges, watching, sharedStreams]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -144,6 +180,18 @@ export class ControllerMetrics {
           if (stream.path !== null) {
             path.set({ ...labels, path: stream.path }, 1);
           }
+          viewers.set(labels, stream.viewers);
+        }
+        const watchers = sources.viewers?.() ?? [];
+        for (const viewer of watchers) {
+          watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
+        }
+        const sharedEngines = sources.sharedEngines?.() ?? [];
+        for (const engine of sharedEngines) {
+          sharedStreams.set(
+            { path: engine.path, engine: engine.engine, retiring: String(engine.retiring) },
+            engine.streams,
+          );
         }
         for (const engine of engineMemory()) {
           const labels = { stream: engine.stream, engine: engine.engine };

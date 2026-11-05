@@ -6,6 +6,7 @@ import type { AcestreamClient, EngineSession } from "../src/acestream.ts";
 import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
+import type { FailureReport, SharedEngines } from "../src/shared-engines.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
 import { MoveSlots } from "../src/stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
@@ -41,6 +42,7 @@ const engine: EngineHandle = {
   generation: 1,
   ip: "172.31.250.10",
   baseUrl: "http://172.31.250.10:6878",
+  sharedPath: null,
 };
 
 const session: EngineSession = {
@@ -87,6 +89,11 @@ interface Fakes {
   pathAllowed?: (path: string) => boolean;
   /** Slots shared by the streams moving off a path the policy turned off. */
   policyMoves?: MoveSlots;
+  /** The shared engines, and whether sharing is on. */
+  shared?: SharedEngines;
+  sharing?: { on: boolean };
+  /** Players showing the stream. */
+  viewers?: number;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -101,6 +108,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const restarted: string[] = [];
   const engines = {
     find: () => Promise.resolve([]),
+    removeAllFor: () => Promise.resolve(),
     restart: async (handle: EngineHandle, onAddress?: OnEngineAddress) => {
       restarted.push(handle.containerId);
       await onAddress?.(handle);
@@ -167,6 +175,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     paths: () => paths,
     ...(fakes.pathAllowed !== undefined && { pathAllowed: fakes.pathAllowed }),
     ...(fakes.policyMoves !== undefined && { policyMoves: fakes.policyMoves }),
+    ...(fakes.shared !== undefined && { shared: fakes.shared }),
+    sharedEngines: () => fakes.sharing?.on === true,
+    viewers: () => fakes.viewers ?? 0,
     pathLoad: () => new Map(),
     now: () => clock.now,
     sleep: (ms) => {
@@ -454,5 +465,132 @@ describe("WireGuard only", () => {
     await instance.tick();
     expect(assigned).toEqual([{ ip: engine.ip, path: "wg:a" }]);
     expect(instance.path).toBe("wg:a");
+  });
+});
+
+/** Lets the stream stall: no video ever arrives, so every check after the grace is a failure. */
+async function stallAndRecover(fake: ReturnType<typeof supervisor>, steps: number) {
+  for (let step = 0; step < steps; step += 1) {
+    // Past the start's grace and the recovery delay.
+    fake.clock.now += Math.max(settings.startupGraceMs, settings.recoveryMaxDelayMs) + 1000;
+    await fake.instance.tick();
+  }
+}
+
+describe("sharing one engine per path", () => {
+  const sharedEngine: EngineHandle = {
+    ...engine,
+    containerId: "shared-1",
+    name: "aceswarm-engine-shared-direct-1",
+    streamId: "",
+    ip: "172.31.250.20",
+    baseUrl: "http://172.31.250.20:6878",
+    sharedPath: "direct",
+  };
+
+  /** Shared engines that hand out `current`; `replace` makes another engine current. */
+  function sharedEngines() {
+    const state = { current: sharedEngine };
+    const acquired: string[] = [];
+    const released: string[] = [];
+    const reports: FailureReport[] = [];
+    const restarts: string[] = [];
+    const shared = {
+      acquire: (path: string) => {
+        acquired.push(path);
+        return Promise.resolve(state.current);
+      },
+      release: (handle: EngineHandle) => {
+        released.push(handle.containerId);
+        return Promise.resolve();
+      },
+      isCurrent: (handle: EngineHandle) => handle.containerId === state.current.containerId,
+      reportFailure: (_handle: EngineHandle, _stream: string, report: FailureReport) => {
+        reports.push(report);
+        return report.watched;
+      },
+      restart: (handle: EngineHandle) => {
+        restarts.push(handle.containerId);
+        return true;
+      },
+    } as unknown as SharedEngines;
+    return { shared, state, acquired, released, reports, restarts };
+  }
+
+  test("plays from its path's shared engine, whose gateway path the shared engines manage", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
+    await fake.instance.tick();
+    expect(pool.acquired).toEqual(["direct"]);
+    expect(fake.assignedWhenReady).toEqual([]);
+    expect(fake.instance.assignments()).toEqual([]);
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.instance.view().engine).toEqual({ name: sharedEngine.name, shared: true });
+  });
+
+  test("restarts only its session, and leaves the engine to the shared engines' rules", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
+    await fake.instance.tick();
+    await stallAndRecover(fake, 3);
+    // The ladder's third step would restart its own engine: on a shared one it only says so.
+    expect(pool.reports).toEqual([
+      { watched: false, wantsRestart: false },
+      { watched: false, wantsRestart: false },
+      { watched: false, wantsRestart: true },
+    ]);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.instance.view().recoveries).toBe(3);
+  });
+
+  test("says when someone watches it, which replaces the engine", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, viewers: 1 });
+    await fake.instance.tick();
+    await stallAndRecover(fake, 1);
+    expect(pool.reports).toEqual([{ watched: true, wantsRestart: false }]);
+    expect(fake.instance.view().message).toContain("replacing the shared engine");
+  });
+
+  test("moves to the new engine once the shared one was replaced", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
+    await fake.instance.tick();
+    const replacement = { ...sharedEngine, containerId: "shared-2", name: "aceswarm-engine-shared-direct-2" };
+    pool.state.current = replacement;
+    await fake.instance.tick();
+    expect(pool.acquired).toEqual(["direct", "direct"]);
+    expect(pool.released).toEqual([sharedEngine.containerId]);
+    expect(fake.instance.view().engine?.name).toBe(replacement.name);
+  });
+
+  test("moves to an engine of its own once sharing is turned off, and back once it is on", async () => {
+    const pool = sharedEngines();
+    const sharing = { on: true };
+    const fake = supervisor([direct], { shared: pool.shared, sharing });
+    await fake.instance.tick();
+
+    sharing.on = false;
+    await fake.instance.tick();
+    expect(fake.assigned).toEqual([{ ip: engine.ip, path: "direct" }]);
+    expect(pool.released).toEqual([sharedEngine.containerId]);
+    expect(fake.instance.view().engine).toEqual({ name: engine.name, shared: false });
+    expect(fake.instance.assignments()).toEqual([{ ip: engine.ip, path: "direct" }]);
+
+    sharing.on = true;
+    await fake.instance.tick();
+    expect(fake.removed).toEqual([engine.containerId]);
+    expect(fake.unassigned).toEqual([engine.ip]);
+    expect(fake.instance.view().engine).toEqual({ name: sharedEngine.name, shared: true });
+  });
+
+  test("a manual restart replaces the shared engine and restarts the stream's session", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(pool.restarts).toEqual([sharedEngine.containerId]);
+    expect(fake.restarted).toEqual([]);
   });
 });

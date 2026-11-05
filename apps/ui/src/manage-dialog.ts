@@ -1,4 +1,4 @@
-import type { Snapshot, StreamView } from "@aceswarm/shared/api-types";
+import type { SharedEnginesView, Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import { api } from "./api.ts";
 import { confirmButton, dialogShell, errorMessage, h, icon, toast } from "./dom.ts";
 import { STATE_LABELS } from "./format.ts";
@@ -15,7 +15,21 @@ interface Row {
   toggle: HTMLButtonElement;
 }
 
-/** Lists every stream with restart, enable/disable and remove actions, plus the preview setting. */
+function sharedEnginesHint(view: SharedEnginesView | undefined): string {
+  if (view?.enabled !== true) {
+    return "Off: every stream has an engine of its own.";
+  }
+  return [
+    "On: streams on the same network path share one engine, which needs much less memory.",
+    `It restarts only when a stream someone is watching fails, or more than ${String(view.maxFailures)}`,
+    `of its streams fail within ${String(view.failureWindowSeconds)} s.`,
+  ].join(" ");
+}
+
+/**
+ * Lists every stream with restart, enable/disable and remove actions, plus the preview and engine
+ * sharing settings.
+ */
 export class ManageDialog {
   private readonly navigator: Navigator;
   private readonly dialog: HTMLDialogElement;
@@ -23,6 +37,10 @@ export class ManageDialog {
   private readonly empty: HTMLElement;
   private readonly rows = new Map<string, Row>();
   private readonly previewButtons: Record<PreviewMode, HTMLButtonElement>;
+  private readonly sharedEngines: HTMLButtonElement;
+  private readonly sharedEnginesState: HTMLElement;
+  private readonly sharedEnginesHint: HTMLElement;
+  private savingSharedEngines = false;
 
   constructor(navigator: Navigator, previewMode: PreviewMode, onPreviewMode: (mode: PreviewMode) => void) {
     this.navigator = navigator;
@@ -46,10 +64,42 @@ export class ManageDialog {
     };
     this.previewButtons = { video: choose("video"), thumbnails: choose("thumbnails") };
     this.markPreviewMode(previewMode);
+    this.sharedEnginesState = h("span", { className: "switch-state", attrs: { "aria-hidden": "true" } });
+    this.sharedEngines = h(
+      "button",
+      {
+        className: "switch",
+        attrs: {
+          type: "button",
+          role: "switch",
+          "aria-checked": "false",
+          "aria-labelledby": "shared-engines-label",
+          "aria-describedby": "shared-engines-hint",
+        },
+      },
+      [h("span", { className: "switch-track", attrs: { "aria-hidden": "true" } }), this.sharedEnginesState],
+    );
+    this.sharedEngines.addEventListener("click", () => {
+      void this.toggleSharedEngines();
+    });
+    this.sharedEnginesHint = h("p", {
+      className: "muted small",
+      text: sharedEnginesHint(undefined),
+      attrs: { id: "shared-engines-hint" },
+    });
+    const sharedEnginesLabel = h("span", {
+      className: "row-title",
+      text: "One engine per path",
+      attrs: { id: "shared-engines-label" },
+    });
     shell.body.append(
       h("div", { className: "setting" }, [
         h("span", { text: "Tile previews" }),
         h("div", { className: "segments" }, [this.previewButtons.video, this.previewButtons.thumbnails]),
+      ]),
+      h("div", { className: "setting" }, [
+        h("div", { className: "setting-text" }, [sharedEnginesLabel, this.sharedEnginesHint]),
+        this.sharedEngines,
       ]),
       this.list,
       this.empty,
@@ -72,6 +122,7 @@ export class ManageDialog {
   }
 
   update(snapshot: Snapshot): void {
+    this.renderSharedEngines(snapshot.sharedEngines);
     const seen = new Set<string>();
     for (const stream of snapshot.streams) {
       seen.add(stream.id);
@@ -96,6 +147,35 @@ export class ManageDialog {
       }
     }
     this.empty.hidden = this.rows.size > 0;
+  }
+
+  private renderSharedEngines(view: SharedEnginesView): void {
+    if (this.savingSharedEngines) {
+      return;
+    }
+    this.sharedEngines.setAttribute("aria-checked", String(view.enabled));
+    this.sharedEnginesState.textContent = view.enabled ? "On" : "Off";
+    this.sharedEnginesHint.textContent = sharedEnginesHint(view);
+  }
+
+  private async toggleSharedEngines(): Promise<void> {
+    if (this.savingSharedEngines) {
+      return;
+    }
+    const wanted = this.sharedEngines.getAttribute("aria-checked") !== "true";
+    this.savingSharedEngines = true;
+    this.sharedEngines.setAttribute("aria-busy", "true");
+    try {
+      const settings = await api.updateSettings({ sharedEngines: wanted });
+      this.sharedEngines.setAttribute("aria-checked", String(settings.sharedEngines));
+      this.sharedEnginesState.textContent = settings.sharedEngines ? "On" : "Off";
+      toast(settings.sharedEngines ? "Streams move to one engine per path" : "Streams move to engines of their own");
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      this.savingSharedEngines = false;
+      this.sharedEngines.removeAttribute("aria-busy");
+    }
   }
 
   private markPreviewMode(mode: PreviewMode): void {

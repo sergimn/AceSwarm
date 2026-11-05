@@ -1,4 +1,11 @@
-import type { PathStatus, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
+import type {
+  PathStatus,
+  Settings,
+  Snapshot,
+  StreamView,
+  ViewerView,
+  WireguardProfileView,
+} from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import { isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
@@ -8,10 +15,13 @@ import type { EngineManager } from "./engines.ts";
 import { Mutex } from "./json-file.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import type { NetworkPolicyStore } from "./network-policy-store.ts";
+import type { SettingsStore } from "./settings-store.ts";
+import type { SharedEngines } from "./shared-engines.ts";
 import type { NewStream, StreamConfig, StreamPatch, StreamStore } from "./stream-store.ts";
-import { hlsUrls } from "./hls-urls.ts";
 import { MoveSlots } from "./stream-paths.ts";
+import { streamView } from "./stream-view.ts";
 import { StreamSupervisor, type SupervisorSettings } from "./supervisor.ts";
+import type { Viewers } from "./viewers.ts";
 import type { WireguardStore } from "./wireguard-store.ts";
 
 /** A change the network policy does not allow, such as WireGuard only without any profile. */
@@ -26,6 +36,12 @@ export interface OrchestratorDeps {
   store: StreamStore;
   wireguard: WireguardStore;
   policy: NetworkPolicyStore;
+  /** Settings changed from the UI, such as engine sharing. */
+  settingsStore: SettingsStore;
+  /** The engines streams share, one per path, while engine sharing is on. */
+  shared: SharedEngines;
+  /** Who watches which stream full screen. */
+  viewers: Viewers;
   engines: EngineManager;
   ace: AcestreamClient;
   transcoder: TranscoderClient;
@@ -48,8 +64,9 @@ export class Orchestrator {
   /** Serializes policy and profile changes, so "WireGuard only needs a profile" always holds. */
   private readonly networkChanges = new Mutex();
   /**
-   * Streams moving off the direct path when WireGuard only is turned on, at most two at a time:
-   * each move starts a second engine, and N at once would briefly need twice the engines' memory.
+   * Streams moving off the direct path when WireGuard only is turned on, or off a shared engine
+   * when sharing is turned off, at most two at a time: each move starts an engine, and N at once
+   * would briefly need twice the engines' memory.
    */
   private readonly policyMoves = new MoveSlots(2);
 
@@ -60,6 +77,10 @@ export class Orchestrator {
 
   async start(): Promise<void> {
     await this.deps.store.load();
+    const settingsError = await this.deps.settingsStore.load();
+    if (settingsError !== null) {
+      this.logger.error({ error: settingsError }, "settings unreadable; using the defaults until they are saved again");
+    }
     await this.deps.wireguard.init();
     const policyError = await this.deps.policy.load();
     if (policyError !== null) {
@@ -108,7 +129,43 @@ export class Orchestrator {
       paths: this.paths,
       pathStrategy: this.deps.settings.pathStrategy,
       wireguardOnly: this.deps.policy.get().wireguardOnly,
+      sharedEngines: {
+        enabled: this.deps.settingsStore.get().sharedEngines,
+        maxFailures: this.deps.shared.settings.maxFailures,
+        failureWindowSeconds: Math.round(this.deps.shared.settings.failureWindowMs / 1000),
+      },
+      viewerPingSeconds: Math.round(this.deps.viewers.pingMs / 1000),
     };
+  }
+
+  getSettings(): Settings {
+    return this.deps.settingsStore.get();
+  }
+
+  /**
+   * Changes settings. Turning engine sharing on or off takes effect on every stream's next check:
+   * each one moves to the kind of engine the setting asks for without losing its picture.
+   */
+  async updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    const before = this.deps.settingsStore.get();
+    const after = await this.deps.settingsStore.update(patch);
+    if (after.sharedEngines !== before.sharedEngines) {
+      this.logger.info({ sharedEngines: after.sharedEngines }, "engine sharing changed");
+    }
+    return after;
+  }
+
+  /** A player reported the stream it shows full screen (`null` once it closed). */
+  reportViewer(viewer: string, stream: string | null, device: string): boolean {
+    if (stream !== null && this.deps.store.get(stream) === undefined) {
+      return false;
+    }
+    this.deps.viewers.report(viewer, stream, device);
+    return true;
+  }
+
+  viewers(): ViewerView[] {
+    return this.deps.viewers.list();
   }
 
   networkPolicy(): NetworkPolicy {
@@ -172,6 +229,7 @@ export class Orchestrator {
 
   async removeStream(id: string): Promise<boolean> {
     const removed = await this.deps.store.remove(id);
+    this.deps.viewers.forgetStream(id);
     const supervisor = this.supervisors.get(id);
     this.supervisors.delete(id);
     if (supervisor !== undefined) {
@@ -250,6 +308,23 @@ export class Orchestrator {
       return;
     }
     await this.syncAssignments();
+    await this.sweepSharedEngines();
+  }
+
+  /** Removes shared engines nobody uses, once every stream had the chance to take its engine. */
+  private async sweepSharedEngines(): Promise<void> {
+    if (!this.allSettled()) {
+      return;
+    }
+    try {
+      await this.deps.shared.sweep();
+    } catch (error) {
+      this.logger.debug({ err: describeError(error) }, "could not look for unused shared engines");
+    }
+  }
+
+  private allSettled(): boolean {
+    return this.launched && this.supervisors.values().every((supervisor) => supervisor.settled);
   }
 
   /**
@@ -259,17 +334,18 @@ export class Orchestrator {
    * never sends an incomplete list.
    */
   private async syncAssignments(): Promise<void> {
-    const supervisors = this.supervisors.values().toArray();
-    if (!this.launched || supervisors.some((supervisor) => !supervisor.settled)) {
+    if (!this.allSettled()) {
       return;
     }
+    const supervisors = this.supervisors.values().toArray();
     const known = new Set(this.paths.map((path) => path.id));
     const policy = this.deps.policy.get();
     // Engines still waiting to leave a path the policy turned off are not sent: the gateway would
     // only refuse them.
-    const assignments = supervisors
-      .flatMap((supervisor) => supervisor.assignments())
-      .filter((assignment) => known.has(assignment.path) && isPathAllowed(policy, assignment.path));
+    const assignments = [
+      ...supervisors.flatMap((supervisor) => supervisor.assignments()),
+      ...this.deps.shared.assignments(),
+    ].filter((assignment) => known.has(assignment.path) && isPathAllowed(policy, assignment.path));
     try {
       const rejected = await this.deps.netgw.sync(assignments);
       if (rejected.length > 0) {
@@ -294,33 +370,15 @@ export class Orchestrator {
       pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
       policyMoves: this.policyMoves,
       pathLoad: () => this.pathLoad(),
+      shared: this.deps.shared,
+      sharedEngines: () => this.deps.settingsStore.get().sharedEngines,
+      viewers: () => this.deps.viewers.count(stream.id),
     });
     this.supervisors.set(stream.id, supervisor);
     supervisor.start();
   }
 
   private view(stream: StreamConfig): StreamView {
-    const supervisor = this.supervisors.get(stream.id);
-    if (supervisor !== undefined) {
-      return supervisor.view();
-    }
-    return {
-      id: stream.id,
-      aceId: stream.aceId,
-      aceIdKind: stream.aceIdKind,
-      name: stream.name,
-      enabled: stream.enabled,
-      createdAt: stream.createdAt,
-      state: "stopped",
-      stateSince: stream.createdAt,
-      message: null,
-      lastFrameAt: null,
-      peers: { connected: null, active: null, countries: [] },
-      downloadKBps: null,
-      uploadKBps: null,
-      path: stream.path,
-      recoveries: 0,
-      hls: hlsUrls(stream.id),
-    };
+    return this.supervisors.get(stream.id)?.view() ?? streamView(stream, this.deps.viewers.count(stream.id));
   }
 }

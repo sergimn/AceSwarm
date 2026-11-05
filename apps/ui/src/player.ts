@@ -4,6 +4,7 @@ import { api } from "./api.ts";
 import { errorMessage, h, icon, toast } from "./dom.ts";
 import { formatFreshness, formatPeers, formatSpeed, pathLabel, STATE_LABELS } from "./format.ts";
 import type { Navigator } from "./navigation.ts";
+import type { WatchReporter } from "./watch.ts";
 
 const OVERLAY_MS = 4000;
 
@@ -14,13 +15,15 @@ export class Player {
   private readonly title: HTMLElement;
   private readonly details: HTMLElement;
   private readonly navigator: Navigator;
+  private readonly watch: WatchReporter;
   private readonly backButton: HTMLButtonElement;
   private hls: Hls | undefined;
   private streamId: string | undefined;
   private overlayTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(navigator: Navigator) {
+  constructor(navigator: Navigator, watch: WatchReporter) {
     this.navigator = navigator;
+    this.watch = watch;
     this.video = h("video", { className: "player-video", attrs: { playsinline: true, autoplay: true } });
     this.title = h("h2", { className: "player-title" });
     this.details = h("p", { className: "player-details" });
@@ -60,6 +63,7 @@ export class Player {
 
   open(stream: StreamView): void {
     this.streamId = stream.id;
+    this.watch.show(stream.id);
     this.root.hidden = false;
     this.attach(stream.hls.full);
     this.navigator.open({
@@ -129,6 +133,7 @@ export class Player {
 
   private close(): void {
     this.streamId = undefined;
+    this.watch.show(null);
     this.hls?.destroy();
     this.hls = undefined;
     this.video.removeAttribute("src");
