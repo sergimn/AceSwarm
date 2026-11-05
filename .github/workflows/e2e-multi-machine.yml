@@ -1,0 +1,169 @@
+# End-to-end tests across three GitHub-hosted runners, with real Acestream engines:
+#
+#   wg      a throwaway WireGuard server; generates the client profile
+#   source  a dummy live broadcast from a real Acestream engine, plus the tracker players use
+#   stack   AceSwarm with real engines, and the Playwright tests
+#
+# The runners can't accept connections from the internet, so they first join a WireGuard mesh by
+# hole punching, using STUN and this run's artifacts to find each other (e2e/multi/mesh.sh). The
+# WireGuard server and the broadcast then start in parallel. e2e/README.md has diagrams.
+#
+# Re-run all jobs, never only the failed one: the three runners only work together.
+name: E2E (multiple machines)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The runners publish their mesh addresses as artifacts and read the others' through the API.
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Per attempt, so a re-run never picks up the addresses of runners that are gone.
+  MESH_ARTIFACT_PREFIX: mesh-${{ github.run_attempt }}-
+
+jobs:
+  wg:
+    name: WireGuard server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Find this runner's public UDP address
+        run: e2e/multi/mesh.sh prepare wg
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.MESH_ARTIFACT_PREFIX }}wg
+          path: ${{ runner.temp }}/mesh/publish/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Join the mesh
+        run: e2e/multi/mesh.sh join wg source stack
+        env:
+          # Only this step reads the other runners' artifacts.
+          GH_TOKEN: ${{ github.token }}
+      - name: Start the WireGuard server
+        run: |
+          e2e/multi/vpn.sh build
+          e2e/multi/vpn.sh start "$(e2e/multi/mesh.sh ip wg)"
+          e2e/multi/mesh.sh share "$(e2e/multi/vpn.sh profile)" client.conf
+      - name: Serve until the tests are done
+        run: e2e/multi/mesh.sh wait-file stack "done"
+      - name: Logs
+        if: always()
+        run: |
+          sudo wg show wg-mesh || true
+          e2e/multi/vpn.sh logs
+
+  source:
+    name: Dummy Acestream broadcast
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Find this runner's public UDP address
+        run: e2e/multi/mesh.sh prepare source
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.MESH_ARTIFACT_PREFIX }}source
+          path: ${{ runner.temp }}/mesh/publish/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Join the mesh
+        run: e2e/multi/mesh.sh join source wg stack
+        env:
+          # Only this step reads the other runners' artifacts.
+          GH_TOKEN: ${{ github.token }}
+      - name: Start the broadcast
+        run: |
+          e2e/multi/broadcast.sh start "$(e2e/multi/mesh.sh ip source)"
+          e2e/multi/broadcast.sh wait > "$RUNNER_TEMP/infohash"
+          e2e/multi/mesh.sh share "$RUNNER_TEMP/infohash"
+      - name: Serve until the tests are done
+        run: e2e/multi/mesh.sh wait-file stack "done"
+      - name: Logs
+        if: always()
+        run: |
+          sudo wg show wg-mesh || true
+          e2e/multi/broadcast.sh logs
+
+  stack:
+    name: AceSwarm with real engines
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Find this runner's public UDP address
+        run: e2e/multi/mesh.sh prepare stack
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.MESH_ARTIFACT_PREFIX }}stack
+          path: ${{ runner.temp }}/mesh/publish/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Join the mesh
+        run: e2e/multi/mesh.sh join stack wg source
+        env:
+          # Only this step reads the other runners' artifacts.
+          GH_TOKEN: ${{ github.token }}
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium ffmpeg
+      - name: Build the images and start AceSwarm
+        run: |
+          e2e/multi/stack.sh build
+          e2e/multi/stack.sh up
+      - name: Wait for the WireGuard server and the broadcast
+        run: |
+          e2e/multi/mesh.sh wait-file wg client.conf >/dev/null
+          e2e/multi/mesh.sh wait-file source infohash
+      - name: Run the tests
+        run: npx playwright test --config e2e/multi/playwright.config.ts
+      - name: Tell the other runners the tests are done
+        if: always()
+        run: |
+          date -u > "$RUNNER_TEMP/done"
+          e2e/multi/mesh.sh share "$RUNNER_TEMP/done"
+          # This runner's file server stops with the job: keep it up until both have the file.
+          e2e/multi/mesh.sh wait-fetched "done" wg source
+      - name: Logs
+        if: always()
+        run: |
+          sudo wg show wg-mesh || true
+          e2e/multi/stack.sh logs > e2e-stack.log 2>&1 || true
+          tail -n 200 e2e-stack.log
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-multi-machine-results-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+            e2e-stack.log
+          retention-days: 14
+      - name: Stop AceSwarm
+        if: always()
+        run: e2e/multi/stack.sh down

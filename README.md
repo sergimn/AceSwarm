@@ -143,6 +143,7 @@ pipx install pre-commit && pre-commit install
   - accepts content IDs or infohashes the way the real engine does,
   - can stall on purpose,
   - talks to fake peers on a fake internet and through a throwaway WireGuard server.
+- **Real engines in CI.** A second suite runs on three GitHub runners: AceSwarm with real Acestream engines, a real broadcast of a dummy stream, and a WireGuard server. See [e2e/README.md](e2e/README.md), which also has diagrams of both suites.
 - **Mock behaviours by ID.** Mock stream IDs choose their behaviour by prefix (`0bad` stalls, `beef` only works through the VPN, `ec0d` is MPEG-2, `dead` never loads). The last hex digit decides whether the mock treats the ID as a content ID (`0`–`7`) or an infohash (`8`–`f`).
 - **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions.
 

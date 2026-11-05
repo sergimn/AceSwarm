@@ -22,7 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "build:ui": "npm run build --workspace @aceswarm/ui",
     "e2e": "playwright test --config e2e/playwright.config.ts",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test"
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "e2e:multi": "playwright test --config e2e/multi/playwright.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -13,6 +13,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import { kindsToTry } from "@aceswarm/shared/ace-id";
 import { EngineError, type AcestreamClient, type EngineSession, type EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
+import { EnginePaths } from "./engine-paths.ts";
 import type { EngineHandle, EngineManager } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
 import { hlsUrls } from "./hls-urls.ts";
@@ -29,7 +30,6 @@ export interface SupervisorSettings {
   recoveryMaxDelayMs: number;
   handoverTimeoutMs: number;
   pathStrategy: PathStrategyName;
-  pathHysteresis: number;
   pathMinDwellMs: number;
 }
 
@@ -81,7 +81,7 @@ export class StreamSupervisor {
   private recoveries = 0;
   private forceRestart = false;
   /** Paths this supervisor gave its engines at the gateway, by engine IP. */
-  private readonly assigned = new Map<string, string>();
+  private readonly gateway: EnginePaths;
   private bootstrapped = false;
 
   private timer: NodeJS.Timeout | undefined;
@@ -91,6 +91,7 @@ export class StreamSupervisor {
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
     this.stream = stream;
     this.deps = deps;
+    this.gateway = new EnginePaths(deps.netgw);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? defaultSleep;
@@ -107,7 +108,7 @@ export class StreamSupervisor {
 
   /** What this stream's engines should use at the gateway (re-sent periodically). */
   assignments(): PathAssignment[] {
-    return [...this.assigned].map(([ip, path]) => ({ ip, path }));
+    return this.gateway.list();
   }
 
   /** True once the first start attempt finished, so `assignments()` is complete. */
@@ -184,7 +185,7 @@ export class StreamSupervisor {
       await this.runAction("restart-engine", "manual restart");
       return;
     }
-    if (!this.assigned.has(this.engine.ip)) {
+    if (!this.gateway.has(this.engine.ip)) {
       // The gateway blocks an engine until it has a path. This one started while the gateway's
       // paths were unknown (for example while it restarted), or its last assignment failed.
       await this.assignStartPath(this.engine);
@@ -254,14 +255,20 @@ export class StreamSupervisor {
       for (const engine of older) {
         await this.deps.engines.remove(engine);
       }
+      const onAddress = async (starting: EngineHandle): Promise<void> => {
+        await this.gateway.keepOnly(starting.ip);
+        await this.assignStartPath(starting);
+      };
       if (newest === undefined) {
-        this.engine = await this.deps.engines.create(this.stream.id, 1);
+        this.engine = await this.deps.engines.create(this.stream.id, 1, onAddress);
         this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
       } else {
-        this.engine = await this.deps.engines.revive(newest);
+        this.engine = await this.deps.engines.revive(newest, onAddress);
       }
-      await this.forgetOtherEngines(this.engine);
-      await this.assignStartPath(this.engine);
+      if (!this.gateway.has(this.engine.ip)) {
+        // The gateway's paths were not known yet while it started, or the assignment failed.
+        await this.assignStartPath(this.engine);
+      }
       this.setState("starting", "opening stream");
       await this.startPlayback(this.engine);
     } catch (error) {
@@ -296,8 +303,6 @@ export class StreamSupervisor {
       paths,
       memory: this.memory,
       current: preferred,
-      // Any other path that is up beats one the stream cannot start on, even with a lower score.
-      hysteresis: -Infinity,
     });
     if (alternative !== undefined) {
       this.logger.info({ from: preferred, to: alternative, failures }, "stream does not start; trying another path");
@@ -382,12 +387,7 @@ export class StreamSupervisor {
         await this.stopSessionQuietly();
         await this.startPlayback(engine);
       } else if (action === "restart-engine") {
-        await this.stopSessionQuietly();
-        const restarted = await this.deps.engines.restart(engine);
-        await this.forgetOtherEngines(restarted);
-        this.engine = restarted;
-        await this.applyPath(restarted, this.stream.path);
-        await this.startPlayback(restarted);
+        await this.runRestartInPlace(engine);
       } else {
         await this.switchPath(engine);
       }
@@ -408,7 +408,6 @@ export class StreamSupervisor {
       paths: this.deps.paths(),
       memory: this.memory,
       current: from,
-      hysteresis: this.currentPathDown() ? 0 : this.deps.settings.pathHysteresis,
     });
     if (target === undefined) {
       this.logger.info({ path: from }, "no better path; restarting engine instead");
@@ -416,15 +415,25 @@ export class StreamSupervisor {
       return;
     }
     this.setState("switching", `moving from ${from} to ${target}`);
-    const next = await this.deps.engines.create(this.stream.id, engine.generation + 1);
-    this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
+    // The engine being started, once it has an address, so a failed move can remove it.
+    const starting: { engine: EngineHandle | undefined } = { engine: undefined };
     try {
-      await this.assignEngine(next.ip, target);
+      const next = await this.deps.engines.create(this.stream.id, engine.generation + 1, async (handle) => {
+        if (starting.engine !== undefined && starting.engine.ip !== handle.ip) {
+          // It restarted on a new address while starting: its old one may go to another engine.
+          await this.gateway.drop(starting.engine.ip);
+        }
+        starting.engine = handle;
+        await this.gateway.assign(handle.ip, target);
+      });
+      this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
       const session = await this.openSession(next.baseUrl);
       await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl }, true);
       await this.waitForHandover(session.playbackUrl);
       const oldSession = this.session;
       this.engine = next;
+      // The move is done: a later failure must not remove the engine the stream now plays from.
+      starting.engine = undefined;
       this.session = session;
       this.attemptStartedAt = this.now();
       this.lastSwitchAt = this.now();
@@ -434,21 +443,27 @@ export class StreamSupervisor {
       if (oldSession !== undefined) {
         await this.deps.ace.stopSession(oldSession.commandUrl).catch(() => undefined);
       }
-      await this.unassignQuietly(engine.ip);
+      await this.gateway.drop(engine.ip);
       await this.deps.engines.remove(engine);
     } catch (error) {
-      await this.unassignQuietly(next.ip);
-      await this.deps.engines.remove(next).catch(() => undefined);
+      if (starting.engine !== undefined) {
+        await this.gateway.drop(starting.engine.ip);
+        await this.deps.engines.remove(starting.engine).catch(() => undefined);
+      }
       throw error;
     }
   }
 
   private async runRestartInPlace(engine: EngineHandle): Promise<void> {
     await this.stopSessionQuietly();
-    const restarted = await this.deps.engines.restart(engine);
-    await this.forgetOtherEngines(restarted);
+    const restarted = await this.deps.engines.restart(engine, async (starting) => {
+      await this.gateway.keepOnly(starting.ip);
+      await this.applyPath(starting, this.stream.path);
+    });
     this.engine = restarted;
-    await this.applyPath(restarted, this.stream.path);
+    if (!this.gateway.has(restarted.ip)) {
+      await this.applyPath(restarted, this.stream.path);
+    }
     await this.startPlayback(restarted);
   }
 
@@ -515,7 +530,7 @@ export class StreamSupervisor {
       return;
     }
     try {
-      await this.assignEngine(engine.ip, path);
+      await this.gateway.assign(engine.ip, path);
       await this.persistPath(path);
     } catch (error) {
       this.logger.warn({ err: error, path }, "could not assign network path");
@@ -539,35 +554,10 @@ export class StreamSupervisor {
     this.session = undefined;
   }
 
-  private async assignEngine(ip: string, path: string): Promise<void> {
-    await this.deps.netgw.assign({ ip, path });
-    this.assigned.set(ip, path);
-  }
-
-  /**
-   * Drops the gateway paths of this stream's earlier engines (one that died, or that came back on
-   * a new address). Otherwise their addresses stay in the list sent to the gateway, which would
-   * then hand them to whichever engine gets the address next.
-   */
-  private async forgetOtherEngines(current: EngineHandle): Promise<void> {
-    for (const ip of this.assigned.keys()) {
-      if (ip !== current.ip) {
-        await this.unassignQuietly(ip);
-      }
-    }
-  }
-
-  private async unassignQuietly(ip: string): Promise<void> {
-    this.assigned.delete(ip);
-    await this.deps.netgw.unassign(ip).catch(() => undefined);
-  }
-
   private async teardown(): Promise<void> {
     await this.deps.transcoder.stop(this.stream.id).catch(() => undefined);
     await this.stopSessionQuietly();
-    for (const ip of this.assigned.keys()) {
-      await this.unassignQuietly(ip);
-    }
+    await this.gateway.dropAll();
     await this.deps.engines.removeAllFor(this.stream.id).catch((error: unknown) => {
       this.logger.warn({ err: error }, "could not remove engines");
     });
