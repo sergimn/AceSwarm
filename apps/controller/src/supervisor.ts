@@ -419,6 +419,10 @@ export class StreamSupervisor {
     const starting: { engine: EngineHandle | undefined } = { engine: undefined };
     try {
       const next = await this.deps.engines.create(this.stream.id, engine.generation + 1, async (handle) => {
+        if (starting.engine !== undefined && starting.engine.ip !== handle.ip) {
+          // It restarted on a new address while starting: its old one may go to another engine.
+          await this.gateway.drop(starting.engine.ip);
+        }
         starting.engine = handle;
         await this.gateway.assign(handle.ip, target);
       });

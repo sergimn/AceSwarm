@@ -15,10 +15,10 @@ services:
       TICK_MS: "1000"
       RECOVERY_BASE_DELAY_SECONDS: "1"
       RECOVERY_MAX_DELAY_SECONDS: "4"
-      # Stickiness then comes only from path selection itself, which the tests check.
+      # Stickiness then comes only from a healthy stream never moving, which the tests check.
       PATH_MIN_DWELL_SECONDS: "0"
     ports: !override
-      - ${E2E_HTTP_PORT:-18080}:8080
+      - 127.0.0.1:${E2E_HTTP_PORT:-18080}:8080
 
   transcoder:
     image: aceswarm-transcoder:e2e

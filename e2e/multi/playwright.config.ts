@@ -8,6 +8,11 @@ import base from "../playwright.config.ts";
 export default defineConfig({
   ...base,
   testDir: "./tests",
+  // The stack only publishes its UI on the loopback address (compose.multi.yaml).
+  use: {
+    ...base.use,
+    baseURL: process.env["E2E_BASE_URL"] ?? `http://127.0.0.1:${process.env["E2E_HTTP_PORT"] ?? "18080"}`,
+  },
   // Real engines buffer, and recovering a stream climbs a ladder of restarts before a path move.
   timeout: 480_000,
 });

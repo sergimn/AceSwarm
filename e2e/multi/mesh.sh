@@ -47,7 +47,7 @@ mesh_ip() {
 prepare() {
   local role="$1"
   mkdir -p "$MESH_DIR/publish" "$MESH_DIR/peers" "$MESH_DIR/share"
-  command -v wg >/dev/null || sudo apt-get install -y -qq wireguard-tools >/dev/null
+  command -v wg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools >/dev/null; }
   sudo modprobe wireguard
   (umask 077 && wg genkey >"$MESH_DIR/private.key")
   wg pubkey <"$MESH_DIR/private.key" >"$MESH_DIR/public.key"
@@ -91,7 +91,7 @@ prepare() {
 fetch_peer() {
   local peer="$1" name="${MESH_ARTIFACT_PREFIX}$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
   until gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-    --jq '.artifacts[].name' 2>/dev/null | grep -qx "$name"; do
+    --jq '.artifacts[].name' 2>/dev/null | grep -x "$name" >/dev/null; do
     if ((SECONDS > deadline)); then
       log "timed out waiting for the $peer runner (artifact $name)"
       exit 1
@@ -112,8 +112,13 @@ join() {
     fetch_peer "$peer"
   done
   # The NAT keeps an idle mapping for well over the second this takes.
-  kill "$(cat "$MESH_DIR/stun.pid")" 2>/dev/null || true
-  sleep 0.2
+  local stun_pid
+  stun_pid="$(cat "$MESH_DIR/stun.pid")"
+  kill "$stun_pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 "$stun_pid" 2>/dev/null || break
+    sleep 0.1
+  done
   sudo wg set "$MESH_IFACE" listen-port "$MESH_PORT"
   for peer in "$@"; do
     local file="$MESH_DIR/peers/$peer.json"

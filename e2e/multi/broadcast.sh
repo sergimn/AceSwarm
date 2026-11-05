@@ -33,7 +33,7 @@ start() {
   chmod 0777 "$BC_DIR/publish" "$BC_DIR/cache" "$BC_DIR/state"
   docker rm -f "$SOURCE" "$ENGINE" >/dev/null 2>&1 || true
 
-  nohup node "$here/tracker.ts" --port 7700 >"$BC_DIR/tracker.log" 2>&1 &
+  nohup node "$here/tracker.ts" --port 7700 --host "$host" >"$BC_DIR/tracker.log" 2>&1 &
   echo $! >"$BC_DIR/tracker.pid"
 
   # ffmpeg's HTTP server serves one client, then exits; Docker restarts it for the next reconnect.
@@ -66,7 +66,7 @@ infohash() {
 wait_ready() {
   for _ in $(seq 1 120); do
     if [[ -s "$BC_DIR/publish/test.acelive" && -n "$(infohash)" ]] &&
-      docker logs "$ENGINE" 2>&1 | grep -q 'stream status changed: -1->1'; then
+      docker logs "$ENGINE" 2>&1 | grep 'stream status changed: -1->1' >/dev/null; then
       log "live: infohash $(infohash)"
       infohash
       return 0

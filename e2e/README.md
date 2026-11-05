@@ -189,7 +189,7 @@ flowchart TB
 ```
 
 - **Sharing files.** Each runner serves `$RUNNER_TEMP/mesh/share` on its mesh address, port 18999. `mesh.sh share` publishes a file, and `mesh.sh wait-file` polls a peer for one.
-- **Finishing.** The stack job shares `done` even when it fails, and the other two jobs stop waiting. If the stack runner disappears (cancelled or crashed), they stop after it hasn't answered pings for about two minutes.
+- **Finishing.** The stack job shares `done` even when it fails, and the other two jobs stop waiting. If the stack runner disappears (cancelled or crashed), they stop after it hasn't answered pings for about five minutes.
 - **Re-runs.** Use "Re-run all jobs". Re-running a single job can't work, because it would wait for runners that are gone.
 
 ### The broadcast

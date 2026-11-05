@@ -1,7 +1,7 @@
 import { Registry } from "@prometheus-io/client";
 import type { PathAssignment, PathStatus, PipelineStatus } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import type { AcestreamClient, EngineSession } from "../src/acestream.ts";
 import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
@@ -78,6 +78,10 @@ interface Fakes {
   created?: EngineHandle[];
   /** Fails the first session start, like an engine that dies right away. */
   failFirstSession?: boolean;
+  /** Whether video arrives from the new engine when a stream moves to another path. */
+  handover?: "delivers" | "stops";
+  /** Makes removing an engine fail. */
+  failRemove?: boolean;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -88,8 +92,13 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const created = [...(fakes.created ?? [engine])];
   // The gateway assignments as they were each time an engine's API first answered.
   const assignedWhenReady: PathAssignment[][] = [];
+  const removed: string[] = [];
   const engines = {
     find: () => Promise.resolve([]),
+    remove: (handle: EngineHandle) => {
+      removed.push(handle.containerId);
+      return fakes.failRemove === true ? Promise.reject(new Error("docker said no")) : Promise.resolve();
+    },
     create: async (_streamId: string, _generation: number, onAddress?: OnEngineAddress) => {
       const handle = (created.length > 1 ? created.shift() : created[0]) ?? engine;
       await onAddress?.(handle);
@@ -99,17 +108,28 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   } as unknown as EngineManager;
   let sessions = 0;
   const ace = {
-    startSession: () => {
+    startSession: (baseUrl: string) => {
       sessions += 1;
       return fakes.failFirstSession === true && sessions === 1
         ? Promise.reject(new Error("engine died"))
-        : Promise.resolve(session);
+        : Promise.resolve({ playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` });
     },
+    stopSession: () => Promise.resolve(),
     stats: () => Promise.resolve({ status: "dl", peers: 1, speedDown: 0, speedUp: 0, downloaded: 0, uploaded: 0 }),
   } as unknown as AcestreamClient;
+  // The source a path move asked the transcoder to cut over to.
+  let pending: string | undefined;
   const transcoder = {
-    start: () => Promise.resolve(pipeline),
-    status: () => Promise.resolve(pipeline),
+    start: (_id: string, input: { source: string }, handover?: boolean) => {
+      pending = handover === true ? input.source : undefined;
+      return Promise.resolve(pipeline);
+    },
+    status: () =>
+      Promise.resolve(
+        pending !== undefined && fakes.handover === "delivers"
+          ? { ...pipeline, source: pending, lastFrameAt: new Date(clock.now).toISOString() }
+          : pipeline,
+      ),
   } as unknown as TranscoderClient;
   const netgw = {
     assign: (assignment: PathAssignment) => {
@@ -136,8 +156,12 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     paths: () => paths,
     pathLoad: () => new Map(),
     now: () => clock.now,
+    sleep: (ms) => {
+      clock.now += ms;
+      return Promise.resolve();
+    },
   });
-  return { instance, assigned, assignedWhenReady, unassigned, clock };
+  return { instance, assigned, assignedWhenReady, unassigned, removed, clock };
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -190,4 +214,42 @@ test("stops sending the address of an engine that was replaced", async () => {
   expect(assigned.at(-1)).toEqual({ ip: replacement.ip, path: "direct" });
   expect(unassigned).toEqual([engine.ip]);
   expect(instance.assignments()).toEqual([{ ip: replacement.ip, path: "direct" }]);
+});
+
+describe("moving a stream to another path", () => {
+  const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+  const replacement: EngineHandle = {
+    ...engine,
+    containerId: "c2",
+    generation: 2,
+    ip: "172.31.250.11",
+    baseUrl: "http://172.31.250.11:6878",
+  };
+
+  /** Starts the stream on the direct path, then takes that path down while no video arrives. */
+  async function moveOffDirect(fakes: Fakes) {
+    const paths = [direct, vpn];
+    const fake = supervisor(paths, { created: [engine, replacement], ...fakes });
+    await fake.instance.tick();
+    paths[0] = { ...direct, up: false };
+    fake.clock.now += settings.startupGraceMs + 1000;
+    await fake.instance.tick();
+    return fake;
+  }
+
+  test("removes only the engine it started when the new path brings no video", async () => {
+    const { instance, assigned, unassigned, removed } = await moveOffDirect({ handover: "stops" });
+    expect(assigned.at(-1)).toEqual({ ip: replacement.ip, path: "wg:a" });
+    expect(removed).toEqual([replacement.containerId]);
+    expect(unassigned).toEqual([replacement.ip]);
+    expect(instance.assignments()).toEqual([{ ip: engine.ip, path: "direct" }]);
+    expect(instance.path).toBe("direct");
+  });
+
+  test("keeps the new engine once video arrives, even when removing the old one fails", async () => {
+    const { instance, removed } = await moveOffDirect({ handover: "delivers", failRemove: true });
+    expect(instance.path).toBe("wg:a");
+    expect(removed).toEqual([engine.containerId]);
+    expect(instance.assignments()).toEqual([{ ip: replacement.ip, path: "wg:a" }]);
+  });
 });
