@@ -3,7 +3,7 @@ import { Gauge } from "@prometheus-io/client";
 import { z } from "zod";
 import type { Gateway } from "./gateway.ts";
 import { isIpv4 } from "@aceswarm/shared/ipv4";
-import { UnknownPathError } from "./router.ts";
+import { PathNotAllowedError, UnknownPathError } from "./router.ts";
 
 const ipSchema = z.string().refine(isIpv4, "not an IPv4 address");
 const pathSchema = z.string().min(1).max(64);
@@ -57,6 +57,14 @@ export function registerMetrics(service: Service, gateway: Gateway): void {
     labelNames: ["engine_ip", "kind"],
     registers,
   });
+  const wireguardOnly: Gauge = new Gauge({
+    name: "aceswarm_gateway_wireguard_only",
+    help: "1 while the gateway keeps engines off the direct path (WireGuard only)",
+    registers,
+    collect: () => {
+      wireguardOnly.set(gateway.policy().wireguardOnly ? 1 : 0);
+    },
+  });
   const total: Gauge = new Gauge({
     name: "aceswarm_paths",
     help: "Number of network paths (direct plus tunnels)",
@@ -96,6 +104,7 @@ export function registerRoutes(service: Service, gateway: Gateway): void {
   const { app } = service;
 
   app.get("/paths", () => gateway.paths());
+  app.get("/policy", () => gateway.policy());
   app.get("/assignments", () => gateway.router.list());
   app.get("/peers", () => gateway.peers.all());
 
@@ -124,7 +133,12 @@ export function registerRoutes(service: Service, gateway: Gateway): void {
     try {
       await gateway.router.assign(params.data.ip, body.data.path);
     } catch (error) {
-      const status = error instanceof UnknownPathError ? 404 : 400;
+      let status = 400;
+      if (error instanceof UnknownPathError) {
+        status = 404;
+      } else if (error instanceof PathNotAllowedError) {
+        status = 409;
+      }
       return reply.code(status).send({ error: (error as Error).message });
     }
     return { ip: params.data.ip, path: body.data.path };

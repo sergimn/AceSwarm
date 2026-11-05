@@ -10,6 +10,7 @@
     "./http": "./src/http.ts",
     "./ipv4": "./src/ipv4.ts",
     "./logger": "./src/logger.ts",
+    "./network-policy": "./src/network-policy.ts",
     "./service": "./src/service.ts",
     "./wireguard": "./src/wireguard.ts"
   },

@@ -26,8 +26,9 @@ test.beforeAll(async ({ request }) => {
   run.infohash = await broadcastInfohash();
 });
 
-test.afterAll(() => {
+test.afterAll(async ({ request }) => {
   setDirectPathBlocked(false);
+  await request.patch("/api/network", { data: { wireguardOnly: false } });
 });
 
 test("plays a broadcast from another runner, found by its bare infohash", async ({ page, request }) => {
@@ -121,4 +122,32 @@ test("goes back to the direct path when the VPN profile is removed", async ({ re
   await expect
     .poll(async () => (await lastAnnounce(run.infohash, MESH.self)) > directBefore, { timeout: 60_000 })
     .toBe(true);
+});
+
+test("moves the stream off the direct path right away when WireGuard only is turned on", async ({ request }) => {
+  const before = await waitForPlaying(request, run.streamId);
+  expect(before.path).toBe("direct");
+  const saved = await request.post("/api/wireguard", {
+    data: { name: PROFILE, config: await remoteWireguardProfile() },
+  });
+  expect(saved.status(), await saved.text()).toBe(201);
+  await expect
+    .poll(async () => (await snapshot(request)).paths.find((path) => path.id === VPN_PATH)?.up, { timeout: 90_000 })
+    .toBe(true);
+  const vpnBefore = await lastAnnounce(run.infohash, MESH.wg);
+
+  const response = await request.patch("/api/network", { data: { wireguardOnly: true } });
+  expect(response.ok(), await response.text()).toBe(true);
+
+  // The gateway cuts the engine off the direct path at once, and the stream moves without first
+  // waiting to stall. The move is not a recovery.
+  await expect
+    .poll(async () => (await streamById(request, run.streamId))?.path, { timeout: 240_000, intervals: [2000] })
+    .toBe(VPN_PATH);
+  const playing = await waitForPlaying(request, run.streamId, 180_000);
+  expect(playing.recoveries).toBe(before.recoveries);
+  await expect
+    .poll(async () => (await lastAnnounce(run.infohash, MESH.wg)) > vpnBefore, { timeout: 60_000 })
+    .toBe(true);
+  expect(gatewayAssignments().map(({ path }) => path)).not.toContain("direct");
 });

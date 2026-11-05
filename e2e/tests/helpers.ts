@@ -41,6 +41,9 @@ export async function waitForPlaying(request: APIRequestContext, id: string, tim
 
 /** Removes every stream and WireGuard profile so each spec starts from an empty stack. */
 export async function resetStack(request: APIRequestContext): Promise<void> {
+  // WireGuard only keeps the last profile, so it goes first.
+  const policy = await request.patch("/api/network", { data: { wireguardOnly: false } });
+  expect(policy.ok(), await policy.text()).toBe(true);
   const { streams } = await snapshot(request);
   for (const stream of streams) {
     await request.delete(`/api/streams/${stream.id}`);
@@ -71,6 +74,23 @@ export function engineContainers(streamId: string): string[] {
 export function gatewayAssignments(): PathAssignment[] {
   const output = compose("exec", "-T", "netgw", "wget", "-qO-", "http://127.0.0.1:8082/assignments");
   return JSON.parse(output) as PathAssignment[];
+}
+
+/**
+ * Calls the gateway's own API from inside its container (busybox wget there can only GET). The
+ * gateway refuses requests from the engines network, and its API is not published.
+ */
+export function gatewayRequest(method: string, path: string, body?: unknown): { status: number; body: string } {
+  const script = `
+    const [method, url, body] = process.argv.slice(1);
+    const init = { method, headers: { "content-type": "application/json" } };
+    if (body !== "") init.body = body;
+    const response = await fetch(url, init);
+    console.log(JSON.stringify({ status: response.status, body: await response.text() }));
+  `;
+  const args = [method, `http://127.0.0.1:8082${path}`, body === undefined ? "" : JSON.stringify(body)];
+  const output = compose("exec", "-T", "netgw", "node", "--input-type=module", "-e", script, ...args);
+  return JSON.parse(output) as { status: number; body: string };
 }
 
 /** Like `gatewayAssignments`, but undefined while the gateway is not answering. */

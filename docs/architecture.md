@@ -75,6 +75,19 @@ Moves are make-before-break, so the picture doesn't go blank:
 2. The transcoder swaps sources only once the new engine delivers video.
 3. The old engine is removed.
 
+### WireGuard only
+
+The network policy can turn the direct path off, so streams only use WireGuard. It is a switch in the UI and `PATCH /api/network` (`{ "wireguardOnly": true }`).
+
+- **It needs a profile.** The controller refuses to turn it on without one, and refuses to remove the last profile while it is on. The UI greys the switch out until a profile exists, but keeps it focusable so a remote can reach it and read why.
+- **One policy, enforced twice.** The controller writes the policy to `policy.json` in the WireGuard profile directory. The gateway reads it from there at start, on every reload and once a minute, so it knows the policy before the controller sends any engine paths.
+  - The controller leaves the direct path out of every path choice.
+  - The gateway refuses direct assignments (409), cuts off engines that were on the direct path, and stops translating engine traffic for the direct interface. Only the tunnels' own encrypted packets still leave through it.
+  - A policy file that can't be read or understood keeps the direct path off.
+- **Turning it on moves streams right away.** The gateway has already cut the engine off, so a stream on the direct path moves to the best WireGuard path on its next check, make-before-break, without waiting to stall. This isn't counted as a recovery. A failed move waits before trying again, with the recovery ladder's delays.
+- **No WireGuard path up means waiting.** A stream without a usable path waits with a message, and no engine starts until a path is up. It never falls back to the direct path.
+- **Turning it off changes nothing right away.** Paths stay sticky: streams stay on their WireGuard path until recovery has a reason to move them.
+
 ### HLS continuity
 
 Every ffmpeg run writes its segments into a new "generation" directory. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves.
@@ -96,7 +109,7 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
 - **Fail closed.**
   - The gateway's first command, before Node.js starts, sets the `FORWARD` policy to `DROP`.
   - Each engine gets one accept rule, for the interface of its own path.
-  - An engine without a path (for example right after the gateway restarted) or whose tunnel was removed can't reach anything.
+  - An engine without a path (for example right after the gateway restarted), whose tunnel was removed, or whose path the policy turned off can't reach anything.
   - The controller sends the complete list of engine paths every few seconds (`PUT /assignments`). This restores them after a gateway restart and removes the ones of engines that are gone.
   - A starting engine gets its path as soon as its container has an address, before its API answers. A real engine's API only answers after its first DNS lookups, which an engine without a path can't make.
   - A stream that starts while the gateway is unreachable gets its path as soon as the gateway answers again.

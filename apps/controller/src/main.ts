@@ -9,6 +9,7 @@ import { EngineManager } from "./engines.ts";
 import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { registerRoutes } from "./server.ts";
+import { NetworkPolicyStore } from "./network-policy-store.ts";
 import { StreamStore } from "./stream-store.ts";
 import { WireguardStore } from "./wireguard-store.ts";
 
@@ -59,9 +60,11 @@ const metrics: ControllerMetrics = new ControllerMetrics(
   () => orchestrator.snapshot(),
   () => engineResources.latest(),
 );
+const wireguard = new WireguardStore(config.DATA_DIR);
 const orchestrator: Orchestrator = new Orchestrator({
   store: new StreamStore(config.DATA_DIR),
-  wireguard: new WireguardStore(config.DATA_DIR),
+  wireguard,
+  policy: new NetworkPolicyStore(wireguard.directory),
   engines,
   ace,
   transcoder,

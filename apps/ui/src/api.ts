@@ -1,4 +1,4 @@
-import type { Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
+import type { NetworkPolicy, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -59,6 +59,8 @@ export const api = {
   removeProfile: async (name: string): Promise<void> => {
     await send("DELETE", `/api/wireguard/${encodeURIComponent(name)}`);
   },
+  setNetworkPolicy: async (policy: NetworkPolicy): Promise<NetworkPolicy> =>
+    (await json("PATCH", "/api/network", policy)) as NetworkPolicy,
 };
 
 export type ConnectionStatus = "connecting" | "live" | "reconnecting";

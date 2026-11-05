@@ -458,6 +458,68 @@ a {
   color: var(--accent);
 }
 
+/* An on/off switch (role="switch"). It stays focusable when unavailable, so remotes can reach it. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 2.4em;
+  padding: 6px 14px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.switch:hover {
+  border-color: var(--muted);
+}
+
+.switch-track {
+  position: relative;
+  width: 2.4em;
+  height: 1.3em;
+  flex: none;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background-color 0.15s;
+}
+
+.switch-track::after {
+  position: absolute;
+  top: 0.15em;
+  left: 0.15em;
+  width: 1em;
+  height: 1em;
+  border-radius: 50%;
+  background: var(--text);
+  content: "";
+  transition: transform 0.15s;
+}
+
+.switch[aria-checked="true"] {
+  border-color: var(--accent);
+}
+
+.switch[aria-checked="true"] .switch-track {
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"] .switch-track::after {
+  background: var(--accent-text);
+  transform: translateX(1.1em);
+}
+
+.switch[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.switch[aria-busy="true"] {
+  cursor: progress;
+}
+
 .form {
   display: grid;
   gap: 14px;

@@ -13,6 +13,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   2. restart its engine,
   3. move it to another network path.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.
+- **WireGuard only.** One switch keeps every stream off the direct connection. If no VPN is up, streams wait instead of going direct.
 - **History.** Optional Prometheus, Loki and Grafana keep long-term records of stream health, peers, network paths and engine memory. A ready-made dashboard and alerts are included.
 - Runs on x86_64 and arm64 (including the Raspberry Pi 5), with Docker or Podman, rootful or rootless.
 
@@ -81,6 +82,16 @@ Open **Network** and upload a WireGuard `.conf` file, or paste its contents.
 The gateway pings through every path and scores it. With `sticky-best`, a stream stays on its path until recovery needs to move it. It then moves to the best path, starting a new engine before stopping the old one so the picture isn't interrupted.
 
 The gateway fails closed: an engine without an assigned path can't reach the internet at all, so a stream on a VPN never leaks out the direct connection.
+
+### WireGuard only
+
+Turn on **WireGuard only** under **Network** to stop using the direct connection altogether.
+
+- It needs at least one profile. The switch stays greyed out until you add one, and the last profile can't be removed while it is on.
+- Streams on the direct path move to a WireGuard path right away. New streams only start on WireGuard.
+- If every WireGuard path is down, streams wait and say so. They never fall back to the direct connection.
+- The gateway enforces it too: it refuses to route any engine through the direct connection.
+- Turning it off allows the direct connection again. Streams stay on their current path until they have a reason to move.
 
 ## Monitoring
 
