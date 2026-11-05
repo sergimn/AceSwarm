@@ -155,6 +155,7 @@ services:
       PROBE_TARGETS: ${PROBE_TARGETS:-1.1.1.1,9.9.9.9}
       GEOIP_DOWNLOAD: ${GEOIP_DOWNLOAD:-true}
       IPTABLES: ${IPTABLES:-iptables}
+      ENGINE_ALLOWED_PRIVATE: ${ENGINE_ALLOWED_PRIVATE:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - wireguard:/config/wireguard:ro

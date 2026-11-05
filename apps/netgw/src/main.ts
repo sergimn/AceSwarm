@@ -15,7 +15,7 @@ const config = loadConfig();
 const logger = createLogger("netgw");
 const runner = new SystemRunner();
 
-const firewall = new Firewall(runner, config.ENGINE_SUBNET, config.IPTABLES);
+const firewall = new Firewall(runner, config.ENGINE_SUBNET, config.IPTABLES, config.ENGINE_ALLOWED_PRIVATE);
 await firewall.lockdown();
 const interfaces = await detectInterfaces(runner, config.ENGINE_SUBNET);
 logger.info(interfaces, "interfaces detected");

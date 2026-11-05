@@ -41,7 +41,7 @@ export function createService(options: ServiceOptions): Service {
   const blocked = options.blockedClients ?? [];
   if (blocked.length > 0) {
     app.addHook("onRequest", async (request, reply) => {
-      if (isBlockedClient(request.socket.remoteAddress, blocked)) {
+      if (isBlockedClient(request.socket.remoteAddress, blocked, request.socket.localAddress)) {
         await reply.code(403).send({ error: "forbidden" });
       }
     });
@@ -60,9 +60,18 @@ export function createService(options: ServiceOptions): Service {
   return { app, registry };
 }
 
-/** True when the address (IPv4, or IPv4-mapped IPv6) is in one of the networks. */
-export function isBlockedClient(address: string | undefined, networks: readonly string[]): boolean {
-  if (address === undefined) {
+/**
+ * True when the address (IPv4, or IPv4-mapped IPv6) is in one of the networks. A connection from
+ * the service's own address (`localAddress`) is local, never blocked: rootless Podman forwards
+ * published ports from inside the container, from whichever of its addresses the route picks,
+ * which can be the one on the engines network. Engines can't open a connection from that address.
+ */
+export function isBlockedClient(
+  address: string | undefined,
+  networks: readonly string[],
+  localAddress?: string,
+): boolean {
+  if (address === undefined || address === localAddress) {
     return false;
   }
   const ipv4 = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
