@@ -148,7 +148,7 @@ jobs:
           date -u > "$RUNNER_TEMP/done"
           e2e/multi/mesh.sh share "$RUNNER_TEMP/done"
           # This runner's file server stops with the job: keep it up until both have the file.
-          e2e/multi/mesh.sh wait-fetched done wg source
+          e2e/multi/mesh.sh wait-fetched "done" wg source
       - name: Logs
         if: always()
         run: |
