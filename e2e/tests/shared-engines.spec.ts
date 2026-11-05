@@ -207,6 +207,7 @@ test("the watched stream failing replaces the engine, and the other stream keeps
 });
 
 test("turning it off moves each stream to an engine of its own", async ({ request }) => {
+  test.setTimeout(600_000);
   const response = await request.patch("/api/settings", { data: { sharedEngines: false } });
   expect(response.ok()).toBe(true);
   await whileBystanderPlays(
@@ -214,7 +215,8 @@ test("turning it off moves each stream to an engine of its own", async ({ reques
     () => Promise.resolve(engineContainers(run.watched).length === 1 && engineContainers(run.bystander).length === 1),
     240_000,
   );
-  await expect.poll(() => sharedEngineContainers(), { timeout: 120_000 }).toEqual([]);
+  // An unused shared engine stays for two minutes, in case a stream comes back to it.
+  await expect.poll(() => sharedEngineContainers(), { timeout: 240_000, intervals: [5000] }).toEqual([]);
   for (const id of [run.watched, run.bystander]) {
     const view = await waitForPlaying(request, id);
     expect(view.engine).toEqual({ name: engineContainers(id)[0], shared: false });

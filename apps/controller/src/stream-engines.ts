@@ -194,7 +194,7 @@ export class StreamEngines {
       return false;
     }
     const target = wanted.sharing ? "the shared engine" : "an engine of its own";
-    wanted.logger.info({ engine: engine.name }, `moving the stream to ${target}`);
+    wanted.logger.info({ from: engine.name }, `moving the stream to ${target}`);
     try {
       await wanted.move();
       this.wanted = { failures: 0, lastActionAt: undefined };

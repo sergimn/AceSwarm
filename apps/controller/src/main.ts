@@ -78,7 +78,8 @@ const sharedEngines = new SharedEngines({
     // Every stream gets a handover's time to leave a replaced engine, plus a minute to retry.
     // Long enough for a stream whose first handover timed out to try a second time.
     retireTimeoutMs: (2 * config.HANDOVER_TIMEOUT_SECONDS + 60) * 1000,
-    idleTimeoutMs: 30_000,
+    // Long enough for a stream whose move to the engine failed to try again on it.
+    idleTimeoutMs: 120_000,
   },
 });
 const wireguard = new WireguardStore(config.DATA_DIR);

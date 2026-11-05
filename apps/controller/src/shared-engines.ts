@@ -10,7 +10,7 @@ export interface SharedEngineSettings {
   failureWindowMs: number;
   /** A replaced engine is removed after this long, even if a stream did not manage to leave it. */
   retireTimeoutMs: number;
-  /** A path's engine that no stream uses any more is removed after this long. */
+  /** A path's engine that no stream uses any more is removed after this long (at the next sweep). */
   idleTimeoutMs: number;
 }
 
@@ -152,7 +152,11 @@ export class SharedEngines {
     }
   }
 
-  /** The stream left the engine. An engine without streams is removed. */
+  /**
+   * The stream left the engine. A replaced engine without streams is removed. A path's engine stays
+   * for the idle timeout (see `sweep`): a stream whose move to it failed comes back to it, and a new
+   * engine would start cold, which can take minutes to find peers.
+   */
   async release(handle: EngineHandle, streamId: string): Promise<void> {
     const instance = this.find(handle);
     if (instance === undefined) {
@@ -160,9 +164,14 @@ export class SharedEngines {
     }
     instance.users.delete(streamId);
     instance.failures.delete(streamId);
-    if (instance.users.size === 0 && instance.handle !== undefined) {
-      await this.remove(instance, "no streams left on it");
+    if (instance.users.size > 0 || instance.handle === undefined) {
+      return;
     }
+    if (instance.retiring) {
+      await this.remove(instance, "no streams left on it");
+      return;
+    }
+    instance.idleSince = this.now();
   }
 
   get settings(): SharedEngineSettings {

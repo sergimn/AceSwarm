@@ -65,7 +65,7 @@ export async function waitForHandover(
       return status;
     }
     if (status !== undefined && status.pendingSource !== source && status.source !== source) {
-      throw new Error("the new path stopped before delivering video");
+      throw new Error("the new engine stopped before delivering video");
     }
   }
   throw new Error("the new path did not deliver video in time");

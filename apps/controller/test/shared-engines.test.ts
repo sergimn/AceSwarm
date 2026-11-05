@@ -130,13 +130,19 @@ test("streams on the same path share one engine, which gets the path at the gate
   ]);
 });
 
-test("removes an engine once its last stream left", async () => {
-  const { shared, removed, unassigned } = pool();
+test("removes a path's engine once no stream used it for the idle timeout", async () => {
+  const { shared, removed, unassigned, clock } = pool();
   const engine = await shared.acquire("direct", "s1");
   await shared.acquire("direct", "s2");
   await shared.release(engine, "s1");
-  expect(removed).toEqual([]);
   await shared.release(engine, "s2");
+  // A stream whose move to it failed comes back to the same engine, which is warm.
+  await shared.sweep();
+  expect(removed).toEqual([]);
+  expect(await shared.acquire("direct", "s1")).toBe(engine);
+  await shared.release(engine, "s1");
+  clock.now += settings.idleTimeoutMs;
+  await shared.sweep();
   expect(removed).toEqual([engine.containerId]);
   expect(unassigned).toEqual([engine.ip]);
   expect(shared.assignments()).toEqual([]);
@@ -288,9 +294,12 @@ describe("restarting a shared engine", () => {
     const fake = pool({ holdReplacements: true });
     const engine = await fake.shared.acquire("direct", "s1");
     fake.shared.restart(engine);
-    await fake.shared.release(engine, "s1");
+    await settle();
+    // The old engine dies while its replacement starts.
+    fake.dead.add(engine.containerId);
+    const next = fake.shared.rejoin(engine, "s2");
+    await settle();
     expect(fake.removed).toEqual([engine.containerId]);
-    const next = fake.shared.acquire("direct", "s2");
     fake.gate.resolve(undefined);
     const replacement = await next;
     expect(fake.created.map(({ generation }) => generation)).toEqual([1, 2]);
