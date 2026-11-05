@@ -12,6 +12,15 @@ export interface EngineHandle {
   baseUrl: string;
 }
 
+/**
+ * Called while an engine starts, as soon as its container has an address and before its API
+ * answers. The gateway blocks an engine until it has a network path, and a real engine's API only
+ * answers once its first DNS lookups are done, so the path has to be set here: set once the API
+ * answers, every start first sat through those lookups timing out. Called again if the address
+ * changes; an error stops the start.
+ */
+export type OnEngineAddress = (engine: EngineHandle) => Promise<void>;
+
 export interface EngineManagerOptions {
   stack: string;
   image: string;
@@ -80,7 +89,7 @@ export class EngineManager {
   }
 
   /** Creates and starts an engine, then waits until its HTTP API answers. */
-  async create(streamId: string, generation: number): Promise<EngineHandle> {
+  async create(streamId: string, generation: number, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     const name = `${this.options.stack}-engine-${streamId}-${String(generation)}`;
     const existing = await this.docker.inspectContainer(name);
     if (existing !== undefined) {
@@ -112,17 +121,17 @@ export class EngineManager {
     });
     await this.docker.startContainer(id);
     this.logger.info({ streamId, generation, container: name }, "engine started");
-    return this.waitReady(id);
+    return this.waitReady(id, onAddress);
   }
 
-  async restart(handle: EngineHandle): Promise<EngineHandle> {
+  async restart(handle: EngineHandle, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     this.logger.info({ streamId: handle.streamId, container: handle.name }, "restarting engine");
     await this.docker.restartContainer(handle.containerId);
-    return this.waitReady(handle.containerId);
+    return this.waitReady(handle.containerId, onAddress);
   }
 
   /** Makes sure an adopted engine is running and answering. */
-  async revive(handle: EngineHandle): Promise<EngineHandle> {
+  async revive(handle: EngineHandle, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     const details = await this.docker.inspectContainer(handle.containerId);
     if (details === undefined) {
       throw new Error(`engine ${handle.name} disappeared`);
@@ -130,7 +139,7 @@ export class EngineManager {
     if (!details.State.Running) {
       await this.docker.startContainer(handle.containerId);
     }
-    return this.waitReady(handle.containerId);
+    return this.waitReady(handle.containerId, onAddress);
   }
 
   async remove(handle: Pick<EngineHandle, "containerId" | "name">): Promise<void> {
@@ -163,9 +172,10 @@ export class EngineManager {
     return removed;
   }
 
-  private async waitReady(containerId: string): Promise<EngineHandle> {
+  private async waitReady(containerId: string, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     const deadline = Date.now() + this.options.readyTimeoutMs;
     let lastProblem = "not started";
+    let announcedIp = "";
     while (Date.now() < deadline) {
       const details = await this.docker.inspectContainer(containerId);
       if (details === undefined) {
@@ -176,6 +186,10 @@ export class EngineManager {
       }
       const handle = this.toHandle(details);
       if (handle.ip.length > 0) {
+        if (handle.ip !== announcedIp) {
+          announcedIp = handle.ip;
+          await onAddress?.(handle);
+        }
         try {
           await this.ace.version(handle.baseUrl);
           return handle;

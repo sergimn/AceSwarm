@@ -32,5 +32,9 @@ services:
       GEOIP_DOWNLOAD: "false"
       # Mesh addresses: the broadcast runner and the WireGuard server's runner.
       GEOIP_STATIC: 192.0.2.2=ES,192.0.2.1=SE
+      # GitHub's runners can't ping the internet (Azure drops ICMP), so every path would stay down
+      # and engines would get no path at all. Probe the WireGuard server's runner instead: it is
+      # reachable directly over the mesh and through the tunnel alike.
+      PROBE_TARGETS: 192.0.2.1
       PROBE_INTERVAL_SECONDS: "3"
       PEERS_INTERVAL_SECONDS: "2"

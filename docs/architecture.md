@@ -97,9 +97,10 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
   - Each engine gets one accept rule, for the interface of its own path.
   - An engine without a path (for example right after the gateway restarted) or whose tunnel was removed can't reach anything.
   - The controller sends the complete list of engine paths every few seconds (`PUT /assignments`). This restores them after a gateway restart and removes the ones of engines that are gone.
+  - A starting engine gets its path as soon as its container has an address, before its API answers. A real engine's API only answers after its first DNS lookups, which an engine without a path can't make.
   - A stream that starts while the gateway is unreachable gets its path as soon as the gateway answers again.
 - **Probes.**
-  - Every path is pinged at an interval, and its loss and latency become a 0–1 score.
+  - Every path is pinged at an interval (`PROBE_TARGETS`, by default `1.1.1.1` and `9.9.9.9`), and its loss and latency become a 0–1 score.
   - A tunnel without a WireGuard handshake in the last three minutes counts as down.
 - **Peer stats.** The engine API doesn't list peers, so the gateway reads the kernel's connection tracking table.
   - Per engine, it counts peers that answered ("connected") and peers whose byte counters grew since the last sample ("sending").
@@ -135,14 +136,17 @@ Engines keep their live cache in memory and have a memory limit (`ENGINE_MEMORY_
 
 ## Tests
 
-| Kind         | Where                            | What                                                                              |
-| ------------ | -------------------------------- | --------------------------------------------------------------------------------- |
-| Unit         | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers |
-| End to end   | `e2e/`                           | Playwright against the real services with a mock engine (see below)               |
-| Real streams | by hand                          | the full stack with real engines, on Docker and Podman                            |
+| Kind          | Where                            | What                                                                               |
+| ------------- | -------------------------------- | ---------------------------------------------------------------------------------- |
+| Unit          | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers  |
+| End to end    | `e2e/`                           | Playwright against the real services with a mock engine (see below)                |
+| Multi-machine | `e2e/multi/`                     | three CI runners: real engines, a real dummy broadcast and a real WireGuard server |
+| Real streams  | by hand                          | the full stack with real engines, on Docker and Podman                             |
 
 The E2E stack has no Acestream and no internet:
 
 - **Fake peers.** The mock engine pings fake peers on a fake internet. The peers answer on addresses Docker doesn't manage, because Docker 28+ drops packets routed to another network's container addresses.
 - **VPN-only peer.** A throwaway WireGuard server provides a VPN that is the only way to reach one of the peers.
 - **Fixed countries.** `GEOIP_STATIC` gives the fake peers countries.
+
+[e2e/README.md](../e2e/README.md) describes both end-to-end suites with diagrams.

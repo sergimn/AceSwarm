@@ -59,7 +59,7 @@ jobs:
           e2e/multi/vpn.sh start "$(e2e/multi/mesh.sh ip wg)"
           e2e/multi/mesh.sh share "$(e2e/multi/vpn.sh profile)" client.conf
       - name: Serve until the tests are done
-        run: e2e/multi/mesh.sh wait-file stack done
+        run: e2e/multi/mesh.sh wait-file stack "done"
       - name: Logs
         if: always()
         run: |
@@ -93,7 +93,7 @@ jobs:
           e2e/multi/broadcast.sh wait > "$RUNNER_TEMP/infohash"
           e2e/multi/mesh.sh share "$RUNNER_TEMP/infohash"
       - name: Serve until the tests are done
-        run: e2e/multi/mesh.sh wait-file stack done
+        run: e2e/multi/mesh.sh wait-file stack "done"
       - name: Logs
         if: always()
         run: |

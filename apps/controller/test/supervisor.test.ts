@@ -4,7 +4,7 @@ import { createLogger } from "@aceswarm/shared/logger";
 import { expect, test } from "vitest";
 import type { AcestreamClient, EngineSession } from "../src/acestream.ts";
 import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
-import type { EngineHandle, EngineManager } from "../src/engines.ts";
+import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
@@ -87,9 +87,16 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const unassigned: string[] = [];
   const clock = { now: 1000 };
   const created = [...(fakes.created ?? [engine])];
+  // The gateway assignments as they were each time an engine's API first answered.
+  const assignedWhenReady: PathAssignment[][] = [];
   const engines = {
     find: () => Promise.resolve([]),
-    create: () => Promise.resolve(created.length > 1 ? created.shift() : created[0]),
+    create: async (_streamId: string, _generation: number, onAddress?: OnEngineAddress) => {
+      const handle = (created.length > 1 ? created.shift() : created[0]) ?? engine;
+      await onAddress?.(handle);
+      assignedWhenReady.push([...assigned]);
+      return handle;
+    },
   } as unknown as EngineManager;
   let sessions = 0;
   const ace = {
@@ -131,7 +138,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     pathLoad: () => new Map(),
     now: () => clock.now,
   });
-  return { instance, assigned, unassigned, clock };
+  return { instance, assigned, assignedWhenReady, unassigned, clock };
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -144,6 +151,14 @@ test("gives an engine a path at start when the gateway's paths are known", async
   // Later ticks don't assign it again; the orchestrator re-sends it with the full list.
   await instance.tick();
   expect(assigned).toHaveLength(1);
+});
+
+test("gives a starting engine its path before its API answers", async () => {
+  // The gateway blocks an engine without a path, and a real engine's API only answers once its
+  // first DNS lookups are done: assigning the path after that made every start wait them out.
+  const { instance, assignedWhenReady } = supervisor([direct]);
+  await instance.tick();
+  expect(assignedWhenReady).toEqual([[{ ip: engine.ip, path: "direct" }]]);
 });
 
 test("assigns a path once the gateway's paths are known, when the stream started without them", async () => {
