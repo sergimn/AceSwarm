@@ -211,9 +211,11 @@ export class StreamEngines {
   async move(move: EngineMove): Promise<void> {
     // The engine being started, once it has an address, so a failed move can remove it.
     const starting: { engine: EngineHandle | undefined } = { engine: undefined };
+    let opened: EngineSession | undefined;
     try {
       const engine = await this.forMove(move.from, move.target, move.shared, starting);
       const session = await move.openSession(engine.baseUrl);
+      opened = session;
       const source = { source: session.playbackUrl };
       let pipeline: PipelineStatus | undefined;
       if (move.handover === undefined) {
@@ -233,10 +235,28 @@ export class StreamEngines {
         await this.release(move.from);
       }
     } catch (error) {
-      if (starting.engine !== undefined && starting.engine.containerId !== move.from.containerId) {
-        await this.release(starting.engine).catch(() => undefined);
-      }
+      await this.abandon(starting.engine, opened, move.from);
       throw error;
+    }
+  }
+
+  /**
+   * A move to `engine` failed before the stream played from it: lets go of it. A shared engine
+   * stays for other streams, so the session nobody reads stops.
+   */
+  private async abandon(
+    engine: EngineHandle | undefined,
+    session: EngineSession | undefined,
+    from: EngineHandle,
+  ): Promise<void> {
+    if (engine === undefined) {
+      return;
+    }
+    if (session !== undefined && engine.sharedPath !== null) {
+      await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
+    }
+    if (engine.containerId !== from.containerId) {
+      await this.release(engine).catch(() => undefined);
     }
   }
 
@@ -278,7 +298,7 @@ export class StreamEngines {
   /** Lets go of an engine: leaves a shared one (which goes once nobody uses it), removes its own. */
   async release(engine: EngineHandle): Promise<void> {
     if (engine.sharedPath !== null) {
-      await this.deps.shared?.release(engine, this.streamId);
+      await this.deps.shared?.release(engine, this.streamId, this.playedOn === engine.containerId);
       return;
     }
     await this.gateway.drop(engine.ip);
@@ -288,7 +308,7 @@ export class StreamEngines {
   /** Lets go of every engine of the stream: its place on a shared engine, and its own engines. */
   async releaseAll(engine: EngineHandle | undefined): Promise<void> {
     if (engine !== undefined && engine.sharedPath !== null) {
-      await this.deps.shared?.release(engine, this.streamId);
+      await this.deps.shared?.release(engine, this.streamId, this.playedOn === engine.containerId);
     }
     await this.gateway.dropAll();
     await this.deps.engines.removeAllFor(this.streamId);

@@ -128,6 +128,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     },
   } as unknown as EngineManager;
   let sessions = 0;
+  const stopped: string[] = [];
   const ace = {
     startSession: (baseUrl: string) => {
       sessions += 1;
@@ -135,7 +136,10 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
         ? Promise.reject(new Error("engine died"))
         : Promise.resolve({ playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` });
     },
-    stopSession: () => Promise.resolve(),
+    stopSession: (commandUrl: string) => {
+      stopped.push(commandUrl);
+      return Promise.resolve();
+    },
     stats: () => Promise.resolve({ status: "dl", peers: 1, speedDown: 0, speedUp: 0, downloaded: 0, uploaded: 0 }),
   } as unknown as AcestreamClient;
   // The source a path move asked the transcoder to cut over to.
@@ -188,7 +192,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       return Promise.resolve();
     },
   });
-  return { instance, assigned, assignedWhenReady, unassigned, removed, restarted, clock };
+  return { instance, assigned, assignedWhenReady, unassigned, removed, restarted, clock, stopped };
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -616,6 +620,24 @@ describe("sharing one engine per path", () => {
     expect(fake.removed).toEqual([engine.containerId]);
     expect(fake.unassigned).toEqual([engine.ip]);
     expect(fake.instance.view().engine).toEqual({ name: sharedEngine.name, shared: true });
+  });
+
+  test("a failed move to the shared engine stops the session it opened there", async () => {
+    const pool = sharedEngines();
+    const sharing = { on: false };
+    const video = { on: true };
+    const fake = supervisor([direct], { shared: pool.shared, sharing, video, handover: "stops" });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    // Sharing is turned on, but the shared engine brings no video in time.
+    sharing.on = true;
+    video.on = false;
+    await fake.instance.tick();
+    expect(fake.instance.view().engine).toEqual({ name: engine.name, shared: false });
+    expect(pool.released).toEqual([sharedEngine.containerId]);
+    // The engine stays for other streams; the session nobody reads doesn't.
+    expect(fake.stopped).toEqual([`${sharedEngine.baseUrl}/cmd`]);
   });
 
   test("a manual restart replaces the shared engine and restarts the stream's session", async () => {
