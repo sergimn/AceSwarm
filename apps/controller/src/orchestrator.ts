@@ -311,9 +311,14 @@ export class Orchestrator {
     await this.sweepSharedEngines();
   }
 
-  /** Removes shared engines nobody uses, once every stream had the chance to take its engine. */
+  /**
+   * Removes shared engines nobody uses, once every stream had the chance to take its engine: a
+   * stream still waiting for a path it may use (the gateway restarting, WireGuard only with no
+   * tunnel up yet) would take over the engine of its previous run.
+   */
   private async sweepSharedEngines(): Promise<void> {
-    if (!this.allSettled()) {
+    const tried = this.supervisors.values().every((supervisor) => supervisor.triedEngine);
+    if (!this.allSettled() || !tried) {
       return;
     }
     try {

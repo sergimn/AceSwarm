@@ -29,7 +29,7 @@ function handle(id: number, path: string, generation: number): EngineHandle {
 }
 
 /** Shared engines whose Docker side and gateway are fakes. `existing` are engines of a previous run. */
-function pool(options: { existing?: EngineHandle[]; failCreate?: boolean } = {}) {
+function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdReplacements?: boolean } = {}) {
   let containers = [...(options.existing ?? [])];
   let nextId = 10;
   const created: EngineHandle[] = [];
@@ -38,6 +38,10 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean } = {})
   const assigned: PathAssignment[] = [];
   const unassigned: string[] = [];
   const clock = { now: 1000 };
+  /** With `holdReplacements`, replacements answer only once this is resolved. */
+  const gate = Promise.withResolvers<undefined>();
+  /** Containers that are gone: reviving them fails. */
+  const dead = new Set<string>();
   const engines = {
     findShared: (path?: string) =>
       Promise.resolve(containers.filter((engine) => path === undefined || engine.sharedPath === path)),
@@ -49,11 +53,17 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean } = {})
       nextId += 1;
       containers.push(engine);
       await onAddress?.(engine);
+      if (options.holdReplacements === true && generation > 1) {
+        await gate.promise;
+      }
       created.push(engine);
       return engine;
     },
     revive: async (engine: EngineHandle, onAddress?: OnEngineAddress) => {
       revived.push(engine.containerId);
+      if (dead.has(engine.containerId)) {
+        throw new Error(`engine ${engine.name} disappeared`);
+      }
       await onAddress?.(engine);
       return engine;
     },
@@ -82,7 +92,7 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean } = {})
     settings,
     now: () => clock.now,
   });
-  return { shared, created, removed, revived, assigned, unassigned, clock, registry };
+  return { shared, created, removed, revived, assigned, unassigned, clock, registry, gate, dead };
 }
 
 /** Lets replacements started in the background finish. */
@@ -92,7 +102,8 @@ async function settle(): Promise<void> {
   }
 }
 
-const unwatched = { watched: false, wantsRestart: false };
+const unwatched = { watched: false, wantsRestart: false, hadVideo: true };
+const watched = { watched: true, wantsRestart: false, hadVideo: true };
 
 test("streams on the same path share one engine, which gets the path at the gateway", async () => {
   const { shared, created, assigned } = pool();
@@ -199,7 +210,7 @@ describe("restarting a shared engine", () => {
 
   test("replaces it right away when the stream someone watches fails", async () => {
     const { shared, engine, created, registry } = await threeStreams();
-    expect(shared.reportFailure(engine, "s2", { watched: true, wantsRestart: false })).toBe(true);
+    expect(shared.reportFailure(engine, "s2", watched)).toBe(true);
     await settle();
     expect(created).toHaveLength(2);
     expect(await registry.getSingleMetricAsString("aceswarm_shared_engine_restarts_total")).toContain(
@@ -213,14 +224,72 @@ describe("restarting a shared engine", () => {
     const fake = pool();
     const engine = await fake.shared.acquire("direct", "s1");
     await fake.shared.acquire("direct", "s2");
-    expect(fake.shared.reportFailure(engine, "s1", { watched: false, wantsRestart: true })).toBe(false);
+    expect(fake.shared.reportFailure(engine, "s1", { ...unwatched, wantsRestart: true })).toBe(false);
     // The other stream fails too, but its ladder is not there yet.
     expect(fake.shared.reportFailure(engine, "s2", unwatched)).toBe(false);
-    expect(fake.shared.reportFailure(engine, "s2", { watched: false, wantsRestart: true })).toBe(true);
+    expect(fake.shared.reportFailure(engine, "s2", { ...unwatched, wantsRestart: true })).toBe(true);
 
     // A stream alone on its engine gets the same engine restarts as with an engine of its own.
     const lone = await fake.shared.acquire("wg:a", "s3");
-    expect(fake.shared.reportFailure(lone, "s3", { watched: false, wantsRestart: true })).toBe(true);
+    expect(fake.shared.reportFailure(lone, "s3", { ...unwatched, wantsRestart: true })).toBe(true);
+  });
+
+  test("doesn't count streams that never played from it", async () => {
+    const { shared, engine } = await threeStreams();
+    const never = { ...unwatched, hadVideo: false };
+    // A broadcast that is down fails on any engine.
+    expect(shared.reportFailure(engine, "s1", { ...watched, hadVideo: false })).toBe(false);
+    expect(shared.reportFailure(engine, "s2", never)).toBe(false);
+    expect(shared.reportFailure(engine, "s3", never)).toBe(false);
+    // Unless every stream on it fails: the engine may be what is wrong.
+    expect(shared.reportFailure(engine, "s3", { ...never, wantsRestart: true })).toBe(true);
+  });
+
+  test("replaces it at most once per failure window, unless asked to", async () => {
+    const { shared, engine, created, clock } = await threeStreams();
+    expect(shared.reportFailure(engine, "s1", watched)).toBe(true);
+    await settle();
+    const replacement = await shared.acquire("direct", "s1");
+    await shared.release(engine, "s1");
+    expect(replacement).toBe(created[1]);
+    // The watched stream fails again on the new engine: its own recovery goes on.
+    expect(shared.reportFailure(replacement, "s1", watched)).toBe(false);
+    clock.now += settings.failureWindowMs;
+    expect(shared.reportFailure(replacement, "s1", watched)).toBe(true);
+    await settle();
+    expect(shared.restart(created[2]!)).toBe(true);
+  });
+
+  test("gives a replacement its gateway path while it starts", async () => {
+    const fake = pool({ holdReplacements: true });
+    const engine = await fake.shared.acquire("direct", "s1");
+    fake.shared.restart(engine);
+    await settle();
+    const starting = fake.assigned.at(-1)!;
+    expect(starting.ip).not.toBe(engine.ip);
+    // The periodic sync keeps it at the gateway while its API doesn't answer yet.
+    expect(fake.shared.assignments()).toEqual([
+      { ip: engine.ip, path: "direct" },
+      { ip: starting.ip, path: "direct" },
+    ]);
+    expect(fake.shared.isCurrent(engine)).toBe(true);
+    fake.gate.resolve(undefined);
+    await settle();
+    expect(fake.shared.isCurrent(engine)).toBe(false);
+  });
+
+  test("streams that come once the old engine is gone wait for its replacement", async () => {
+    const fake = pool({ holdReplacements: true });
+    const engine = await fake.shared.acquire("direct", "s1");
+    fake.shared.restart(engine);
+    await fake.shared.release(engine, "s1");
+    expect(fake.removed).toEqual([engine.containerId]);
+    const next = fake.shared.acquire("direct", "s2");
+    fake.gate.resolve(undefined);
+    const replacement = await next;
+    expect(fake.created.map(({ generation }) => generation)).toEqual([1, 2]);
+    expect(fake.shared.isCurrent(replacement)).toBe(true);
+    expect(fake.removed).toEqual([engine.containerId]);
   });
 
   test("restarts on request", async () => {
@@ -233,13 +302,39 @@ describe("restarting a shared engine", () => {
   test("waits a window before trying again when the replacement doesn't start", async () => {
     const fake = pool({ existing: [handle(1, "direct", 1)], failCreate: true });
     const engine = await fake.shared.acquire("direct", "s1");
-    expect(fake.shared.reportFailure(engine, "s1", { watched: true, wantsRestart: false })).toBe(true);
+    expect(fake.shared.reportFailure(engine, "s1", watched)).toBe(true);
     await settle();
     // Creating failed: the old engine stays current, and it isn't tried again right away.
     expect(fake.shared.isCurrent(engine)).toBe(true);
-    expect(fake.shared.reportFailure(engine, "s1", { watched: true, wantsRestart: false })).toBe(false);
+    expect(fake.shared.reportFailure(engine, "s1", watched)).toBe(false);
     fake.clock.now += settings.failureWindowMs + 1;
-    expect(fake.shared.reportFailure(engine, "s1", { watched: true, wantsRestart: false })).toBe(true);
+    expect(fake.shared.reportFailure(engine, "s1", watched)).toBe(true);
+  });
+});
+
+describe("starting again on the same engine", () => {
+  test("counts the stream on it again once it answers", async () => {
+    const { shared, revived, removed } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    await shared.acquire("direct", "s2");
+    await shared.release(engine, "s1");
+    expect(await shared.rejoin(engine, "s1")).toBe(engine);
+    expect(revived).toEqual([engine.containerId]);
+    await shared.release(engine, "s2");
+    expect(removed).toEqual([]);
+  });
+
+  test("replaces an engine that is gone", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("direct", "s1");
+    fake.dead.add(engine.containerId);
+    const next = await fake.shared.rejoin(engine, "s1");
+    expect(next.containerId).not.toBe(engine.containerId);
+    expect(fake.removed).toEqual([engine.containerId]);
+    expect(fake.shared.isCurrent(next)).toBe(true);
+    expect(await fake.registry.getSingleMetricAsString("aceswarm_shared_engine_restarts_total")).toContain(
+      'reason="unresponsive"} 1',
+    );
   });
 });
 
@@ -257,6 +352,21 @@ describe("sweeping", () => {
     clock.now += settings.idleTimeoutMs;
     await shared.sweep();
     expect(removed).toEqual([engine.containerId, replacement.containerId]);
+  });
+
+  test("keeps a replacement while streams still move to it", async () => {
+    const { shared, created, removed, clock } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    shared.restart(engine);
+    await settle();
+    // The stream takes long to move (a handover, a path that is down for a while).
+    clock.now += settings.idleTimeoutMs * 3;
+    await shared.sweep();
+    expect(removed).toEqual([]);
+    await shared.acquire("direct", "s1");
+    await shared.release(engine, "s1");
+    expect(removed).toEqual([engine.containerId]);
+    expect(shared.isCurrent(created[1]!)).toBe(true);
   });
 
   test("removes engines of a previous run that no stream took", async () => {

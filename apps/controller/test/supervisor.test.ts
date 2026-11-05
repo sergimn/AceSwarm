@@ -94,6 +94,8 @@ interface Fakes {
   sharing?: { on: boolean };
   /** Players showing the stream. */
   viewers?: number;
+  /** While on, the pipeline receives video. */
+  video?: { on: boolean };
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -143,12 +145,13 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       pending = handover === true ? input.source : undefined;
       return Promise.resolve(pipeline);
     },
-    status: () =>
-      Promise.resolve(
-        pending !== undefined && fakes.handover === "delivers"
-          ? { ...pipeline, source: pending, lastFrameAt: new Date(clock.now).toISOString() }
-          : pipeline,
-      ),
+    status: () => {
+      const delivers = fakes.video?.on === true || (pending !== undefined && fakes.handover === "delivers");
+      const source = pending ?? pipeline.source;
+      return Promise.resolve(
+        delivers ? { ...pipeline, source, lastFrameAt: new Date(clock.now).toISOString() } : pipeline,
+      );
+    },
   } as unknown as TranscoderClient;
   const netgw = {
     assign: (assignment: PathAssignment) => {
@@ -495,9 +498,14 @@ describe("sharing one engine per path", () => {
     const released: string[] = [];
     const reports: FailureReport[] = [];
     const restarts: string[] = [];
+    const rejoined: string[] = [];
     const shared = {
       acquire: (path: string) => {
         acquired.push(path);
+        return Promise.resolve(state.current);
+      },
+      rejoin: (handle: EngineHandle) => {
+        rejoined.push(handle.containerId);
         return Promise.resolve(state.current);
       },
       release: (handle: EngineHandle) => {
@@ -507,14 +515,14 @@ describe("sharing one engine per path", () => {
       isCurrent: (handle: EngineHandle) => handle.containerId === state.current.containerId,
       reportFailure: (_handle: EngineHandle, _stream: string, report: FailureReport) => {
         reports.push(report);
-        return report.watched;
+        return report.watched && report.hadVideo;
       },
       restart: (handle: EngineHandle) => {
         restarts.push(handle.containerId);
         return true;
       },
     } as unknown as SharedEngines;
-    return { shared, state, acquired, released, reports, restarts };
+    return { shared, state, acquired, released, reports, restarts, rejoined };
   }
 
   test("plays from its path's shared engine, whose gateway path the shared engines manage", async () => {
@@ -534,22 +542,48 @@ describe("sharing one engine per path", () => {
     await fake.instance.tick();
     await stallAndRecover(fake, 3);
     // The ladder's third step would restart its own engine: on a shared one it only says so.
+    // It never played from the engine, which the shared engines take into account.
     expect(pool.reports).toEqual([
-      { watched: false, wantsRestart: false },
-      { watched: false, wantsRestart: false },
-      { watched: false, wantsRestart: true },
+      { watched: false, wantsRestart: false, hadVideo: false },
+      { watched: false, wantsRestart: false, hadVideo: false },
+      { watched: false, wantsRestart: true, hadVideo: false },
     ]);
     expect(fake.restarted).toEqual([]);
     expect(fake.instance.view().recoveries).toBe(3);
   });
 
-  test("says when someone watches it, which replaces the engine", async () => {
+  test("says when someone watches it after it played from the engine, which replaces the engine", async () => {
     const pool = sharedEngines();
-    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, viewers: 1 });
+    const video = { on: true };
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, viewers: 1, video });
     await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    video.on = false;
     await stallAndRecover(fake, 1);
-    expect(pool.reports).toEqual([{ watched: true, wantsRestart: false }]);
+    expect(pool.reports).toEqual([{ watched: true, wantsRestart: false, hadVideo: true }]);
     expect(fake.instance.view().message).toContain("replacing the shared engine");
+  });
+
+  test("doesn't blame the shared engine while its path is down", async () => {
+    const pool = sharedEngines();
+    const paths = [direct];
+    const fake = supervisor(paths, { shared: pool.shared, sharing: { on: true } });
+    await fake.instance.tick();
+    paths[0] = { ...direct, up: false };
+    await stallAndRecover(fake, 1);
+    expect(pool.reports).toEqual([]);
+  });
+
+  test("starting again on the same shared engine checks that it still answers", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, failFirstSession: true });
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("error");
+    await stallAndRecover(fake, 1);
+    expect(pool.acquired).toEqual(["direct"]);
+    expect(pool.rejoined).toEqual([sharedEngine.containerId]);
+    expect(fake.instance.view().state).toBe("starting");
   });
 
   test("moves to the new engine once the shared one was replaced", async () => {

@@ -103,8 +103,12 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
 - **One stream failing leaves the engine alone.** Restarting a shared engine would interrupt every stream on it, so a failing stream only restarts its own session, and moves to another path if that doesn't help.
 - **The engine is replaced when:**
   - the stream someone is watching full screen fails,
-  - more than `SHARED_ENGINE_MAX_FAILURES` (2) of its streams fail within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60), or
-  - every stream on it is failing.
+  - more than `SHARED_ENGINE_MAX_FAILURES` (2) of its streams fail within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
+  - every stream on it is failing, or
+  - it stopped answering.
+
+  Only streams that had played from the engine count, since a broadcast that is down fails on any engine. Apart from **Restart**, it is replaced at most once per failure window.
+
 - **Replacing is make-before-break.** A new engine starts on the same path, and each stream moves over once the new engine delivers its video. The old engine goes once its last stream left.
 - **It needs more memory than one stream's engine**, though far less than an engine per stream. Watch the "Engines" dashboard row and raise `ENGINE_MEMORY_MB` if it gets close.
 - **Peer counts are shared too.** The engine reports connected peers per stream, but the peers sending data and their countries come from the engine's connections, so every stream on it shows the same ones.

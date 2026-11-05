@@ -153,7 +153,7 @@ test("counts the player as a viewer, with a throwaway id", async ({ page, reques
   expect(viewers[0]?.viewer).toMatch(/^[0-9a-f]{16}$/);
   expect(await metrics(request)).toMatch(
     new RegExp(
-      String.raw`aceswarm_viewer_watching\{viewer="${viewers[0]!.viewer}",device="[^"]+",stream="${run.watched}"\} 1`,
+      String.raw`aceswarm_viewer_watching\{viewer="${viewers[0]!.viewer}",device="[^"]+",stream="${run.watched}"[^}]*\} 1`,
     ),
   );
   // Nothing is stored in the browser: a new visit is a new viewer.
@@ -198,7 +198,9 @@ test("the watched stream failing replaces the engine, and the other stream keeps
     },
     300_000,
   );
-  expect(await metrics(request)).toMatch(/aceswarm_shared_engine_restarts_total\{path="direct",reason="watched"\} 1/);
+  expect(await metrics(request)).toMatch(
+    /aceswarm_shared_engine_restarts_total\{path="direct",reason="watched"[^}]*\} 1/,
+  );
   await waitForPlaying(request, run.watched, 240_000);
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await stream(request, run.watched)).viewers).toBe(0);

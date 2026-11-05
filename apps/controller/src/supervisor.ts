@@ -14,7 +14,7 @@ import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { EngineHandle, EngineManager } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
 import type { ControllerMetrics } from "./metrics.ts";
-import { exitedPipeline, sleep, startSessionOfAnyKind } from "./playback.ts";
+import { sleep, startSessionOfAnyKind } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { SharedEngines } from "./shared-engines.ts";
 import { StreamEngines } from "./stream-engines.ts";
@@ -132,6 +132,11 @@ export class StreamSupervisor {
     return this.bootstrapped || !this.running;
   }
 
+  /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
+  get triedEngine(): boolean {
+    return this.engines.tried || !this.running;
+  }
+
   get isPlaying(): boolean {
     return this.state === "playing";
   }
@@ -220,6 +225,7 @@ export class StreamSupervisor {
       this.paths.remember(this.stream.path, health.healthy);
     }
     if (health.healthy) {
+      this.engines.played(this.engine);
       if (this.recovery.failures > 0) {
         this.logger.info({ failures: this.recovery.failures }, "stream recovered");
       }
@@ -344,22 +350,13 @@ export class StreamSupervisor {
   }
 
   private async poll(): Promise<void> {
-    const engine = this.engine;
-    const session = this.session;
-    if (engine === undefined || session === undefined) {
+    if (this.engine === undefined || this.session === undefined) {
       return;
     }
-    const [pipeline, stats, peers] = await Promise.allSettled([
-      this.deps.transcoder.status(this.stream.id),
-      this.deps.ace.stats(session.statUrl),
-      this.deps.netgw.peers(engine.ip),
-    ]);
-    if (pipeline.status === "fulfilled") {
-      // A missing pipeline (for example after a transcoder restart) counts as exited.
-      this.pipeline = pipeline.value ?? exitedPipeline(this.pipeline, "pipeline not found");
-    }
-    this.stats = stats.status === "fulfilled" ? stats.value : undefined;
-    this.peers = peers.status === "fulfilled" ? peers.value : undefined;
+    const polled = await this.engines.poll(this.engine, this.session, this.pipeline);
+    this.pipeline = polled.pipeline;
+    this.stats = polled.stats;
+    this.peers = polled.peers;
   }
 
   /**
@@ -417,7 +414,12 @@ export class StreamSupervisor {
     // On a shared engine, other streams play from the same engine: the shared engines decide
     // whether it restarts.
     const report = { watched: (this.deps.viewers?.() ?? 0) > 0, wantsRestart: decision.action === "restart-engine" };
-    if (this.engine !== undefined && this.engines.reportFailure(this.engine, report)) {
+    // A path that is down says nothing about the engine: the stream leaves the path instead.
+    if (
+      this.engine !== undefined &&
+      !this.paths.isDown(this.stream.path) &&
+      this.engines.reportFailure(this.engine, report)
+    ) {
       reason += "; replacing the shared engine";
     }
     // A dead path cannot be fixed by restarting things locally: leave it, without waiting for the

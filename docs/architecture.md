@@ -97,24 +97,28 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
 - **Taking and leaving.** A stream takes its path's engine when it starts or moves there, and leaves it when it moves away or is removed. The first stream on a path starts the engine (or takes over the one a previous run left), and the last one to leave removes it. The gateway routes the engine's address through its path, like any engine's.
 - **Turning it on or off** moves every stream to the other kind of engine on its own path, make-before-break: a stream that plays keeps its picture until the new engine delivers video. Turning it off starts an engine per stream, so at most two streams move at once.
 - **Recovery.** The ladder is the same, except that its engine restart steps only restart the stream's session: restarting the engine would interrupt every other stream on it. Path moves take the stream to the other path's shared engine.
-- **Replacing the engine.** Every recovery step reports a failure to the shared engines. They replace the engine when:
+- **Replacing the engine.** Every recovery step reports a failure to the shared engines, except on a path that is down: the stream leaves the path instead. A failure counts against the engine only if the stream had played from it: a broadcast that is down fails on any engine. They replace the engine when:
   - the failing stream is being watched (see [Viewers](#viewers)),
   - more than `SHARED_ENGINE_MAX_FAILURES` (2) different streams on it failed within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
-  - its streams all reached the ladder's engine restart step within that window, which also covers a stream alone on its engine, or
+  - a stream reached the ladder's engine restart step and every other stream on it failed within that window too (whether or not they had played from it), which also covers a stream alone on its engine,
+  - a stream starting again on it finds it gone or not answering (`unresponsive`), or
   - someone pressed **Restart** on one of its streams.
+
+  Apart from **Restart**, a path's engine is replaced at most once per failure window. When the new engine doesn't help either, the streams' own recovery goes on.
+
 - **Make-before-break.**
   1. A new engine starts on the same path. The old one keeps playing meanwhile.
   2. Once it answers, new sessions go to it, and each stream on the old engine moves on its next check: one that plays keeps its picture until the new engine delivers video, one that is failing just starts there.
-  3. The old engine is removed once its last stream left, or after `HANDOVER_TIMEOUT_SECONDS` plus a minute.
+  3. The old engine is removed once its last stream left, or after twice `HANDOVER_TIMEOUT_SECONDS` plus a minute (enough for a second handover attempt).
 
-  A replacement that doesn't start leaves the old engine in place, and none is tried for that path again within the failure window.
+  The gateway routes the new engine from the moment it has an address, like any engine's. A stream that starts on the path while the new engine starts, and the old one is already gone, waits for the new one. A replacement that doesn't start leaves the old engine in place.
 
-- **Leftovers.** Once every stream had its first start attempt, the controller removes shared engines no stream uses: ones left from a previous run, and a replacement whose streams all went away before moving.
+- **Leftovers.** Once every stream tried to start an engine (a stream waiting for the gateway, or for a WireGuard path it may use, hasn't yet), the controller removes shared engines no stream uses: ones left from a previous run, and a path's engine that nobody used for 30 s once no stream was still moving to it.
 - **Peers.** The engine reports connected peers per session. Connection tracking only sees the engine, so the "sending" peers and their countries are the engine's, the same for each of its streams.
 
 ### Viewers
 
-The player reports the stream it shows full screen (`POST /api/viewers/<viewer>` with `{ "stream": "<id>" }`), when it opens and every `VIEWER_PING_SECONDS` (60), and `{ "stream": null }` when it closes or the page is hidden. A viewer that misses two and a half reports no longer counts.
+The player reports the stream it shows full screen (`POST /api/viewers/<viewer>` with `{ "stream": "<id>" }`), when it opens and every `VIEWER_PING_SECONDS` (60), and `{ "stream": null }` when it closes or the page is hidden. A viewer that misses two and a half reports no longer counts. `VIEWER_PING_SECONDS` is at least 5.
 
 - **Viewers are throwaway.** The id is random, made up when the page loads and kept only in memory. There are no cookies and no browser storage, so every page load is a new viewer.
 - **The device** is a rough guess from the User-Agent, such as "Chrome on TV".

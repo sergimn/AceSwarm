@@ -150,7 +150,7 @@ export async function registerRoutes(
   });
 
   // Players report the stream they show full screen about once a minute, and `null` once they
-  // close it. Also sent with navigator.sendBeacon, which can only POST.
+  // close it or the page goes away.
   app.post("/api/viewers/:viewer", async (request, reply) => {
     const params = viewerParams.safeParse(request.params);
     const body = viewerSchema.safeParse(request.body);

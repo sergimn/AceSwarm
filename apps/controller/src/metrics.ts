@@ -54,9 +54,73 @@ export class ControllerMetrics {
 
     this.sharedEngineRestarts = new Counter({
       name: "aceswarm_shared_engine_restarts_total",
-      help: "Shared engines replaced, per path and reason (watched, failures, all-failed, manual)",
+      help: "Shared engines replaced, per path and reason (watched, failures, all-failed, unresponsive, manual)",
       labelNames: ["path", "reason"],
       registers,
+    });
+
+    // prom-client calls collect() on every scrape; one gauge refreshes all of them. It is
+    // registered before the gauges it fills, because a scrape reads each metric in turn: the ones
+    // before it would show the previous scrape's values.
+    const total: Gauge = new Gauge({
+      name: "aceswarm_streams",
+      help: "Number of configured streams",
+      registers,
+      collect: () => {
+        const current = snapshot();
+        const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
+        for (const gauge of [...gauges, watching, sharedStreams]) {
+          gauge.reset();
+        }
+        const now = Date.now();
+        for (const stream of current.streams) {
+          const labels = { stream: stream.id };
+          info.set({ ...labels, name: stream.name, ace_id: stream.aceId, enabled: String(stream.enabled) }, 1);
+          for (const candidate of STREAM_STATES) {
+            state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
+          }
+          up.set(labels, stream.state === "playing" ? 1 : 0);
+          if (stream.lastFrameAt !== null) {
+            frameAge.set(labels, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
+          }
+          if (stream.peers.connected !== null) {
+            peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
+          }
+          if (stream.peers.active !== null) {
+            peers.set({ ...labels, kind: "active" }, stream.peers.active);
+          }
+          for (const country of stream.peers.countries) {
+            countries.set({ ...labels, country: country.code }, country.count);
+          }
+          if (stream.downloadKBps !== null) {
+            speed.set({ ...labels, direction: "down" }, stream.downloadKBps);
+          }
+          if (stream.uploadKBps !== null) {
+            speed.set({ ...labels, direction: "up" }, stream.uploadKBps);
+          }
+          if (stream.path !== null) {
+            path.set({ ...labels, path: stream.path }, 1);
+          }
+          viewers.set(labels, stream.viewers);
+        }
+        const watchers = sources.viewers?.() ?? [];
+        for (const viewer of watchers) {
+          watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
+        }
+        const sharedEngines = sources.sharedEngines?.() ?? [];
+        for (const engine of sharedEngines) {
+          sharedStreams.set(
+            { path: engine.path, engine: engine.engine, retiring: String(engine.retiring) },
+            engine.streams,
+          );
+        }
+        for (const engine of engineMemory()) {
+          const labels = { stream: engine.stream, engine: engine.engine };
+          memory.set(labels, engine.usedBytes);
+          memoryLimit.set(labels, engine.limitBytes);
+        }
+        total.set(current.streams.length);
+      },
     });
 
     const info = new Gauge({
@@ -138,68 +202,6 @@ export class ControllerMetrics {
       help: "Streams playing from each shared engine",
       labelNames: ["path", "engine", "retiring"],
       registers,
-    });
-
-    // prom-client calls collect() on every scrape; one gauge refreshes all of them.
-    const total: Gauge = new Gauge({
-      name: "aceswarm_streams",
-      help: "Number of configured streams",
-      registers,
-      collect: () => {
-        const current = snapshot();
-        const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
-        for (const gauge of [...gauges, watching, sharedStreams]) {
-          gauge.reset();
-        }
-        const now = Date.now();
-        for (const stream of current.streams) {
-          const labels = { stream: stream.id };
-          info.set({ ...labels, name: stream.name, ace_id: stream.aceId, enabled: String(stream.enabled) }, 1);
-          for (const candidate of STREAM_STATES) {
-            state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
-          }
-          up.set(labels, stream.state === "playing" ? 1 : 0);
-          if (stream.lastFrameAt !== null) {
-            frameAge.set(labels, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
-          }
-          if (stream.peers.connected !== null) {
-            peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
-          }
-          if (stream.peers.active !== null) {
-            peers.set({ ...labels, kind: "active" }, stream.peers.active);
-          }
-          for (const country of stream.peers.countries) {
-            countries.set({ ...labels, country: country.code }, country.count);
-          }
-          if (stream.downloadKBps !== null) {
-            speed.set({ ...labels, direction: "down" }, stream.downloadKBps);
-          }
-          if (stream.uploadKBps !== null) {
-            speed.set({ ...labels, direction: "up" }, stream.uploadKBps);
-          }
-          if (stream.path !== null) {
-            path.set({ ...labels, path: stream.path }, 1);
-          }
-          viewers.set(labels, stream.viewers);
-        }
-        const watchers = sources.viewers?.() ?? [];
-        for (const viewer of watchers) {
-          watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
-        }
-        const sharedEngines = sources.sharedEngines?.() ?? [];
-        for (const engine of sharedEngines) {
-          sharedStreams.set(
-            { path: engine.path, engine: engine.engine, retiring: String(engine.retiring) },
-            engine.streams,
-          );
-        }
-        for (const engine of engineMemory()) {
-          const labels = { stream: engine.stream, engine: engine.engine };
-          memory.set(labels, engine.usedBytes);
-          memoryLimit.set(labels, engine.limitBytes);
-        }
-        total.set(current.streams.length);
-      },
     });
   }
 }

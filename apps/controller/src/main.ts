@@ -76,7 +76,8 @@ const sharedEngines = new SharedEngines({
     maxFailures: config.SHARED_ENGINE_MAX_FAILURES,
     failureWindowMs: config.SHARED_ENGINE_FAILURE_WINDOW_SECONDS * 1000,
     // Every stream gets a handover's time to leave a replaced engine, plus a minute to retry.
-    retireTimeoutMs: (config.HANDOVER_TIMEOUT_SECONDS + 60) * 1000,
+    // Long enough for a stream whose first handover timed out to try a second time.
+    retireTimeoutMs: (2 * config.HANDOVER_TIMEOUT_SECONDS + 60) * 1000,
     idleTimeoutMs: 30_000,
   },
 });

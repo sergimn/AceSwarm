@@ -1123,7 +1123,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Why shared engines were replaced: the stream someone watched failed (watched), too many of its streams failed at once (failures), every stream on it was failing (all-failed), or someone pressed Restart (manual).",
+      "description": "Why shared engines were replaced: the stream someone watched failed (watched), too many of its streams failed at once (failures), every stream on it was failing (all-failed), it stopped answering (unresponsive), or someone pressed Restart (manual).",
       "gridPos": {
         "h": 8,
         "w": 12,

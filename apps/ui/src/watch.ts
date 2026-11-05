@@ -33,7 +33,7 @@ export class WatchReporter {
       if (this.reported === null) {
         return;
       }
-      api.beaconViewer(this.viewer, null);
+      api.leaveViewer(this.viewer);
       this.reported = null;
     });
   }

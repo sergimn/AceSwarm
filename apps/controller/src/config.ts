@@ -51,8 +51,11 @@ const schema = z.object({
    */
   SHARED_ENGINE_MAX_FAILURES: envInt(2),
   SHARED_ENGINE_FAILURE_WINDOW_SECONDS: envInt(60),
-  /** How often a player showing a stream full screen reports it; it counts as gone after missing two. */
-  VIEWER_PING_SECONDS: envInt(60),
+  /**
+   * How often a player showing a stream full screen reports it; it counts as gone after missing two.
+   * Players report at most every 5 s.
+   */
+  VIEWER_PING_SECONDS: z.coerce.number().int().min(5).default(60),
 });
 
 export type Config = z.infer<typeof schema>;

@@ -67,9 +67,14 @@ export const api = {
     await send("POST", `/api/viewers/${encodeURIComponent(viewer)}`, { stream });
   },
   /** Like `reportViewer`, but still delivered while the page unloads. */
-  beaconViewer: (viewer: string, stream: string | null): void => {
-    const body = new Blob([JSON.stringify({ stream })], { type: "application/json" });
-    navigator.sendBeacon(`/api/viewers/${encodeURIComponent(viewer)}`, body);
+  /** Like `reportViewer`, for a page that is going away: the request outlives it. */
+  leaveViewer: (viewer: string): void => {
+    void fetch(`/api/viewers/${encodeURIComponent(viewer)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stream: null }),
+      keepalive: true,
+    }).catch(() => undefined);
   },
 };
 

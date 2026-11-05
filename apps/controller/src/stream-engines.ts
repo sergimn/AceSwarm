@@ -1,11 +1,11 @@
-import type { PipelineStatus } from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { AcestreamClient, EngineSession } from "./acestream.ts";
+import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
 import type { EngineHandle, EngineManager, OnEngineAddress } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
-import { waitForHandover, type HandoverTiming } from "./playback.ts";
+import { exitedPipeline, waitForHandover, type HandoverTiming } from "./playback.ts";
 import { nextRecovery, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { FailureReport, SharedEngines } from "./shared-engines.ts";
 import type { MoveSlots } from "./stream-paths.ts";
@@ -68,6 +68,9 @@ export class StreamEngines {
   private readonly deps: StreamEnginesDeps;
   /** Failed moves to the kind of engine the setting asks for, and when to try again. */
   private wanted: RecoveryState = { failures: 0, lastActionAt: undefined };
+  /** The engine the stream last played from (container id). */
+  private playedOn: string | undefined;
+  private startTried = false;
 
   constructor(streamId: string, deps: StreamEnginesDeps) {
     this.streamId = streamId;
@@ -81,6 +84,7 @@ export class StreamEngines {
    * session). `onAddress` gives the starting engine its path; its other addresses' paths go.
    */
   async startOwn(current: EngineHandle | undefined, onAddress: OnEngineAddress): Promise<EngineHandle> {
+    this.startTried = true;
     if (current !== undefined && current.sharedPath !== null) {
       await this.release(current);
     }
@@ -114,9 +118,11 @@ export class StreamEngines {
    * sharing was on.
    */
   async startShared(path: string, current: EngineHandle | undefined): Promise<EngineHandle> {
+    this.startTried = true;
     const shared = this.required();
     if (current?.sharedPath === path && shared.isCurrent(current)) {
-      return current;
+      // Its session failed to start again, so check that the engine still answers.
+      return shared.rejoin(current, this.streamId);
     }
     if (current !== undefined) {
       await this.release(current);
@@ -130,8 +136,42 @@ export class StreamEngines {
    * A stream on a shared engine failed and its recovery is acting. Returns true when the shared
    * engine is being replaced; false for the stream's own engine.
    */
-  reportFailure(engine: EngineHandle, report: FailureReport): boolean {
-    return engine.sharedPath !== null && this.deps.shared?.reportFailure(engine, this.streamId, report) === true;
+  reportFailure(engine: EngineHandle, report: Omit<FailureReport, "hadVideo">): boolean {
+    const hadVideo = this.playedOn === engine.containerId;
+    return (
+      engine.sharedPath !== null &&
+      this.deps.shared?.reportFailure(engine, this.streamId, { ...report, hadVideo }) === true
+    );
+  }
+
+  /** The stream's pipeline, its session's stats and its engine's peers, as they are now. */
+  async poll(
+    engine: EngineHandle,
+    session: EngineSession,
+    previous: PipelineStatus | undefined,
+  ): Promise<{ pipeline: PipelineStatus | undefined; stats: EngineStats | undefined; peers: PeerStats | undefined }> {
+    const [pipeline, stats, peers] = await Promise.allSettled([
+      this.deps.transcoder.status(this.streamId),
+      this.deps.ace.stats(session.statUrl),
+      this.deps.netgw.peers(engine.ip),
+    ]);
+    return {
+      // A missing pipeline (for example after a transcoder restart) counts as exited.
+      pipeline:
+        pipeline.status === "fulfilled" ? (pipeline.value ?? exitedPipeline(previous, "pipeline not found")) : previous,
+      stats: stats.status === "fulfilled" ? stats.value : undefined,
+      peers: peers.status === "fulfilled" ? peers.value : undefined,
+    };
+  }
+
+  /** The stream receives video from the engine. */
+  played(engine: EngineHandle): void {
+    this.playedOn = engine.containerId;
+  }
+
+  /** It tried to start an engine, or to take over the one it had. */
+  get tried(): boolean {
+    return this.startTried;
   }
 
   /**
