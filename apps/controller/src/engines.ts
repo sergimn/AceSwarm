@@ -3,6 +3,12 @@ import { describeError } from "@aceswarm/shared/http";
 import type { AcestreamClient } from "./acestream.ts";
 import type { ContainerDetails, DockerClient } from "./docker.ts";
 
+/**
+ * The engine is gone: its container disappeared or exited, or its API never answered. Unlike an
+ * error from the Docker API, which may pass, only a new engine helps.
+ */
+export class EngineGoneError extends Error {}
+
 export interface EngineHandle {
   containerId: string;
   name: string;
@@ -182,7 +188,7 @@ export class EngineManager {
   async revive(handle: EngineHandle, onAddress?: OnEngineAddress): Promise<EngineHandle> {
     const details = await this.docker.inspectContainer(handle.containerId);
     if (details === undefined) {
-      throw new Error(`engine ${handle.name} disappeared`);
+      throw new EngineGoneError(`engine ${handle.name} disappeared`);
     }
     if (!details.State.Running) {
       await this.docker.startContainer(handle.containerId);
@@ -233,10 +239,10 @@ export class EngineManager {
     while (Date.now() < deadline) {
       const details = await this.docker.inspectContainer(containerId);
       if (details === undefined) {
-        throw new Error("engine container vanished while starting");
+        throw new EngineGoneError("engine container vanished while starting");
       }
       if (!details.State.Running && details.State.Status === "exited") {
-        throw new Error(`engine exited with code ${String(details.State.ExitCode)}`);
+        throw new EngineGoneError(`engine exited with code ${String(details.State.ExitCode)}`);
       }
       const handle = this.toHandle(details);
       if (handle.ip.length > 0) {
@@ -253,7 +259,7 @@ export class EngineManager {
       }
       await sleep(1000);
     }
-    throw new Error(`engine did not become ready: ${lastProblem}`);
+    throw new EngineGoneError(`engine did not become ready: ${lastProblem}`);
   }
 
   private toHandle(details: ContainerDetails): EngineHandle {

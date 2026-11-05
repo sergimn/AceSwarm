@@ -66,7 +66,6 @@ export const api = {
   reportViewer: async (viewer: string, stream: string | null): Promise<void> => {
     await send("POST", `/api/viewers/${encodeURIComponent(viewer)}`, { stream });
   },
-  /** Like `reportViewer`, but still delivered while the page unloads. */
   /** Like `reportViewer`, for a page that is going away: the request outlives it. */
   leaveViewer: (viewer: string): void => {
     void fetch(`/api/viewers/${encodeURIComponent(viewer)}`, {

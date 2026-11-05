@@ -228,9 +228,12 @@ export class StreamEngines {
       if (move.session !== undefined) {
         await this.deps.ace.stopSession(move.session.commandUrl).catch(() => undefined);
       }
-      await this.release(move.from);
+      // A move can end on the shared engine the stream came from (it was current again).
+      if (engine.containerId !== move.from.containerId) {
+        await this.release(move.from);
+      }
     } catch (error) {
-      if (starting.engine !== undefined) {
+      if (starting.engine !== undefined && starting.engine.containerId !== move.from.containerId) {
         await this.release(starting.engine).catch(() => undefined);
       }
       throw error;

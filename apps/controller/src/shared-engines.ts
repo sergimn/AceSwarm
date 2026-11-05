@@ -1,7 +1,7 @@
 import type { PathAssignment } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { NetgwClient } from "./clients.ts";
-import type { EngineHandle, EngineManager } from "./engines.ts";
+import { EngineGoneError, type EngineHandle, type EngineManager } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 
 export interface SharedEngineSettings {
@@ -120,7 +120,8 @@ export class SharedEngines {
   /**
    * A stream starts again on the engine it had, which is still its path's engine. Waits until the
    * engine answers, starting it again if it stopped. An engine that is gone or doesn't answer is
-   * removed, and the stream gets the path's next engine.
+   * removed, and the stream gets the path's next engine. Other errors (the Docker API failing for a
+   * moment) leave the engine alone: the stream tries again later.
    */
   async rejoin(handle: EngineHandle, streamId: string): Promise<EngineHandle> {
     const instance = this.find(handle);
@@ -136,6 +137,9 @@ export class SharedEngines {
       return await this.check(instance, handle);
     } catch (error) {
       instance.users.delete(streamId);
+      if (!(error instanceof EngineGoneError)) {
+        throw error;
+      }
       if (this.current.get(instance.path) === instance) {
         this.logger.warn(
           { err: error, path: instance.path, engine: handle.name },

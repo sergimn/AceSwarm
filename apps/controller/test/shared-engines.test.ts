@@ -4,7 +4,7 @@ import type { PathAssignment } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, test } from "vitest";
 import type { NetgwClient } from "../src/clients.ts";
-import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
+import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import { SharedEngines, type SharedEngineSettings } from "../src/shared-engines.ts";
 
@@ -42,6 +42,8 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
   const gate = Promise.withResolvers<undefined>();
   /** Containers that are gone: reviving them fails. */
   const dead = new Set<string>();
+  /** Makes the Docker API fail once, like a hiccup of the socket proxy. */
+  const docker = { fail: false };
   const engines = {
     findShared: (path?: string) =>
       Promise.resolve(containers.filter((engine) => path === undefined || engine.sharedPath === path)),
@@ -61,8 +63,12 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
     },
     revive: async (engine: EngineHandle, onAddress?: OnEngineAddress) => {
       revived.push(engine.containerId);
+      if (docker.fail) {
+        docker.fail = false;
+        throw new Error("docker GET /containers/x/json failed: socket hang up");
+      }
       if (dead.has(engine.containerId)) {
-        throw new Error(`engine ${engine.name} disappeared`);
+        throw new EngineGoneError(`engine ${engine.name} disappeared`);
       }
       await onAddress?.(engine);
       return engine;
@@ -92,7 +98,7 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
     settings,
     now: () => clock.now,
   });
-  return { shared, created, removed, revived, assigned, unassigned, clock, registry, gate, dead };
+  return { shared, created, removed, revived, assigned, unassigned, clock, registry, gate, dead, docker };
 }
 
 /** Lets replacements started in the background finish. */
@@ -335,6 +341,18 @@ describe("starting again on the same engine", () => {
     expect(await fake.registry.getSingleMetricAsString("aceswarm_shared_engine_restarts_total")).toContain(
       'reason="unresponsive"} 1',
     );
+  });
+
+  test("keeps an engine the Docker API failed to tell about", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("direct", "s1");
+    await fake.shared.acquire("direct", "s2");
+    fake.docker.fail = true;
+    await expect(fake.shared.rejoin(engine, "s1")).rejects.toThrow("socket hang up");
+    expect(fake.shared.isCurrent(engine)).toBe(true);
+    expect(fake.removed).toEqual([]);
+    expect(fake.unassigned).toEqual([]);
+    expect(await fake.shared.rejoin(engine, "s1")).toBe(engine);
   });
 });
 
