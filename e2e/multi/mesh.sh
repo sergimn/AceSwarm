@@ -1,35 +1,42 @@
 #!/usr/bin/env bash
-# Joins the GitHub-hosted runners of one workflow run into a private WireGuard mesh, so the
-# multi-machine E2E jobs can reach each other. Runners have no inbound connectivity (they sit behind
-# NAT), so each one learns its public UDP address with STUN, publishes it with its WireGuard public
-# key as a workflow artifact, and configures the others as peers. WireGuard handshakes from both
-# sides then punch through both NATs (the runners' NAT maps a local port to the same public port
-# for every destination).
+# Joins the GitHub-hosted runners of one workflow run into a private WireGuard network (the
+# "mesh"), so the multi-machine E2E jobs can reach each other. See e2e/README.md for diagrams.
 #
-#   mesh.sh prepare ROLE            key pair + STUN; writes $MESH_DIR/publish/ROLE.json (upload it
-#                                   as the artifact "mesh-ROLE")
-#   mesh.sh join ROLE PEER...       downloads the peers' artifacts, brings wg-mesh up, waits for them
-#   mesh.sh ip ROLE                 prints a role's mesh address
-#   mesh.sh serve-signals ROLE      serves $MESH_DIR/signals on the mesh (port 18999)
-#   mesh.sh signal NAME             creates a signal file that peers can poll
-#   mesh.sh wait-signal ROLE NAME   waits until ROLE serves the signal NAME (or stops answering)
+# Runners can't accept connections from the internet: they sit behind a NAT that only lets packets
+# in from an address the runner has sent to. That NAT keeps one public port per local port whatever
+# the destination, so each runner learns its public UDP address with STUN, publishes it with its
+# WireGuard public key as a workflow artifact, and configures the others as peers. Both sides then
+# send WireGuard handshakes, and each side's first packets open its own NAT for the other side.
 #
-# Needs: sudo, wireguard-tools, node (for e2e/multi/stun.ts), gh with GH_TOKEN (actions: read).
+#   mesh.sh prepare ROLE           keys, mesh address, STUN; writes $MESH_DIR/publish/ROLE.json
+#                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE)
+#   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer
+#   mesh.sh ip ROLE                prints a role's mesh address
+#   mesh.sh share FILE [NAME]      serves FILE to the other runners at http://<mesh ip>:18999/NAME
+#   mesh.sh wait-file ROLE NAME    waits until ROLE serves NAME (or stops answering) and prints it
+#
+# Roles: wg (WireGuard server), source (Acestream broadcast), stack (AceSwarm and the tests).
+# Needs sudo, wireguard-tools, jq, node (for stun.ts) and gh with GH_TOKEN (actions: read).
 set -euo pipefail
 
 MESH_DIR="${MESH_DIR:-${RUNNER_TEMP:-/tmp}/mesh}"
 MESH_PORT="${MESH_PORT:-51000}"
+MESH_ARTIFACT_PREFIX="${MESH_ARTIFACT_PREFIX:-mesh-}"
 MESH_IFACE=wg-mesh
-SIGNAL_PORT=18999
+# Leaves room for a WireGuard tunnel inside the mesh: each layer adds up to 80 bytes.
+MESH_MTU=1380
+SHARE_PORT=18999
 here="$(cd "$(dirname "$0")" && pwd)"
 
 log() { printf '[mesh %s] %s\n' "$(date +%T)" "$*" >&2; }
 
+# TEST-NET-1 addresses: nothing on the runners uses them, and the gateway counts them as internet
+# peers (it skips private ranges like 192.168.0.0/16 in its peer statistics).
 mesh_ip() {
   case "$1" in
-    wg) echo 192.168.233.1 ;;
-    source) echo 192.168.233.2 ;;
-    stack) echo 192.168.233.3 ;;
+    wg) echo 192.0.2.1 ;;
+    source) echo 192.0.2.2 ;;
+    stack) echo 192.0.2.3 ;;
     *)
       log "unknown role $1"
       exit 2
@@ -39,51 +46,62 @@ mesh_ip() {
 
 prepare() {
   local role="$1"
-  mkdir -p "$MESH_DIR/publish" "$MESH_DIR/peers" "$MESH_DIR/signals"
-  if ! command -v wg >/dev/null; then
-    sudo apt-get install -y -qq wireguard-tools >/dev/null
-  fi
+  mkdir -p "$MESH_DIR/publish" "$MESH_DIR/peers" "$MESH_DIR/share"
+  command -v wg >/dev/null || sudo apt-get install -y -qq wireguard-tools >/dev/null
   sudo modprobe wireguard
   (umask 077 && wg genkey >"$MESH_DIR/private.key")
   wg pubkey <"$MESH_DIR/private.key" >"$MESH_DIR/public.key"
-  # Keeps the NAT mapping alive from the WireGuard port until `join` hands the port to WireGuard.
+
+  # Refreshes the NAT mapping every 10 s until `join` hands the port to WireGuard.
   rm -f "$MESH_DIR/stun.json"
   nohup node "$here/stun.ts" --port "$MESH_PORT" --out "$MESH_DIR/stun.json" --keepalive 10 \
     >"$MESH_DIR/stun.log" 2>&1 &
   echo $! >"$MESH_DIR/stun.pid"
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 40); do
     [[ -s "$MESH_DIR/stun.json" ]] && break
     sleep 0.5
   done
   if [[ ! -s "$MESH_DIR/stun.json" ]]; then
     cat "$MESH_DIR/stun.log" >&2
-    log "STUN failed"
+    log "STUN failed: no public UDP address"
     exit 1
   fi
+
+  # The address exists from the start, so services can bind to it and announce it before the peers
+  # are known. WireGuard gets the STUN port in `join`.
+  sudo ip link del "$MESH_IFACE" 2>/dev/null || true
+  sudo ip link add "$MESH_IFACE" type wireguard
+  sudo wg set "$MESH_IFACE" private-key "$MESH_DIR/private.key"
+  sudo ip address add "$(mesh_ip "$role")/24" dev "$MESH_IFACE"
+  sudo ip link set "$MESH_IFACE" mtu "$MESH_MTU" up
+  nohup python3 -m http.server "$SHARE_PORT" --bind "$(mesh_ip "$role")" --directory "$MESH_DIR/share" \
+    >"$MESH_DIR/share.log" 2>&1 &
+
   log "public UDP address: $(cat "$MESH_DIR/stun.json")"
+  if [[ "$(jq -r .endpointIndependent "$MESH_DIR/stun.json")" != true ]]; then
+    log "warning: STUN servers saw different ports, so hole punching may fail"
+  fi
   jq -n --arg role "$role" --arg ip "$(mesh_ip "$role")" --arg key "$(cat "$MESH_DIR/public.key")" \
     --slurpfile stun "$MESH_DIR/stun.json" \
     '{role: $role, meshIp: $ip, publicKey: $key, endpoint: "\($stun[0].ip):\($stun[0].port)", stun: $stun[0]}' \
     >"$MESH_DIR/publish/$role.json"
 }
 
-# Waits until the workflow run has the artifact "mesh-PEER" and downloads it.
+# Waits until the workflow run has the peer's artifact and downloads it.
 fetch_peer() {
-  local peer="$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
-  until [[ -s "$MESH_DIR/peers/$peer.json" ]]; do
-    if gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-      --jq '.artifacts[].name' 2>/dev/null | grep -qx "mesh-$peer"; then
-      gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "mesh-$peer" -D "$MESH_DIR/download-$peer" >/dev/null
-      cp "$MESH_DIR/download-$peer/$peer.json" "$MESH_DIR/peers/$peer.json"
-      log "got $peer: $(jq -c . "$MESH_DIR/peers/$peer.json")"
-      return
-    fi
+  local peer="$1" name="${MESH_ARTIFACT_PREFIX}$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
+  until gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+    --jq '.artifacts[].name' 2>/dev/null | grep -qx "$name"; do
     if ((SECONDS > deadline)); then
-      log "timed out waiting for the $peer runner"
+      log "timed out waiting for the $peer runner (artifact $name)"
       exit 1
     fi
     sleep 3
   done
+  rm -rf "$MESH_DIR/download-$peer"
+  gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$name" -D "$MESH_DIR/download-$peer" >/dev/null
+  cp "$MESH_DIR/download-$peer/$peer.json" "$MESH_DIR/peers/$peer.json"
+  log "$peer: $(jq -c '{meshIp, endpoint}' "$MESH_DIR/peers/$peer.json")"
 }
 
 join() {
@@ -93,12 +111,10 @@ join() {
   for peer in "$@"; do
     fetch_peer "$peer"
   done
-  # Hand the port from the STUN keepalive to WireGuard, within the NAT's mapping timeout.
+  # The NAT keeps an idle mapping for well over the second this takes.
   kill "$(cat "$MESH_DIR/stun.pid")" 2>/dev/null || true
   sleep 0.2
-  sudo ip link del "$MESH_IFACE" 2>/dev/null || true
-  sudo ip link add "$MESH_IFACE" type wireguard
-  sudo wg set "$MESH_IFACE" listen-port "$MESH_PORT" private-key "$MESH_DIR/private.key"
+  sudo wg set "$MESH_IFACE" listen-port "$MESH_PORT"
   for peer in "$@"; do
     local file="$MESH_DIR/peers/$peer.json"
     sudo wg set "$MESH_IFACE" peer "$(jq -r .publicKey "$file")" \
@@ -106,55 +122,47 @@ join() {
       allowed-ips "$(jq -r .meshIp "$file")/32" \
       persistent-keepalive 5
   done
-  sudo ip address add "$(mesh_ip "$role")/24" dev "$MESH_IFACE"
-  # Leaves room for a WireGuard tunnel inside the mesh (each layer adds 60-80 bytes).
-  sudo ip link set "$MESH_IFACE" mtu 1380 up
   local start=$SECONDS
   for peer in "$@"; do
     local ip
     ip="$(mesh_ip "$peer")"
     until ping -c 1 -W 1 "$ip" >/dev/null 2>&1; do
-      if ((SECONDS - start > ${MESH_HANDSHAKE_SECONDS:-120})); then
+      if ((SECONDS - start > ${MESH_HANDSHAKE_SECONDS:-180})); then
         sudo wg show "$MESH_IFACE" >&2
         log "no connectivity to $peer ($ip)"
         exit 1
       fi
     done
-    log "$peer reachable at $ip after $((SECONDS - start)) s"
+    log "$peer answers at $ip after $((SECONDS - start)) s"
   done
   sudo wg show "$MESH_IFACE"
 }
 
-serve_signals() {
-  local role="$1"
-  mkdir -p "$MESH_DIR/signals"
-  nohup python3 -m http.server "$SIGNAL_PORT" --bind "$(mesh_ip "$role")" --directory "$MESH_DIR/signals" \
-    >"$MESH_DIR/signals.log" 2>&1 &
+share() {
+  local file="$1" name="${2:-$(basename "$1")}"
+  mkdir -p "$MESH_DIR/share"
+  cp "$file" "$MESH_DIR/share/.$name.tmp"
+  mv "$MESH_DIR/share/.$name.tmp" "$MESH_DIR/share/$name"
 }
 
-signal() {
-  mkdir -p "$MESH_DIR/signals"
-  date -u +%FT%TZ >"$MESH_DIR/signals/$1"
-}
-
-wait_signal() {
-  local role="$1" name="$2" ip unreachable=0
+wait_file() {
+  local role="$1" name="$2" ip silent=0
   ip="$(mesh_ip "$role")"
-  local deadline=$((SECONDS + ${MESH_SIGNAL_WAIT_SECONDS:-3000}))
+  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3000}))
   while ((SECONDS < deadline)); do
-    if curl -sf -m 5 -o /dev/null "http://$ip:$SIGNAL_PORT/$name"; then
-      log "got signal $name from $role"
+    if curl -sf -m 5 "http://$ip:$SHARE_PORT/$name"; then
+      log "got $name from $role"
       return 0
     fi
-    # Gone for good (the job failed or was cancelled): stop waiting.
-    if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then unreachable=0; else unreachable=$((unreachable + 1)); fi
-    if ((unreachable >= 30)); then
+    # Gone for good (its job failed or was cancelled): stop waiting.
+    if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then silent=0; else silent=$((silent + 1)); fi
+    if ((silent >= 30)); then
       log "$role stopped answering"
       return 1
     fi
     sleep 3
   done
-  log "timed out waiting for signal $name from $role"
+  log "timed out waiting for $name from $role"
   return 1
 }
 
@@ -162,11 +170,10 @@ case "${1:-}" in
   prepare) prepare "$2" ;;
   join) join "${@:2}" ;;
   ip) mesh_ip "$2" ;;
-  serve-signals) serve_signals "$2" ;;
-  signal) signal "$2" ;;
-  wait-signal) wait_signal "$2" "$3" ;;
+  share) share "${@:2}" ;;
+  wait-file) wait_file "$2" "$3" ;;
   *)
-    sed -n '2,20p' "$0" >&2
+    sed -n '2,19p' "$0" >&2
     exit 2
     ;;
 esac

@@ -7,6 +7,8 @@
  *
  * It keeps the peers of every info hash in memory and answers with compact peer lists. A peer's
  * address is the connection's source address, which on the mesh is the runner's mesh address.
+ * `GET /stats` lists every address that announced, so the tests can tell which runner an engine's
+ * traffic came out of (the AceSwarm runner itself, or the WireGuard server's runner).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { parseArgs } from "node:util";
@@ -41,7 +43,7 @@ export function percentDecodeBytes(value: string): Buffer {
   const bytes: number[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index];
-    if (char === "%" && index + 2 < value.length + 1) {
+    if (char === "%" && index + 2 < value.length) {
       const byte = Number.parseInt(value.slice(index + 1, index + 3), 16);
       if (!Number.isNaN(byte)) {
         bytes.push(byte);
@@ -86,14 +88,23 @@ interface Peer {
   seen: number;
 }
 
+export interface PeerHistory {
+  ip: string;
+  port: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
 export class Swarm {
   private readonly torrents = new Map<string, Map<string, Peer>>();
+  private readonly history = new Map<string, Map<string, PeerHistory>>();
 
   /** Records the announce and returns the other live peers of the same info hash. */
   announce(announce: Announce, ip: string, now: number = Date.now()): Peer[] {
     const peers = this.torrents.get(announce.infoHash) ?? new Map<string, Peer>();
     this.torrents.set(announce.infoHash, peers);
     const key = `${ip}:${String(announce.port)}`;
+    this.remember(announce.infoHash, key, ip, announce.port, now);
     if (announce.event === "stopped") {
       peers.delete(key);
     } else {
@@ -109,6 +120,18 @@ export class Swarm {
       .filter(([peerKey]) => peerKey !== key)
       .map(([, peer]) => peer)
       .toArray();
+  }
+
+  /** Every address that ever announced, per info hash. */
+  stats(): Record<string, PeerHistory[]> {
+    return Object.fromEntries(this.history.entries().map(([infoHash, peers]) => [infoHash, peers.values().toArray()]));
+  }
+
+  private remember(infoHash: string, key: string, ip: string, port: number, now: number): void {
+    const peers = this.history.get(infoHash) ?? new Map<string, PeerHistory>();
+    this.history.set(infoHash, peers);
+    const at = new Date(now).toISOString();
+    peers.set(key, { ip, port, firstSeen: peers.get(key)?.firstSeen ?? at, lastSeen: at });
   }
 }
 
@@ -129,6 +152,11 @@ export function compactPeers(peers: Peer[]): Buffer {
 
 function handle(swarm: Swarm, request: IncomingMessage, response: ServerResponse): void {
   const [path = "", query = ""] = (request.url ?? "").split("?", 2);
+  if (path === "/stats") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(swarm.stats()));
+    return;
+  }
   const announce = path === "/announce" ? parseAnnounce(query) : undefined;
   const reply = (body: Bencodable): void => {
     response.writeHead(200, { "content-type": "text/plain" });
