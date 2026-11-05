@@ -26,13 +26,31 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  try {
-    compose("unpause", "wg-server");
-  } catch {
-    // It was not paused.
-  }
+  setVpnServerDown(false);
   await request.patch("/api/network", { data: { wireguardOnly: false } });
 });
+
+/**
+ * Makes the throwaway WireGuard server drop every WireGuard packet, like a VPN provider that went
+ * away. Pausing its container is not enough: kernel WireGuard keeps answering from a frozen one.
+ */
+function setVpnServerDown(down: boolean): void {
+  const rule = ["INPUT", "-p", "udp", "--dport", "51820", "-j", "DROP"];
+  const present = (): boolean => {
+    try {
+      compose("exec", "-T", "wg-server", "iptables", "-C", ...rule);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (down && !present()) {
+    compose("exec", "-T", "wg-server", "iptables", "-I", ...rule);
+  }
+  while (!down && present()) {
+    compose("exec", "-T", "wg-server", "iptables", "-D", ...rule);
+  }
+}
 
 async function openNetwork(page: Page) {
   await page.goto("/");
@@ -124,7 +142,7 @@ test("the gateway keeps engines off the direct path on its own", () => {
 
 test("streams wait instead of going direct while no WireGuard path is up", async ({ page, request }) => {
   // Silence the VPN: its probes fail and the path goes down.
-  compose("pause", "wg-server");
+  setVpnServerDown(true);
   const { section } = await openNetwork(page);
   await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 60_000 });
 
@@ -143,7 +161,7 @@ test("streams wait instead of going direct while no WireGuard path is up", async
     expect(gatewayAssignments().map(({ path }) => path)).not.toContain("direct");
   }
 
-  compose("unpause", "wg-server");
+  setVpnServerDown(false);
   await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Up", { timeout: 60_000 });
   const started = await waitForPlaying(request, waiting.id, 120_000);
   expect(started.path).toBe(VPN_PATH);
