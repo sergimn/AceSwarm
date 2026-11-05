@@ -37,8 +37,6 @@ const schema = z.object({
   TRANSCODER_URL: z.string().default("http://transcoder-api:8081"),
   NETGW_URL: z.string().default("http://netgw-api:8082"),
   PATH_STRATEGY: z.enum(["sticky-best", "round-robin"]).default("sticky-best"),
-  /** Minimum score advantage a new path needs over the current one before a stream moves. */
-  PATH_HYSTERESIS: z.coerce.number().min(0).max(1).default(0.15),
   /** After a path switch, wait this long before another switch unless the path goes down. */
   PATH_MIN_DWELL_SECONDS: envInt(300),
   TICK_MS: envInt(2000),

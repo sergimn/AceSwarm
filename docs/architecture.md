@@ -52,19 +52,20 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 
 When a stream stalls, recovery climbs a ladder, and the delay between steps grows exponentially:
 
-| Failures | Action                                       |
-| -------- | -------------------------------------------- |
-| 0–1      | restart the session and pipeline             |
-| 2        | restart the engine container                 |
-| 3, 5, …  | move to another path (if a better one is up) |
-| 4, 6, …  | restart the engine                           |
+| Failures | Action                                 |
+| -------- | -------------------------------------- |
+| 0–1      | restart the session and pipeline       |
+| 2        | restart the engine container           |
+| 3, 5, …  | move to the best other path that is up |
+| 4, 6, …  | restart the engine                     |
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this.
 
 ### Path selection
 
 - `sticky-best` combines the gateway's probe score with the stream's own history on each path.
-  - A stream only moves when recovery asks for it, and then only to a path that is better by a margin (hysteresis).
+  - A stream only moves when recovery asks for it: its path is down, or restarting the pipeline and the engine didn't bring video back.
+  - It then moves to the best other path that is up, even one whose probes score lower. A path can answer pings and still fail a stream, for example when the connection blocks the stream's peers.
   - After moving, it stays for at least `PATH_MIN_DWELL_SECONDS`, unless its path goes down.
 - `round-robin` spreads new streams over the paths that are up.
 

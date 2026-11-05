@@ -60,14 +60,14 @@ export interface SwitchInput {
   paths: PathStatus[];
   memory: PathMemory;
   current: string;
-  /** Minimum combined-score advantage required to move (sticky-best only). */
-  hysteresis: number;
 }
 
 /**
- * Chooses where a failing stream should move. Returns `undefined` when staying is the better
- * option: no other path is up, or (for sticky-best) no path beats the current one by the
- * hysteresis margin. A path that is down is always left if any alternative is up.
+ * Chooses where a failing stream should move: for sticky-best, the best other path that is up,
+ * even one that scores lower than the current path. Only recovery asks, once restarting the
+ * pipeline and the engine did not bring video back, so the current path is failing this stream
+ * whatever its probes say (it may block the stream's peers but answer pings). The move only
+ * happens if video arrives on the new path. Returns `undefined` when no other path is up.
  */
 export function switchTarget(input: SwitchInput): string | undefined {
   const others = input.paths.filter((path) => path.up && path.id !== input.current);
@@ -85,16 +85,5 @@ export function switchTarget(input: SwitchInput): string | undefined {
     }
     return undefined;
   }
-
-  const current = input.paths.find((path) => path.id === input.current);
-  const currentDown = current?.up !== true;
-  const best = bestOf(others, input.memory);
-  if (best === undefined) {
-    return undefined;
-  }
-  if (currentDown) {
-    return best.id;
-  }
-  const advantage = pathScore(best, input.memory) - pathScore(current, input.memory);
-  return advantage >= input.hysteresis ? best.id : undefined;
+  return bestOf(others, input.memory)?.id;
 }

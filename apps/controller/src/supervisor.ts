@@ -30,7 +30,6 @@ export interface SupervisorSettings {
   recoveryMaxDelayMs: number;
   handoverTimeoutMs: number;
   pathStrategy: PathStrategyName;
-  pathHysteresis: number;
   pathMinDwellMs: number;
 }
 
@@ -304,8 +303,6 @@ export class StreamSupervisor {
       paths,
       memory: this.memory,
       current: preferred,
-      // Any other path that is up beats one the stream cannot start on, even with a lower score.
-      hysteresis: -Infinity,
     });
     if (alternative !== undefined) {
       this.logger.info({ from: preferred, to: alternative, failures }, "stream does not start; trying another path");
@@ -411,7 +408,6 @@ export class StreamSupervisor {
       paths: this.deps.paths(),
       memory: this.memory,
       current: from,
-      hysteresis: this.currentPathDown() ? 0 : this.deps.settings.pathHysteresis,
     });
     if (target === undefined) {
       this.logger.info({ path: from }, "no better path; restarting engine instead");

@@ -17,7 +17,6 @@ const settings: SupervisorSettings = {
   recoveryMaxDelayMs: 60_000,
   handoverTimeoutMs: 30_000,
   pathStrategy: "sticky-best",
-  pathHysteresis: 0.15,
   pathMinDwellMs: 300_000,
 };
 

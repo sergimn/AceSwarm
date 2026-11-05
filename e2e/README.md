@@ -247,6 +247,8 @@ sequenceDiagram
 | stays on the VPN                      | sticky path selection: no move back once the stream works                                                  |
 | goes back to the direct path          | removing a profile moves its streams away right away                                                       |
 
+The block in the third test only drops traffic to the broadcast runner, so the direct path keeps answering the gateway's pings and keeps its better probe score. That is what a connection that blocks Acestream peers looks like, and the stream still has to leave it.
+
 ### Debugging a failed run
 
 - **Each job's last step prints its logs:** the mesh (`wg show`), the WireGuard server, or the broadcast (tracker, ffmpeg and engine logs).

@@ -76,7 +76,6 @@ const orchestrator: Orchestrator = new Orchestrator({
     recoveryMaxDelayMs: config.RECOVERY_MAX_DELAY_SECONDS * 1000,
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
     pathStrategy: config.PATH_STRATEGY,
-    pathHysteresis: config.PATH_HYSTERESIS,
     pathMinDwellMs: config.PATH_MIN_DWELL_SECONDS * 1000,
   },
 });

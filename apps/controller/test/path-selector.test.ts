@@ -65,22 +65,22 @@ describe("initialPath", () => {
 });
 
 describe("switchTarget", () => {
-  it("stays unless another path is clearly better (sticky)", () => {
-    const paths = [path("direct", 0.8), path("wg:a", 0.85)];
-    expect(
-      switchTarget({ strategy: "sticky-best", paths, memory: new Map(), current: "direct", hysteresis: 0.1 }),
-    ).toBe(undefined);
-    const better = [path("direct", 0.5), path("wg:a", 0.95)];
-    expect(
-      switchTarget({ strategy: "sticky-best", paths: better, memory: new Map(), current: "direct", hysteresis: 0.1 }),
-    ).toBe("wg:a");
+  it("leaves a failing path for the best other one, even one with a lower score", () => {
+    // The stream doesn't play on its path although the path answers pings, for example because
+    // the connection blocks the stream's peers.
+    const paths = [path("direct", 0.95), path("wg:a", 0.6), path("wg:b", 0.8), path("wg:c", 0.99, false)];
+    expect(switchTarget({ strategy: "sticky-best", paths, memory: new Map(), current: "direct" })).toBe("wg:b");
+  });
+
+  it("prefers the path the stream played well on", () => {
+    const paths = [path("direct", 0.95), path("wg:a", 0.6), path("wg:b", 0.8)];
+    const memory = new Map([["wg:a", 1]]);
+    expect(switchTarget({ strategy: "sticky-best", paths, memory, current: "direct" })).toBe("wg:a");
   });
 
   it("always leaves a path that is down", () => {
     const paths = [path("direct", 0, false), path("wg:a", 0.1)];
-    expect(
-      switchTarget({ strategy: "sticky-best", paths, memory: new Map(), current: "direct", hysteresis: 0.5 }),
-    ).toBe("wg:a");
+    expect(switchTarget({ strategy: "sticky-best", paths, memory: new Map(), current: "direct" })).toBe("wg:a");
   });
 
   it("stays when there is no alternative", () => {
@@ -90,18 +90,13 @@ describe("switchTarget", () => {
         paths: [path("direct", 0.2)],
         memory: new Map(),
         current: "direct",
-        hysteresis: 0,
       }),
     ).toBeUndefined();
   });
 
   it("round robin moves to the next path that is up", () => {
     const paths = [path("direct", 1), path("wg:a", 1, false), path("wg:b", 1)];
-    expect(switchTarget({ strategy: "round-robin", paths, memory: new Map(), current: "direct", hysteresis: 0 })).toBe(
-      "wg:b",
-    );
-    expect(switchTarget({ strategy: "round-robin", paths, memory: new Map(), current: "wg:b", hysteresis: 0 })).toBe(
-      "direct",
-    );
+    expect(switchTarget({ strategy: "round-robin", paths, memory: new Map(), current: "direct" })).toBe("wg:b");
+    expect(switchTarget({ strategy: "round-robin", paths, memory: new Map(), current: "wg:b" })).toBe("direct");
   });
 });
