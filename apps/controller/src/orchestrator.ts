@@ -1,18 +1,31 @@
 import type { PathStatus, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
+import { isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
 import type { AcestreamClient } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { EngineManager } from "./engines.ts";
+import { Mutex } from "./json-file.ts";
 import type { ControllerMetrics } from "./metrics.ts";
+import type { NetworkPolicyStore } from "./network-policy-store.ts";
 import type { NewStream, StreamConfig, StreamPatch, StreamStore } from "./stream-store.ts";
 import { hlsUrls } from "./hls-urls.ts";
+import { MoveSlots } from "./stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "./supervisor.ts";
 import type { WireguardStore } from "./wireguard-store.ts";
+
+/** A change the network policy does not allow, such as WireGuard only without any profile. */
+export class NetworkPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NetworkPolicyError";
+  }
+}
 
 export interface OrchestratorDeps {
   store: StreamStore;
   wireguard: WireguardStore;
+  policy: NetworkPolicyStore;
   engines: EngineManager;
   ace: AcestreamClient;
   transcoder: TranscoderClient;
@@ -32,6 +45,13 @@ export class Orchestrator {
   private pathTimer: NodeJS.Timeout | undefined;
   /** Set once every stored stream has a supervisor; until then the list of engine paths is incomplete. */
   private launched = false;
+  /** Serializes policy and profile changes, so "WireGuard only needs a profile" always holds. */
+  private readonly networkChanges = new Mutex();
+  /**
+   * Streams moving off the direct path when WireGuard only is turned on, at most two at a time:
+   * each move starts a second engine, and N at once would briefly need twice the engines' memory.
+   */
+  private readonly policyMoves = new MoveSlots(2);
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -41,6 +61,13 @@ export class Orchestrator {
   async start(): Promise<void> {
     await this.deps.store.load();
     await this.deps.wireguard.init();
+    const policyError = await this.deps.policy.load();
+    if (policyError !== null) {
+      this.logger.error(
+        { error: policyError },
+        "network policy unreadable; WireGuard only stays on until it is saved again",
+      );
+    }
     await this.refreshPaths();
     this.pathTimer = setInterval(() => {
       void this.refreshPaths();
@@ -80,7 +107,38 @@ export class Orchestrator {
       streams: this.deps.store.list().map((stream) => this.view(stream)),
       paths: this.paths,
       pathStrategy: this.deps.settings.pathStrategy,
+      wireguardOnly: this.deps.policy.get().wireguardOnly,
     };
+  }
+
+  networkPolicy(): NetworkPolicy {
+    return this.deps.policy.get();
+  }
+
+  /**
+   * Turns WireGuard only on or off. Turning it on needs at least one profile. The gateway reloads
+   * the policy right away and cuts engines off the direct path; their supervisors then move them.
+   */
+  async setNetworkPolicy(policy: NetworkPolicy): Promise<NetworkPolicy> {
+    return this.networkChanges.run(async () => {
+      const changed = policy.wireguardOnly !== this.deps.policy.get().wireguardOnly;
+      // A file that could not be read is written again even with the same value, so the gateway
+      // stops reporting it. Writing "on" always needs a profile.
+      const save = changed || this.deps.policy.needsSave;
+      if (save && policy.wireguardOnly) {
+        const profiles = await this.deps.wireguard.list();
+        if (profiles.length === 0) {
+          throw new NetworkPolicyError("Add a WireGuard profile before turning on WireGuard only.");
+        }
+      }
+      if (save) {
+        await this.deps.policy.save(policy);
+        this.logger.info({ wireguardOnly: policy.wireguardOnly }, "network policy saved");
+      }
+      // Also when nothing changed: saving the same value again retries a reload that failed.
+      await this.reloadGateway();
+      return this.deps.policy.get();
+    });
   }
 
   getStream(id: string): StreamView | undefined {
@@ -138,17 +196,30 @@ export class Orchestrator {
   }
 
   async saveProfile(name: string, text: string): Promise<WireguardProfileView> {
-    const profile = await this.deps.wireguard.save(name, text);
-    await this.reloadGateway();
-    return profile;
+    return this.networkChanges.run(async () => {
+      const profile = await this.deps.wireguard.save(name, text);
+      await this.reloadGateway();
+      return profile;
+    });
   }
 
+  /** Removes a profile. While WireGuard only is on, the last one stays: streams would have no path. */
   async removeProfile(name: string): Promise<boolean> {
-    const removed = await this.deps.wireguard.remove(name);
-    if (removed) {
-      await this.reloadGateway();
-    }
-    return removed;
+    return this.networkChanges.run(async () => {
+      if (this.deps.policy.get().wireguardOnly) {
+        const profiles = await this.deps.wireguard.list();
+        if (profiles.length === 1 && profiles[0]?.name === name) {
+          throw new NetworkPolicyError(
+            "WireGuard only is on, so the last profile can't be removed. Turn WireGuard only off first.",
+          );
+        }
+      }
+      const removed = await this.deps.wireguard.remove(name);
+      if (removed) {
+        await this.reloadGateway();
+      }
+      return removed;
+    });
   }
 
   pathLoad(): Map<string, number> {
@@ -193,9 +264,12 @@ export class Orchestrator {
       return;
     }
     const known = new Set(this.paths.map((path) => path.id));
+    const policy = this.deps.policy.get();
+    // Engines still waiting to leave a path the policy turned off are not sent: the gateway would
+    // only refuse them.
     const assignments = supervisors
       .flatMap((supervisor) => supervisor.assignments())
-      .filter((assignment) => known.has(assignment.path));
+      .filter((assignment) => known.has(assignment.path) && isPathAllowed(policy, assignment.path));
     try {
       const rejected = await this.deps.netgw.sync(assignments);
       if (rejected.length > 0) {
@@ -217,6 +291,8 @@ export class Orchestrator {
       logger: this.deps.logger,
       settings: this.deps.settings,
       paths: () => this.paths,
+      pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
+      policyMoves: this.policyMoves,
       pathLoad: () => this.pathLoad(),
     });
     this.supervisors.set(stream.id, supervisor);

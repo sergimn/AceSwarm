@@ -8,7 +8,7 @@ import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
-import type { Orchestrator } from "./orchestrator.ts";
+import { NetworkPolicyError, type Orchestrator } from "./orchestrator.ts";
 import { DuplicateStreamError } from "./stream-store.ts";
 import { InvalidProfileError } from "./wireguard-store.ts";
 
@@ -28,6 +28,8 @@ const profileSchema = z.object({
   name: z.string().min(1).max(64),
   config: z.string().min(1).max(16_384),
 });
+
+const networkSchema = z.object({ wireguardOnly: z.boolean() }).strict();
 
 const idParams = z.object({ id: z.string().regex(/^[a-z0-9]{6,32}$/) });
 const nameParams = z.object({ name: z.string().min(1).max(64) });
@@ -110,6 +112,23 @@ export async function registerRoutes(
   });
 
   app.get("/api/paths", () => orchestrator.snapshot().paths);
+  app.get("/api/network", () => orchestrator.networkPolicy());
+
+  app.patch("/api/network", async (request, reply) => {
+    const parsed = networkSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, "expected { wireguardOnly }");
+    }
+    try {
+      return await orchestrator.setNetworkPolicy(parsed.data);
+    } catch (error) {
+      if (error instanceof NetworkPolicyError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
   app.get("/api/wireguard", () => orchestrator.listProfiles());
 
   app.post("/api/wireguard", async (request, reply) => {
@@ -130,9 +149,16 @@ export async function registerRoutes(
 
   app.delete("/api/wireguard/:name", async (request, reply) => {
     const params = nameParams.safeParse(request.params);
-    return params.success && (await orchestrator.removeProfile(params.data.name))
-      ? reply.code(204).send()
-      : reply.code(404).send({ error: "profile not found" });
+    try {
+      return params.success && (await orchestrator.removeProfile(params.data.name))
+        ? await reply.code(204).send()
+        : await reply.code(404).send({ error: "profile not found" });
+    } catch (error) {
+      if (error instanceof NetworkPolicyError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      throw error;
+    }
   });
 
   app.get("/api/events", (request, reply) => {

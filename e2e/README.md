@@ -71,12 +71,13 @@ e2e/run.sh up         # only start the stack, then: npm run e2e
 e2e/run.sh down
 ```
 
-| Spec                 | Checks                                                                                                                                                    |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `streams.spec.ts`    | adding streams from the UI, content ID or infohash detection, live stats, persistence across a controller restart, removal                                |
-| `recovery.spec.ts`   | stall recovery, engine restarts that leave other streams alone, moving to the VPN path, fail closed after a gateway restart, profiles with hooks rejected |
-| `isolation.spec.ts`  | engines can't reach the gateway, controller or transcoder APIs                                                                                            |
-| `navigation.spec.ts` | arrow key navigation for TV remotes                                                                                                                       |
+| Spec                     | Checks                                                                                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `streams.spec.ts`        | adding streams from the UI, content ID or infohash detection, live stats, persistence across a controller restart, removal                                        |
+| `recovery.spec.ts`       | stall recovery, engine restarts that leave other streams alone, moving to the VPN path, fail closed after a gateway restart, profiles with hooks rejected         |
+| `isolation.spec.ts`      | engines can't reach the gateway, controller or transcoder APIs                                                                                                    |
+| `wireguard-only.spec.ts` | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays |
+| `navigation.spec.ts`     | arrow key navigation for TV remotes                                                                                                                               |
 
 ## Multi-machine suite
 
@@ -237,6 +238,9 @@ sequenceDiagram
   T->>AS: 45 s later still on the VPN, no recoveries (sticky path)
   T->>AS: delete the WireGuard profile
   AS->>SRC: back on the direct path: new announce from 192.0.2.3
+  T->>AS: upload the profile again, turn on WireGuard only
+  AS->>AS: gateway cuts the engine off the direct path, stream moves to the VPN at once
+  WG->>SRC: NAT: new announce from 192.0.2.1
 ```
 
 | Test                                  | Checks                                                                                                     |
@@ -246,6 +250,7 @@ sequenceDiagram
 | moves the stream to the VPN           | the recovery ladder with real engines, make-before-break path moves, traffic really leaves through the VPN |
 | stays on the VPN                      | sticky path selection: no move back once the stream works                                                  |
 | goes back to the direct path          | removing a profile moves its streams away right away                                                       |
+| WireGuard only                        | turning it on moves a playing stream off the direct path without waiting to stall, and not as a recovery   |
 
 The block in the third test only drops traffic to the broadcast runner, so the direct path keeps answering the gateway's pings and keeps its better probe score. That is what a connection that blocks Acestream peers looks like, and the stream still has to leave it.
 

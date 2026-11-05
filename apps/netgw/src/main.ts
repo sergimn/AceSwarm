@@ -49,6 +49,7 @@ const gateway = new Gateway({
   prober: new Prober(runner, config.PROBE_TARGETS, config.HANDSHAKE_MAX_AGE_SECONDS),
   interfaces,
   logger,
+  policyDir: config.WIREGUARD_DIR,
 });
 
 let ready = false;

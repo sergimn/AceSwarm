@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   PathStatus,
   PathStrategyName,
@@ -10,16 +9,16 @@ import type {
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import { kindsToTry } from "@aceswarm/shared/ace-id";
-import { EngineError, type AcestreamClient, type EngineSession, type EngineStats } from "./acestream.ts";
+import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
 import type { EngineHandle, EngineManager } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
 import { hlsUrls } from "./hls-urls.ts";
 import type { ControllerMetrics } from "./metrics.ts";
-import { initialPath, rememberHealth, switchTarget, type PathMemory } from "./path-selector.ts";
+import { startSessionOfAnyKind, waitForHandover } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryState } from "./recovery.ts";
+import { StreamPaths, type MoveSlots } from "./stream-paths.ts";
 import type { StreamConfig, StreamStore } from "./stream-store.ts";
 
 export interface SupervisorSettings {
@@ -44,6 +43,10 @@ export interface SupervisorDeps {
   settings: SupervisorSettings;
   /** Latest network path status from the gateway (empty when it is unreachable). */
   paths: () => PathStatus[];
+  /** Whether the network policy lets engines use a path (the direct path is off with WireGuard only). */
+  pathAllowed?: (path: string) => boolean;
+  /** Shared by every stream: limits how many move off a path the policy turned off at once. */
+  policyMoves?: MoveSlots;
   /** Number of running streams per path. */
   pathLoad: () => ReadonlyMap<string, number>;
   now?: () => number;
@@ -76,7 +79,8 @@ export class StreamSupervisor {
   private stateSince: number;
   private message: string | null = null;
   private recovery: RecoveryState = { failures: 0, lastActionAt: undefined };
-  private readonly memory: PathMemory = new Map();
+  /** The paths this stream may use, and its history on them. */
+  private readonly paths: StreamPaths;
   private lastSwitchAt = 0;
   private recoveries = 0;
   private forceRestart = false;
@@ -93,6 +97,13 @@ export class StreamSupervisor {
     this.deps = deps;
     this.gateway = new EnginePaths(deps.netgw);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
+    this.paths = new StreamPaths({
+      paths: deps.paths,
+      pathAllowed: deps.pathAllowed,
+      pathLoad: deps.pathLoad,
+      strategy: deps.settings.pathStrategy,
+      logger: this.logger,
+    });
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? defaultSleep;
     this.stateSince = this.now();
@@ -187,8 +198,21 @@ export class StreamSupervisor {
     }
     if (!this.gateway.has(this.engine.ip)) {
       // The gateway blocks an engine until it has a path. This one started while the gateway's
-      // paths were unknown (for example while it restarted), or its last assignment failed.
+      // paths were unknown (for example while it restarted), or no path it may use was up, or its
+      // last assignment failed.
       await this.assignStartPath(this.engine);
+      if (this.gateway.has(this.engine.ip)) {
+        // It was cut off until now: give it the usual time to find its peers.
+        this.attemptStartedAt = this.now();
+      } else if (this.paths.noneUsable()) {
+        // Restarting the session or the engine can't help while there is nowhere to send it.
+        this.setState("stalled", this.paths.waitingMessage());
+        return;
+      }
+    }
+    if (this.stream.path !== null && !this.paths.allowed(this.stream.path)) {
+      await this.leaveDisallowedPath(this.engine);
+      return;
     }
     await this.poll();
     const health = evaluateHealth({
@@ -200,7 +224,7 @@ export class StreamSupervisor {
       startupGraceMs: this.deps.settings.startupGraceMs,
     });
     if (this.stream.path !== null && health.state !== "starting" && health.state !== "buffering") {
-      rememberHealth(this.memory, this.stream.path, health.healthy);
+      this.paths.remember(this.stream.path, health.healthy);
     }
     if (health.healthy) {
       if (this.recovery.failures > 0) {
@@ -248,8 +272,13 @@ export class StreamSupervisor {
         return;
       }
     }
-    this.setState("starting", "starting engine");
     try {
+      if (this.paths.noneUsable()) {
+        // No engine until there is a path for it: the gateway would only block it.
+        this.setState("stalled", this.paths.waitingMessage());
+        return;
+      }
+      this.setState("starting", "starting engine");
       const existing = await this.deps.engines.find(this.stream.id);
       const [newest, ...older] = existing;
       for (const engine of older) {
@@ -280,36 +309,6 @@ export class StreamSupervisor {
     }
   }
 
-  /**
-   * Path for a start attempt. A stream that cannot even start on its path (for example because
-   * the direct connection blocks it) tries the next best path every second failed attempt, like
-   * the recovery ladder does for a stream that was playing.
-   */
-  private startPath(): string | undefined {
-    const paths = this.deps.paths();
-    const preferred = initialPath({
-      strategy: this.deps.settings.pathStrategy,
-      paths,
-      memory: this.memory,
-      load: this.deps.pathLoad(),
-      remembered: this.stream.path,
-    });
-    const { failures } = this.recovery;
-    if (preferred === undefined || failures < 2 || failures % 2 !== 0) {
-      return preferred;
-    }
-    const alternative = switchTarget({
-      strategy: this.deps.settings.pathStrategy,
-      paths,
-      memory: this.memory,
-      current: preferred,
-    });
-    if (alternative !== undefined) {
-      this.logger.info({ from: preferred, to: alternative, failures }, "stream does not start; trying another path");
-    }
-    return alternative ?? preferred;
-  }
-
   private async poll(): Promise<void> {
     const engine = this.engine;
     const session = this.session;
@@ -336,23 +335,48 @@ export class StreamSupervisor {
     };
   }
 
-  /** The stream's path is down, or gone (its WireGuard profile was removed). */
-  private currentPathDown(): boolean {
-    const paths = this.deps.paths();
-    if (this.stream.path === null || paths.length === 0) {
-      return false;
+  /**
+   * The stream uses a path the policy no longer allows: WireGuard only was turned on while it was
+   * on the direct path. The gateway has already cut its engine off, so it moves now rather than
+   * once the stall is noticed. This is not a recovery: the stream was healthy. Failed moves wait
+   * like recovery steps do, so a VPN that can't carry the stream doesn't churn engines, and only a
+   * few streams move at once, because each move starts a second engine.
+   */
+  private async leaveDisallowedPath(engine: EngineHandle): Promise<void> {
+    if (!this.paths.known || this.paths.noneUsable()) {
+      // While the gateway is unreachable its paths are unknown: nothing to move to yet.
+      this.setState("stalled", this.paths.known ? this.paths.waitingMessage() : "waiting for the network gateway");
+      return;
     }
-    const path = paths.find((candidate) => candidate.id === this.stream.path);
-    return path?.up !== true;
+    const from = this.stream.path ?? "?";
+    const wait = nextRecovery(this.recovery, this.policy(), true).notBefore - this.now();
+    const slots = this.deps.policyMoves;
+    if (wait > 0 || slots?.tryTake() === false) {
+      const reason = wait > 0 ? `moving again in ${String(Math.ceil(wait / 1000))}s` : "other streams move first";
+      this.setState("stalled", `path ${from} is off; ${reason}`);
+      return;
+    }
+    this.logger.info({ path: from }, "path is off (WireGuard only); moving the stream");
+    try {
+      await this.switchPath(engine);
+      // Video arrived on the new path.
+      this.recovery = { failures: 0, lastActionAt: undefined };
+    } catch (error) {
+      // The wait counts from the failure: a move can take until the handover timeout to fail.
+      this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
+      this.setState("stalled", `moving off ${from} failed: ${describeError(error)}`);
+      this.logger.warn({ err: error, path: from }, "could not move the stream off a path that is off");
+    } finally {
+      slots?.release();
+    }
   }
 
   private canSwitchPath(): boolean {
-    const others = this.deps.paths().filter((path) => path.up && path.id !== this.stream.path);
-    if (others.length === 0) {
+    if (!this.paths.hasAlternative(this.stream.path)) {
       return false;
     }
     const dwellOver = this.now() - this.lastSwitchAt >= this.deps.settings.pathMinDwellMs;
-    return dwellOver || this.currentPathDown();
+    return dwellOver || this.paths.isDown(this.stream.path);
   }
 
   private async recover(reason: string): Promise<void> {
@@ -365,7 +389,7 @@ export class StreamSupervisor {
     // A dead path cannot be fixed by restarting things locally: leave it, without waiting for the
     // ladder to reach a path switch. The delay above still applies, so a move that keeps failing
     // doesn't create and remove an engine on every tick.
-    if (this.currentPathDown() && this.canSwitchPath()) {
+    if (this.paths.isDown(this.stream.path) && this.canSwitchPath()) {
       await this.runAction("switch-path", `${reason}; path ${this.stream.path ?? "?"} is down`);
       return;
     }
@@ -403,12 +427,11 @@ export class StreamSupervisor {
    */
   private async switchPath(engine: EngineHandle): Promise<void> {
     const from = this.stream.path ?? "none";
-    const target = switchTarget({
-      strategy: this.deps.settings.pathStrategy,
-      paths: this.deps.paths(),
-      memory: this.memory,
-      current: from,
-    });
+    const target = this.paths.switchTarget(from);
+    if (target === undefined && !this.paths.allowed(from)) {
+      // Restarting in place would put the engine back on a path it may not use.
+      throw new Error("no path it may use is up");
+    }
     if (target === undefined) {
       this.logger.info({ path: from }, "no better path; restarting engine instead");
       await this.runRestartInPlace(engine);
@@ -429,7 +452,12 @@ export class StreamSupervisor {
       this.deps.metrics.engineStarts.inc({ stream: this.stream.id });
       const session = await this.openSession(next.baseUrl);
       await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl }, true);
-      await this.waitForHandover(session.playbackUrl);
+      this.pipeline = await waitForHandover(this.deps.transcoder, this.stream.id, session.playbackUrl, {
+        timeoutMs: this.deps.settings.handoverTimeoutMs,
+        pollMs: this.deps.settings.tickMs,
+        now: this.now,
+        sleep: this.sleep,
+      });
       const oldSession = this.session;
       this.engine = next;
       // The move is done: a later failure must not remove the engine the stream now plays from.
@@ -456,31 +484,21 @@ export class StreamSupervisor {
 
   private async runRestartInPlace(engine: EngineHandle): Promise<void> {
     await this.stopSessionQuietly();
+    // Its own path, unless the policy turned that off (a manual restart right after WireGuard only
+    // was turned on, say): then the path a start attempt would get.
+    const path =
+      this.stream.path === null || this.paths.allowed(this.stream.path)
+        ? this.stream.path
+        : (this.paths.forStart(this.stream.path, 0) ?? null);
     const restarted = await this.deps.engines.restart(engine, async (starting) => {
       await this.gateway.keepOnly(starting.ip);
-      await this.applyPath(starting, this.stream.path);
+      await this.applyPath(starting, path);
     });
     this.engine = restarted;
     if (!this.gateway.has(restarted.ip)) {
-      await this.applyPath(restarted, this.stream.path);
+      await this.applyPath(restarted, path);
     }
     await this.startPlayback(restarted);
-  }
-
-  private async waitForHandover(source: string): Promise<void> {
-    const deadline = this.now() + this.deps.settings.handoverTimeoutMs;
-    while (this.now() < deadline) {
-      await this.sleep(this.deps.settings.tickMs);
-      const status = await this.deps.transcoder.status(this.stream.id).catch(() => undefined);
-      if (status?.source === source && status.lastFrameAt !== null) {
-        this.pipeline = status;
-        return;
-      }
-      if (status !== undefined && status.pendingSource !== source && status.source !== source) {
-        throw new Error("the new path stopped before delivering video");
-      }
-    }
-    throw new Error("the new path did not deliver video in time");
   }
 
   private async startPlayback(engine: EngineHandle): Promise<void> {
@@ -491,38 +509,28 @@ export class StreamSupervisor {
     this.pipeline = await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl });
   }
 
-  /**
-   * Starts an engine session. A bare 40 character value can be a content ID or an infohash, and
-   * the engine rejects the wrong kind quickly, so the other kind is tried next and the one that
-   * works is remembered.
-   */
+  /** Starts an engine session and remembers which kind of identifier the engine accepted. */
   private async openSession(baseUrl: string): Promise<EngineSession> {
-    let lastError: unknown;
-    for (const kind of kindsToTry(this.stream.aceIdKind)) {
-      try {
-        const session = await this.deps.ace.startSession(baseUrl, this.stream.aceId, kind, randomUUID());
-        if (this.stream.aceIdKind !== kind) {
-          this.logger.info({ kind }, "engine accepted the stream identifier");
-          this.stream = { ...this.stream, aceIdKind: kind };
-          await this.deps.store.update(this.stream.id, { aceIdKind: kind });
-        }
-        return session;
-      } catch (error) {
-        if (!(error instanceof EngineError)) {
-          throw error;
-        }
-        lastError = error;
-      }
+    const { session, kind } = await startSessionOfAnyKind(
+      this.deps.ace,
+      baseUrl,
+      this.stream.aceId,
+      this.stream.aceIdKind,
+    );
+    if (this.stream.aceIdKind !== kind) {
+      this.logger.info({ kind }, "engine accepted the stream identifier");
+      this.stream = { ...this.stream, aceIdKind: kind };
+      await this.deps.store.update(this.stream.id, { aceIdKind: kind });
     }
-    throw lastError;
+    return session;
   }
 
   /** Gives the engine the path for a start attempt, once the gateway's paths are known. */
   private async assignStartPath(engine: EngineHandle): Promise<void> {
-    if (this.deps.paths().length === 0) {
+    if (!this.paths.known) {
       return;
     }
-    await this.applyPath(engine, this.startPath() ?? null);
+    await this.applyPath(engine, this.paths.forStart(this.stream.path, this.recovery.failures) ?? null);
   }
 
   private async applyPath(engine: EngineHandle, path: string | null): Promise<void> {

@@ -6,6 +6,7 @@
 import type { AceIdKind } from "./ace-id.ts";
 
 export type { AceIdKind } from "./ace-id.ts";
+export type { NetworkPolicy } from "./network-policy.ts";
 
 /** Lifecycle of a stream as seen by the controller. */
 export type StreamState =
@@ -93,6 +94,8 @@ export interface Snapshot {
   streams: StreamView[];
   paths: PathStatus[];
   pathStrategy: PathStrategyName;
+  /** Streams only use WireGuard paths; the direct path is off. */
+  wireguardOnly: boolean;
 }
 
 export type PathStrategyName = "sticky-best" | "round-robin";

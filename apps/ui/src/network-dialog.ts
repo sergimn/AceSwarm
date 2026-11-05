@@ -9,6 +9,12 @@ const STRATEGY_LABELS = {
   "round-robin": "Round robin: new streams are spread across the paths that are up",
 } as const;
 
+const WIREGUARD_ONLY_HINTS = {
+  off: "Off: streams may use the direct connection.",
+  on: "On: streams never use the direct connection. New streams wait for a WireGuard path if none is up.",
+  unavailable: "Add a WireGuard profile first.",
+} as const;
+
 function profileName(fileName: string): string {
   return fileName
     .toLowerCase()
@@ -29,7 +35,15 @@ export class NetworkDialog {
   private readonly name: HTMLInputElement;
   private readonly config: HTMLTextAreaElement;
   private readonly errors: HTMLElement;
+  private readonly wireguardOnly: HTMLButtonElement;
+  private readonly wireguardOnlyState: HTMLElement;
+  private readonly wireguardOnlyHint: HTMLElement;
   private snapshot: Snapshot | undefined;
+  /** Number of profiles, once loaded. */
+  private profileCount: number | undefined;
+  /** WireGuard paths in the last snapshot; a change means profiles were added or removed elsewhere. */
+  private wireguardPaths: number | undefined;
+  private savingPolicy = false;
 
   constructor(navigator: Navigator) {
     this.navigator = navigator;
@@ -39,6 +53,28 @@ export class NetworkDialog {
     this.dialog = shell.dialog;
     this.paths = h("ul", { className: "rows" });
     this.strategy = h("p", { className: "muted" });
+    // A switch, not a disabled control: a disabled button can't take focus, and remote users
+    // would never reach it to read why it is unavailable. It sits on the right, under the dialog's
+    // close button and above the profiles' buttons, so Up and Down reach it.
+    this.wireguardOnlyState = h("span", { className: "switch-state", attrs: { "aria-hidden": "true" } });
+    this.wireguardOnly = h(
+      "button",
+      {
+        className: "switch",
+        attrs: {
+          type: "button",
+          role: "switch",
+          "aria-checked": "false",
+          "aria-labelledby": "wireguard-only-label",
+          "aria-describedby": "wireguard-only-hint",
+        },
+      },
+      [h("span", { className: "switch-track", attrs: { "aria-hidden": "true" } }), this.wireguardOnlyState],
+    );
+    this.wireguardOnly.addEventListener("click", () => {
+      void this.toggleWireguardOnly();
+    });
+    this.wireguardOnlyHint = h("p", { className: "muted small", attrs: { id: "wireguard-only-hint" } });
     this.profiles = h("ul", { className: "rows" });
     this.name = h("input", {
       className: "input",
@@ -75,8 +111,18 @@ export class NetworkDialog {
       event.preventDefault();
       void this.save();
     });
+    const label = h("span", { className: "row-title", text: "WireGuard only", attrs: { id: "wireguard-only-label" } });
+    const wireguardOnlySetting = h("div", { className: "setting" }, [
+      h("div", { className: "setting-text" }, [label, this.wireguardOnlyHint]),
+      this.wireguardOnly,
+    ]);
     shell.body.append(
-      h("section", { className: "section" }, [h("h3", { text: "Paths" }), this.strategy, this.paths]),
+      h("section", { className: "section" }, [
+        h("h3", { text: "Paths" }),
+        wireguardOnlySetting,
+        this.strategy,
+        this.paths,
+      ]),
       h("section", { className: "section" }, [h("h3", { text: "WireGuard profiles" }), this.profiles]),
       h("section", { className: "section" }, [h("h3", { text: "Add a profile" }), this.form]),
     );
@@ -105,22 +151,82 @@ export class NetworkDialog {
       return;
     }
     this.strategy.textContent = STRATEGY_LABELS[snapshot.pathStrategy];
+    const wireguardPaths = snapshot.paths.filter((path) => path.kind === "wireguard").length;
+    if (snapshot.paths.length > 0 && this.wireguardPaths !== undefined && wireguardPaths !== this.wireguardPaths) {
+      // Profiles changed, perhaps from another screen: the switch's availability depends on them.
+      void this.loadProfiles();
+    }
+    if (snapshot.paths.length > 0) {
+      this.wireguardPaths = wireguardPaths;
+    }
+    this.renderWireguardOnly();
     const load = new Map<string, number>();
     for (const stream of snapshot.streams) {
       if (stream.path !== null) {
         load.set(stream.path, (load.get(stream.path) ?? 0) + 1);
       }
     }
-    this.paths.replaceChildren(...snapshot.paths.map((path) => this.pathRow(path, load.get(path.id) ?? 0)));
+    this.paths.replaceChildren(
+      ...snapshot.paths.map((path) => this.pathRow(path, load.get(path.id) ?? 0, snapshot.wireguardOnly)),
+    );
   }
 
-  private pathRow(path: PathStatus, streams: number): HTMLElement {
+  /** WireGuard only can be turned on once a profile exists, and turned off at any time. */
+  private renderWireguardOnly(): void {
+    const on = this.snapshot?.wireguardOnly ?? false;
+    const hasProfiles =
+      this.profileCount === undefined
+        ? (this.snapshot?.paths.some((path) => path.kind === "wireguard") ?? false)
+        : this.profileCount > 0;
+    const available = on || hasProfiles;
+    this.wireguardOnly.setAttribute("aria-checked", String(on));
+    this.wireguardOnly.setAttribute("aria-disabled", String(!available));
+    this.wireguardOnlyState.textContent = on ? "On" : "Off";
+    let hint: keyof typeof WIREGUARD_ONLY_HINTS = "unavailable";
+    if (on) {
+      hint = "on";
+    } else if (available) {
+      hint = "off";
+    }
+    this.wireguardOnlyHint.textContent = WIREGUARD_ONLY_HINTS[hint];
+  }
+
+  private async toggleWireguardOnly(): Promise<void> {
+    if (this.savingPolicy) {
+      return;
+    }
+    if (this.wireguardOnly.getAttribute("aria-disabled") === "true") {
+      toast(WIREGUARD_ONLY_HINTS.unavailable, "error");
+      return;
+    }
+    const wanted = this.wireguardOnly.getAttribute("aria-checked") !== "true";
+    this.savingPolicy = true;
+    this.wireguardOnly.setAttribute("aria-busy", "true");
+    try {
+      const policy = await api.setNetworkPolicy({ wireguardOnly: wanted });
+      if (this.snapshot !== undefined) {
+        this.update({ ...this.snapshot, wireguardOnly: policy.wireguardOnly });
+      }
+      toast(policy.wireguardOnly ? "WireGuard only is on" : "WireGuard only is off");
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      this.savingPolicy = false;
+      this.wireguardOnly.removeAttribute("aria-busy");
+    }
+  }
+
+  private pathRow(path: PathStatus, streams: number, wireguardOnly: boolean): HTMLElement {
     const score = Math.round(path.score * 100);
     const details = [
       `RTT ${formatRtt(path.rttMs)}`,
       `loss ${formatLoss(path.loss)}`,
       `${String(streams)} stream${streams === 1 ? "" : "s"}`,
     ];
+    const off = wireguardOnly && path.kind === "direct";
+    if (off) {
+      details.push("not used: WireGuard only is on");
+    }
     if (path.error !== null) {
       details.push(path.error);
     }
@@ -129,10 +235,14 @@ export class NetworkDialog {
       h("span", { className: "row-sub", text: details.join(" · ") }),
     ]);
     const bar = h("div", { className: "score-bar", attrs: { style: `width: ${String(score)}%` } });
+    let badge: { className: string; text: string } = { className: "state-stopped", text: "Off" };
+    if (!off) {
+      badge = path.up ? { className: "state-playing", text: "Up" } : { className: "state-error", text: "Down" };
+    }
     return h("li", { className: "row" }, [
       main,
       h("div", { className: "score", attrs: { title: `Score ${String(score)}/100` } }, [bar]),
-      h("span", { className: `badge ${path.up ? "state-playing" : "state-error"}`, text: path.up ? "Up" : "Down" }),
+      h("span", { className: `badge ${badge.className}`, text: badge.text }),
     ]);
   }
 
@@ -159,6 +269,8 @@ export class NetworkDialog {
   }
 
   private renderProfiles(profiles: WireguardProfileView[]): void {
+    this.profileCount = profiles.length;
+    this.renderWireguardOnly();
     if (profiles.length === 0) {
       this.profiles.replaceChildren(
         h("li", { className: "muted", text: "No profiles yet: every stream uses the direct path." }),

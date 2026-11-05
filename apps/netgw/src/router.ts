@@ -1,16 +1,25 @@
 import type { PathAssignment } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
+import { DIRECT_PATH_ID } from "@aceswarm/shared/network-policy";
 import type { CommandRunner } from "./exec.ts";
 import { inSubnet } from "@aceswarm/shared/ipv4";
 import type { Tunnel } from "./tunnels.ts";
 
-export const DIRECT_PATH = "direct";
+export const DIRECT_PATH = DIRECT_PATH_ID;
 const ENGINE_RULE_PRIORITY = 1000;
 
 export class UnknownPathError extends Error {
   constructor(path: string) {
     super(`unknown path ${path}`);
     this.name = "UnknownPathError";
+  }
+}
+
+/** The path exists but the network policy keeps engines off it (the direct path, with WireGuard only on). */
+export class PathNotAllowedError extends Error {
+  constructor(path: string) {
+    super(`path ${path} is off: WireGuard only is on`);
+    this.name = "PathNotAllowedError";
   }
 }
 
@@ -63,6 +72,7 @@ export class Router {
   private readonly now: () => number;
   private readonly assignments = new Map<string, Assignment>();
   private queue: Promise<unknown> = Promise.resolve();
+  private directAllowed = true;
 
   constructor(options: RouterOptions) {
     this.runner = options.runner;
@@ -87,6 +97,14 @@ export class Router {
     return inSubnet(ip, this.subnet);
   }
 
+  /**
+   * Allows or forbids the direct path. Forbidding it refuses new direct assignments right away;
+   * engines that already use it lose their path on the next `reapply()`.
+   */
+  setDirectAllowed(allowed: boolean): void {
+    this.directAllowed = allowed;
+  }
+
   /** Gives an engine a path. Asking again for the same path only confirms it, unless forced. */
   assign(ip: string, path: string, force = false): Promise<void> {
     return this.exclusive(() => this.applyAssignment(ip, path, force));
@@ -97,8 +115,9 @@ export class Router {
   }
 
   /**
-   * Re-applies every assignment after the tunnels changed. Engines whose tunnel is gone lose
-   * their path (and connectivity) until the controller moves them, rather than going direct.
+   * Re-applies every assignment after the tunnels or the policy changed. Engines whose tunnel is
+   * gone, or whose path is now off, lose their path (and connectivity) until the controller moves
+   * them, rather than going direct.
    */
   reapply(): Promise<void> {
     return this.exclusive(() => this.reapplyAll());
@@ -176,10 +195,11 @@ export class Router {
       try {
         await this.applyAssignment(ip, assignment.path, true);
       } catch (error) {
-        if (!(error instanceof UnknownPathError)) {
+        if (!(error instanceof UnknownPathError || error instanceof PathNotAllowedError)) {
           throw error;
         }
-        this.logger.warn({ ip, path: assignment.path }, "path removed; engine blocked until it gets a new one");
+        const reason = error instanceof PathNotAllowedError ? "path is off" : "path removed";
+        this.logger.warn({ ip, path: assignment.path }, `${reason}; engine blocked until it gets a new one`);
         await this.removeAssignment(ip);
       }
     }
@@ -216,6 +236,9 @@ export class Router {
   /** The tunnel behind a path (undefined for the direct path); throws for unusable paths. */
   private usableTunnel(path: string): Tunnel | undefined {
     if (path === DIRECT_PATH) {
+      if (!this.directAllowed) {
+        throw new PathNotAllowedError(path);
+      }
       return undefined;
     }
     const tunnel = this.tunnel(path);

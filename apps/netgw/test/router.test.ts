@@ -1,7 +1,7 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, it } from "vitest";
 import type { CommandResult, CommandRunner } from "../src/exec.ts";
-import { Router, type PathFirewall } from "../src/router.ts";
+import { PathNotAllowedError, Router, type PathFirewall } from "../src/router.ts";
 import type { Tunnel } from "../src/tunnels.ts";
 
 /**
@@ -213,5 +213,54 @@ describe("Router.sync", () => {
     await router.sync([{ ip: "172.31.250.10", path: "direct" }], 30_000);
     expect(router.pathOf("172.31.250.20")).toBeUndefined();
     expect(router.pathOf("172.31.250.10")).toBe("direct");
+  });
+});
+
+describe("WireGuard only", () => {
+  it("refuses the direct path while it is off, and allows it again afterwards", async () => {
+    const { router, firewall } = setup();
+    router.setDirectAllowed(false);
+    await expect(router.assign("172.31.250.10", "direct")).rejects.toThrow(PathNotAllowedError);
+    expect(router.pathOf("172.31.250.10")).toBeUndefined();
+    expect([...firewall.allowed]).toEqual([]);
+
+    // WireGuard paths keep working.
+    await router.assign("172.31.250.11", "wg:a");
+    expect([...firewall.allowed]).toEqual(["172.31.250.11>aswg0"]);
+
+    router.setDirectAllowed(true);
+    await router.assign("172.31.250.10", "direct");
+    expect(router.pathOf("172.31.250.10")).toBe("direct");
+  });
+
+  it("cuts engines off the direct path on reapply instead of leaving them out", async () => {
+    const { router, firewall, runner } = setup();
+    await router.assign("172.31.250.10", "direct");
+    await router.assign("172.31.250.11", "wg:a");
+    runner.calls.length = 0;
+
+    router.setDirectAllowed(false);
+    await router.reapply();
+
+    expect(router.list()).toEqual([{ ip: "172.31.250.11", path: "wg:a" }]);
+    expect([...firewall.allowed]).toEqual(["172.31.250.11>aswg0"]);
+    // Its open connections are flushed, so nothing keeps flowing out the direct path.
+    expect(runner.calls).toContain("conntrack -D -s 172.31.250.10");
+  });
+
+  it("reports direct assignments in a sync as rejected", async () => {
+    const { router } = setup();
+    router.setDirectAllowed(false);
+    const rejected = await router.sync(
+      [
+        { ip: "172.31.250.10", path: "direct" },
+        { ip: "172.31.250.11", path: "wg:a" },
+      ],
+      30_000,
+    );
+    expect(rejected).toEqual([
+      { ip: "172.31.250.10", path: "direct", error: "path direct is off: WireGuard only is on" },
+    ]);
+    expect(router.list()).toEqual([{ ip: "172.31.250.11", path: "wg:a" }]);
   });
 });

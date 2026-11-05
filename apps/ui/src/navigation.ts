@@ -25,6 +25,25 @@ function toBox(element: Element): Box {
   return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
 }
 
+/**
+ * The sticky or fixed part of a layer that an element is in, like a dialog's header, or else the
+ * layer itself. Such a part stays where it is on screen while the rest scrolls under it.
+ */
+function stickyPart(element: HTMLElement, root: HTMLElement): HTMLElement {
+  for (let node = element.parentElement; node !== null && node !== root; node = node.parentElement) {
+    const { position } = getComputedStyle(node);
+    if (position === "sticky" || position === "fixed") {
+      return node;
+    }
+  }
+  return root;
+}
+
+function nearest(from: HTMLElement, candidates: readonly HTMLElement[], direction: Direction): HTMLElement | undefined {
+  const boxes = candidates.map((candidate) => toBox(candidate));
+  return candidates[pickNext(toBox(from), boxes, direction)];
+}
+
 function isVisible(element: HTMLElement): boolean {
   return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
 }
@@ -186,14 +205,20 @@ export class Navigator {
       return;
     }
     const others = items.filter((item) => item !== current);
-    const next =
-      others[
-        pickNext(
-          toBox(current),
-          others.map((item) => toBox(item)),
-          direction,
-        )
-      ];
+    // Up and down, along which pages and dialogs scroll, try the elements that scroll with the
+    // focused one first. Otherwise, in a scrolled dialog, its sticky header would be nearer than
+    // what scrolled out of view under it. Left and right compare everything as it is on screen, so
+    // the grid's left edge leads to the sticky rail beside it.
+    let next: HTMLElement | undefined;
+    if (direction === "up" || direction === "down") {
+      const part = stickyPart(current, root);
+      next = nearest(
+        current,
+        others.filter((item) => stickyPart(item, root) === part),
+        direction,
+      );
+    }
+    next ??= nearest(current, others, direction);
     if (next === undefined) {
       return;
     }
