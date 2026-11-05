@@ -3,7 +3,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import { DEFAULT_NETWORK_POLICY, type NetworkPolicy } from "@aceswarm/shared/network-policy";
 import type { Firewall, Interfaces } from "./network.ts";
 import type { PeerTracker } from "./peers.ts";
-import { readNetworkPolicy } from "./policy.ts";
+import { readNetworkPolicy } from "@aceswarm/shared/network-policy-file";
 import type { Prober, ProbeTarget } from "./probe.ts";
 import { DIRECT_PATH, type Router } from "./router.ts";
 import type { TunnelManager } from "./tunnels.ts";
@@ -60,19 +60,12 @@ export class Gateway {
       .catch(() => undefined)
       .then(async () => {
         await this.loadPolicy();
-        await this.tunnels.reconcile();
-        // With WireGuard only on, engine traffic is not even translated for the direct interface,
-        // on top of the router refusing direct assignments. The tunnels' own encrypted packets
-        // still leave through it: they come from the gateway, not from an engine.
-        const direct = this.currentPolicy.wireguardOnly ? [] : [this.interfaces.egress];
-        await this.firewall.setOutputs([
-          ...direct,
-          ...this.tunnels
-            .list()
-            .filter((tunnel) => tunnel.error === null)
-            .map((tunnel) => tunnel.iface),
-        ]);
-        await this.router.reapply();
+        try {
+          await this.tunnels.reconcile();
+        } finally {
+          // Even when a profile could not be applied, the policy and the tunnels that work are.
+          await this.applyRouting();
+        }
         const known = new Set(this.targets().map((target) => target.id));
         for (const id of this.statuses.keys()) {
           if (!known.has(id)) {
@@ -82,6 +75,21 @@ export class Gateway {
       });
     await this.reloading;
     await this.probeAll();
+  }
+
+  private async applyRouting(): Promise<void> {
+    // With WireGuard only on, engine traffic is not even translated for the direct interface, on
+    // top of the router refusing direct assignments. The gateway's own traffic (the tunnels'
+    // encrypted packets, its probes) still leaves through it.
+    const direct = this.currentPolicy.wireguardOnly ? [] : [this.interfaces.egress];
+    await this.firewall.setOutputs([
+      ...direct,
+      ...this.tunnels
+        .list()
+        .filter((tunnel) => tunnel.error === null)
+        .map((tunnel) => tunnel.iface),
+    ]);
+    await this.router.reapply();
   }
 
   private async loadPolicy(): Promise<void> {

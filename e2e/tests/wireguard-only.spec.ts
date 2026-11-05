@@ -19,7 +19,7 @@ test.describe.configure({ mode: "serial" });
 const PROFILE = "e2e-vpn";
 const VPN_PATH = `wg:${PROFILE}`;
 /** Filled in by the steps; they share the streams. */
-const run = { movedId: "", waitingId: "" };
+const run = { movedId: "", vpnOnlyId: "", waitingId: "" };
 
 test.beforeAll(async ({ request }) => {
   await resetStack(request);
@@ -82,8 +82,10 @@ test("is greyed out until a WireGuard profile exists", async ({ page, request })
   await expect(toggle).toHaveAttribute("aria-disabled", "true");
   await expect(dialog).toContainText("Add a WireGuard profile first.");
 
-  // It still takes focus, so a TV remote can reach it and see why it is unavailable.
-  await toggle.focus();
+  // It still takes focus, so a TV remote can reach it and see why it is unavailable: Down from
+  // the dialog's close button, where focus starts.
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
   await expect(toggle).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator(".toast.error")).toContainText("Add a WireGuard profile first.");
@@ -108,7 +110,20 @@ test("moves a playing stream off the direct path as soon as it is turned on", as
   await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Up", { timeout: 60_000 });
   await expect(toggle).toHaveAttribute("aria-disabled", "false");
 
-  await toggle.click();
+  // Remote navigation: Up from the profile's button and Down from the close button both reach it.
+  // With the dialog scrolled down, Up must not jump to the sticky header's close button, and the
+  // switch it scrolls back to must not stay hidden under that header.
+  await page.evaluate(`document.querySelector("dialog[open]").scrollTop = 1e6`);
+  await section("WireGuard profiles").getByRole("button", { name: "Remove" }).focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(toggle).toBeFocused();
+  const header = await dialog.locator(".dialog-header").boundingBox();
+  const switchBox = await toggle.boundingBox();
+  expect(switchBox!.y).toBeGreaterThanOrEqual(header!.y + header!.height);
+  await dialog.getByRole("button", { name: "Close" }).focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(toggle).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off");
   expect(await wireguardOnly(request)).toBe(true);
@@ -141,10 +156,29 @@ test("the gateway keeps engines off the direct path on its own", () => {
 });
 
 test("streams wait instead of going direct while no WireGuard path is up", async ({ page, request }) => {
+  // "beef" streams only play while the VPN-only peer answers, so this one stalls when the VPN goes.
+  const vpnOnly = await addStream(request, mockId("beef", "content-id", 43), "Needs the VPN");
+  run.vpnOnlyId = vpnOnly.id;
+  expect((await waitForPlaying(request, vpnOnly.id, 120_000)).path).toBe(VPN_PATH);
+
   // Silence the VPN: its probes fail and the path goes down.
   setVpnServerDown(true);
   const { section } = await openNetwork(page);
   await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 60_000 });
+
+  // The stream stalls and tries to recover where it is, then waits for a WireGuard path. With
+  // WireGuard only off, its first recovery would move it to the direct path, which is up and
+  // scores better. Watch long enough for the stall, that recovery and a few more ladder steps.
+  const deadline = Date.now() + 40_000;
+  let recoveries = 0;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const current = await streamById(request, vpnOnly.id);
+    expect(current?.path).toBe(VPN_PATH);
+    expect(gatewayAssignments().map(({ path }) => path)).not.toContain("direct");
+    recoveries = current?.recoveries ?? 0;
+  }
+  expect(recoveries).toBeGreaterThanOrEqual(1);
 
   const waiting = await addStream(request, mockId("e3", "infohash", 42), "Waits for VPN");
   run.waitingId = waiting.id;
@@ -154,18 +188,15 @@ test("streams wait instead of going direct while no WireGuard path is up", async
   // No engine is started while there is nowhere to send it.
   expect(engineContainers(waiting.id)).toHaveLength(0);
 
-  // The stream that was already on the VPN stays there.
-  for (let check = 0; check < 5; check += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    expect((await streamById(request, run.movedId))?.path).toBe(VPN_PATH);
-    expect(gatewayAssignments().map(({ path }) => path)).not.toContain("direct");
-  }
+  expect((await streamById(request, run.movedId))?.path).toBe(VPN_PATH);
 
   setVpnServerDown(false);
   await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Up", { timeout: 60_000 });
   const started = await waitForPlaying(request, waiting.id, 120_000);
   expect(started.path).toBe(VPN_PATH);
-  expect((await waitForPlaying(request, run.movedId, 120_000)).path).toBe(VPN_PATH);
+  for (const id of [run.movedId, run.vpnOnlyId]) {
+    expect((await waitForPlaying(request, id, 120_000)).path).toBe(VPN_PATH);
+  }
 });
 
 test("keeps the last profile while it is on", async ({ request }) => {
@@ -186,7 +217,7 @@ test("turning it off allows the direct path again, and streams stay where they a
   // Sticky paths: a working stream never moves just because the direct path is allowed again.
   for (let check = 0; check < 5; check += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    for (const id of [run.movedId, run.waitingId]) {
+    for (const id of [run.movedId, run.vpnOnlyId, run.waitingId]) {
       const stream = await streamById(request, id);
       expect(stream?.path).toBe(VPN_PATH);
       expect(stream?.state).toBe("playing");

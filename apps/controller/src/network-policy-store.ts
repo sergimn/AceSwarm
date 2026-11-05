@@ -1,13 +1,11 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describeError } from "@aceswarm/shared/http";
 import {
   DEFAULT_NETWORK_POLICY,
   NETWORK_POLICY_FILE,
-  parseNetworkPolicy,
   serializeNetworkPolicy,
   type NetworkPolicy,
 } from "@aceswarm/shared/network-policy";
+import { readNetworkPolicy } from "@aceswarm/shared/network-policy-file";
 import { writeJsonFile } from "./json-file.ts";
 
 /**
@@ -15,26 +13,19 @@ import { writeJsonFile } from "./json-file.ts";
  * network gateway reads it too (read-only).
  */
 export class NetworkPolicyStore {
+  private readonly directory: string;
   private readonly path: string;
   private current: NetworkPolicy = { ...DEFAULT_NETWORK_POLICY };
 
   /** `directory` is the WireGuard profile directory. */
   constructor(directory: string) {
+    this.directory = directory;
     this.path = join(directory, NETWORK_POLICY_FILE);
   }
 
   /** Reads the file. Returns why it could not be read or understood, in which case the direct path is off. */
   async load(): Promise<string | null> {
-    let text: string | undefined;
-    try {
-      text = await readFile(this.path, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        this.current = { wireguardOnly: true };
-        return `cannot read the network policy: ${describeError(error)}`;
-      }
-    }
-    const { policy, error } = parseNetworkPolicy(text);
+    const { policy, error } = await readNetworkPolicy(this.directory);
     this.current = policy;
     return error;
   }

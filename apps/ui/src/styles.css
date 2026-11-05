@@ -458,6 +458,17 @@ a {
   color: var(--accent);
 }
 
+.setting-text {
+  display: grid;
+  flex: 1 1 16em;
+  gap: 2px;
+  min-width: 0;
+}
+
+.setting-text p {
+  margin: 0;
+}
+
 /* An on/off switch (role="switch"). It stays focusable when unavailable, so remotes can reach it. */
 .switch {
   display: inline-flex;
@@ -576,6 +587,8 @@ p.form-error {
   max-height: 88vh;
   padding: 0;
   overflow: auto;
+  /* Keeps what gets focus clear of the sticky header when the dialog scrolls to it. */
+  scroll-padding-top: calc(2.4em + 40px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);

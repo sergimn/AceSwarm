@@ -7,6 +7,7 @@ import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
+import { MoveSlots } from "../src/stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
 
 const settings: SupervisorSettings = {
@@ -84,6 +85,8 @@ interface Fakes {
   failRemove?: boolean;
   /** The network policy's rule for paths (all allowed by default). */
   pathAllowed?: (path: string) => boolean;
+  /** Slots shared by the streams moving off a path the policy turned off. */
+  policyMoves?: MoveSlots;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -95,8 +98,14 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   // The gateway assignments as they were each time an engine's API first answered.
   const assignedWhenReady: PathAssignment[][] = [];
   const removed: string[] = [];
+  const restarted: string[] = [];
   const engines = {
     find: () => Promise.resolve([]),
+    restart: async (handle: EngineHandle, onAddress?: OnEngineAddress) => {
+      restarted.push(handle.containerId);
+      await onAddress?.(handle);
+      return handle;
+    },
     remove: (handle: EngineHandle) => {
       removed.push(handle.containerId);
       return fakes.failRemove === true ? Promise.reject(new Error("docker said no")) : Promise.resolve();
@@ -157,6 +166,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     settings,
     paths: () => paths,
     ...(fakes.pathAllowed !== undefined && { pathAllowed: fakes.pathAllowed }),
+    ...(fakes.policyMoves !== undefined && { policyMoves: fakes.policyMoves }),
     pathLoad: () => new Map(),
     now: () => clock.now,
     sleep: (ms) => {
@@ -164,7 +174,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       return Promise.resolve();
     },
   });
-  return { instance, assigned, assignedWhenReady, unassigned, removed, clock };
+  return { instance, assigned, assignedWhenReady, unassigned, removed, restarted, clock };
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -199,6 +209,27 @@ test("assigns a path once the gateway's paths are known, when the stream started
   await instance.tick();
   expect(assigned).toEqual([{ ip: engine.ip, path: "direct" }]);
   expect(instance.path).toBe("direct");
+});
+
+test("waits without restarting anything while no path is up, then gives the engine time to start", async () => {
+  const paths: PathStatus[] = [];
+  const { instance, assigned, restarted, clock } = supervisor(paths);
+  // The gateway's paths are unknown while the stream starts, so its engine has no path yet.
+  await instance.tick();
+  paths.push({ ...direct, up: false });
+  clock.now += settings.startupGraceMs + 1000;
+  await instance.tick();
+  await instance.tick();
+  expect(assigned).toEqual([]);
+  expect(restarted).toEqual([]);
+  expect(instance.view()).toMatchObject({ state: "stalled", message: "no network path is up; waiting for one" });
+
+  // A path comes up: the engine was cut off until now, so it gets the startup grace again instead
+  // of being restarted straight away for having shown no video.
+  paths[0] = direct;
+  await instance.tick();
+  expect(assigned).toEqual([{ ip: engine.ip, path: "direct" }]);
+  expect(instance.view()).toMatchObject({ state: "starting", recoveries: 0 });
 });
 
 test("stops sending the address of an engine that was replaced", async () => {
@@ -341,6 +372,77 @@ describe("WireGuard only", () => {
     clock.now += settings.recoveryMaxDelayMs;
     await instance.tick();
     expect(assignedWhenReady).toHaveLength(3);
+  });
+
+  test("never moves a stalled stream to the direct path, even when it scores better", async () => {
+    const { pathAllowed } = policy(true);
+    const paths = [direct, vpn];
+    const { instance, assigned, clock } = supervisor(paths, { pathAllowed, created: [engine, replacement] });
+    await instance.tick();
+    expect(instance.path).toBe("wg:a");
+
+    // The tunnel dies while direct stays up. Without the policy, the first recovery would move.
+    paths[1] = { ...vpn, up: false };
+    for (let tick = 0; tick < 40; tick += 1) {
+      clock.now += 10_000;
+      await instance.tick();
+    }
+    expect(instance.view().recoveries).toBeGreaterThan(3);
+    expect(assigned.map(({ path }) => path)).not.toContain("direct");
+    expect(instance.path).toBe("wg:a");
+  });
+
+  test("waits for the gateway instead of restarting the engine while its paths are unknown", async () => {
+    const { state, pathAllowed } = policy(false);
+    const paths: PathStatus[] = [direct, vpn];
+    const { instance, assigned, restarted, assignedWhenReady } = supervisor(paths, { pathAllowed });
+    await instance.tick();
+    state.on = true;
+    // The gateway restarts just then.
+    paths.length = 0;
+    for (let tick = 0; tick < 3; tick += 1) {
+      await instance.tick();
+    }
+    expect(restarted).toEqual([]);
+    expect(assignedWhenReady).toHaveLength(1);
+    expect(assigned).toEqual([{ ip: engine.ip, path: "direct" }]);
+    expect(instance.view().message).toBe("waiting for the network gateway");
+  });
+
+  test("a manual restart puts the engine on a path it may use", async () => {
+    const { state, pathAllowed } = policy(false);
+    const { instance, assigned, restarted } = supervisor([direct, vpn], { pathAllowed });
+    await instance.tick();
+    state.on = true;
+    instance.requestRestart();
+    await instance.tick();
+    expect(restarted).toEqual([engine.containerId]);
+    expect(assigned.at(-1)).toEqual({ ip: engine.ip, path: "wg:a" });
+    expect(instance.path).toBe("wg:a");
+  });
+
+  test("waits for a free slot before moving, so few streams move at once", async () => {
+    const { state, pathAllowed } = policy(false);
+    const policyMoves = new MoveSlots(1);
+    const { instance, assignedWhenReady } = supervisor([direct, vpn], {
+      created: [engine, replacement],
+      handover: "delivers",
+      pathAllowed,
+      policyMoves,
+    });
+    await instance.tick();
+    state.on = true;
+    // Another stream is moving.
+    expect(policyMoves.tryTake()).toBe(true);
+    await instance.tick();
+    expect(assignedWhenReady).toHaveLength(1);
+    expect(instance.view().message).toBe("path direct is off; other streams move first");
+
+    policyMoves.release();
+    await instance.tick();
+    expect(instance.path).toBe("wg:a");
+    // The slot is free again once the move is done.
+    expect(policyMoves.tryTake()).toBe(true);
   });
 
   test("stays on its WireGuard path when WireGuard only is turned off", async () => {

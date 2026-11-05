@@ -98,3 +98,24 @@ export class StreamPaths {
     return switchTarget({ strategy: this.deps.strategy, paths: this.usable(), memory: this.memory, current });
   }
 }
+
+/** A fixed number of slots, taken without waiting: limits how many streams move at once. */
+export class MoveSlots {
+  private free: number;
+
+  constructor(size: number) {
+    this.free = size;
+  }
+
+  tryTake(): boolean {
+    if (this.free === 0) {
+      return false;
+    }
+    this.free -= 1;
+    return true;
+  }
+
+  release(): void {
+    this.free += 1;
+  }
+}

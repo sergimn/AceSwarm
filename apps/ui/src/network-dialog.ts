@@ -36,10 +36,13 @@ export class NetworkDialog {
   private readonly config: HTMLTextAreaElement;
   private readonly errors: HTMLElement;
   private readonly wireguardOnly: HTMLButtonElement;
+  private readonly wireguardOnlyState: HTMLElement;
   private readonly wireguardOnlyHint: HTMLElement;
   private snapshot: Snapshot | undefined;
   /** Number of profiles, once loaded. */
   private profileCount: number | undefined;
+  /** WireGuard paths in the last snapshot; a change means profiles were added or removed elsewhere. */
+  private wireguardPaths: number | undefined;
   private savingPolicy = false;
 
   constructor(navigator: Navigator) {
@@ -51,17 +54,22 @@ export class NetworkDialog {
     this.paths = h("ul", { className: "rows" });
     this.strategy = h("p", { className: "muted" });
     // A switch, not a disabled control: a disabled button can't take focus, and remote users
-    // would never reach it to read why it is unavailable.
+    // would never reach it to read why it is unavailable. It sits on the right, under the dialog's
+    // close button and above the profiles' buttons, so Up and Down reach it.
+    this.wireguardOnlyState = h("span", { className: "switch-state", attrs: { "aria-hidden": "true" } });
     this.wireguardOnly = h(
       "button",
       {
         className: "switch",
-        attrs: { type: "button", role: "switch", "aria-checked": "false", "aria-describedby": "wireguard-only-hint" },
+        attrs: {
+          type: "button",
+          role: "switch",
+          "aria-checked": "false",
+          "aria-labelledby": "wireguard-only-label",
+          "aria-describedby": "wireguard-only-hint",
+        },
       },
-      [
-        h("span", { className: "switch-track", attrs: { "aria-hidden": "true" } }),
-        h("span", { text: "WireGuard only" }),
-      ],
+      [h("span", { className: "switch-track", attrs: { "aria-hidden": "true" } }), this.wireguardOnlyState],
     );
     this.wireguardOnly.addEventListener("click", () => {
       void this.toggleWireguardOnly();
@@ -103,11 +111,15 @@ export class NetworkDialog {
       event.preventDefault();
       void this.save();
     });
+    const label = h("span", { className: "row-title", text: "WireGuard only", attrs: { id: "wireguard-only-label" } });
+    const wireguardOnlySetting = h("div", { className: "setting" }, [
+      h("div", { className: "setting-text" }, [label, this.wireguardOnlyHint]),
+      this.wireguardOnly,
+    ]);
     shell.body.append(
       h("section", { className: "section" }, [
         h("h3", { text: "Paths" }),
-        h("div", { className: "setting" }, [this.wireguardOnly]),
-        this.wireguardOnlyHint,
+        wireguardOnlySetting,
         this.strategy,
         this.paths,
       ]),
@@ -139,6 +151,14 @@ export class NetworkDialog {
       return;
     }
     this.strategy.textContent = STRATEGY_LABELS[snapshot.pathStrategy];
+    const wireguardPaths = snapshot.paths.filter((path) => path.kind === "wireguard").length;
+    if (snapshot.paths.length > 0 && this.wireguardPaths !== undefined && wireguardPaths !== this.wireguardPaths) {
+      // Profiles changed, perhaps from another screen: the switch's availability depends on them.
+      void this.loadProfiles();
+    }
+    if (snapshot.paths.length > 0) {
+      this.wireguardPaths = wireguardPaths;
+    }
     this.renderWireguardOnly();
     const load = new Map<string, number>();
     for (const stream of snapshot.streams) {
@@ -161,6 +181,7 @@ export class NetworkDialog {
     const available = on || hasProfiles;
     this.wireguardOnly.setAttribute("aria-checked", String(on));
     this.wireguardOnly.setAttribute("aria-disabled", String(!available));
+    this.wireguardOnlyState.textContent = on ? "On" : "Off";
     let hint: keyof typeof WIREGUARD_ONLY_HINTS = "unavailable";
     if (on) {
       hint = "on";

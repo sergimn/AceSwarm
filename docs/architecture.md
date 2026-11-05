@@ -68,6 +68,7 @@ A path that is down, or whose WireGuard profile was removed, is left right away.
   - It then moves to the best other path that is up, even one whose probes score lower. A path can answer pings and still fail a stream, for example when the connection blocks the stream's peers.
   - After moving, it stays for at least `PATH_MIN_DWELL_SECONDS`, unless its path goes down.
 - `round-robin` spreads new streams over the paths that are up.
+- A new stream whose paths are all down waits with a message instead of starting its engine. Its startup grace counts from when it gets a path.
 
 Moves are make-before-break, so the picture doesn't go blank:
 
@@ -82,10 +83,10 @@ The network policy can turn the direct path off, so streams only use WireGuard. 
 - **It needs a profile.** The controller refuses to turn it on without one, and refuses to remove the last profile while it is on. The UI greys the switch out until a profile exists, but keeps it focusable so a remote can reach it and read why.
 - **One policy, enforced twice.** The controller writes the policy to `policy.json` in the WireGuard profile directory. The gateway reads it from there at start, on every reload and once a minute, so it knows the policy before the controller sends any engine paths.
   - The controller leaves the direct path out of every path choice.
-  - The gateway refuses direct assignments (409), cuts off engines that were on the direct path, and stops translating engine traffic for the direct interface. Only the tunnels' own encrypted packets still leave through it.
+  - The gateway refuses direct assignments (409), cuts off engines that were on the direct path, and stops translating engine traffic for the direct interface. Engine traffic never leaves through it. The gateway's own traffic still does: the tunnels' encrypted packets, its probes of the direct path, its own DNS lookups and the GeoIP download.
   - A policy file that can't be read or understood keeps the direct path off.
-- **Turning it on moves streams right away.** The gateway has already cut the engine off, so a stream on the direct path moves to the best WireGuard path on its next check, make-before-break, without waiting to stall. This isn't counted as a recovery. A failed move waits before trying again, with the recovery ladder's delays.
-- **No WireGuard path up means waiting.** A stream without a usable path waits with a message, and no engine starts until a path is up. It never falls back to the direct path.
+- **Turning it on moves streams right away.** The gateway has already cut the engine off, so a stream on the direct path moves to the best WireGuard path on its next check, make-before-break, without waiting to stall. This isn't counted as a recovery. A failed move waits before trying again, with the recovery ladder's delays. At most two streams move at once, so their new engines don't all start together; the others wait their turn.
+- **No WireGuard path up means waiting.** A stream that has no engine yet waits with a message, and its engine only starts once a WireGuard path is up. A stream whose WireGuard path goes down recovers as usual: in place, or on another WireGuard path that is up. Neither ever falls back to the direct path.
 - **Turning it off changes nothing right away.** Paths stay sticky: streams stay on their WireGuard path until recovery has a reason to move them.
 
 ### HLS continuity

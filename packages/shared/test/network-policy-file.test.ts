@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readNetworkPolicy } from "../src/policy.ts";
+import { readNetworkPolicy } from "../src/network-policy-file.ts";
 
 describe("readNetworkPolicy", () => {
   let directory = "";

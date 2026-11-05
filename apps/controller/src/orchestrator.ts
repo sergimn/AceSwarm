@@ -10,6 +10,7 @@ import type { ControllerMetrics } from "./metrics.ts";
 import type { NetworkPolicyStore } from "./network-policy-store.ts";
 import type { NewStream, StreamConfig, StreamPatch, StreamStore } from "./stream-store.ts";
 import { hlsUrls } from "./hls-urls.ts";
+import { MoveSlots } from "./stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "./supervisor.ts";
 import type { WireguardStore } from "./wireguard-store.ts";
 
@@ -46,6 +47,11 @@ export class Orchestrator {
   private launched = false;
   /** Serializes policy and profile changes, so "WireGuard only needs a profile" always holds. */
   private readonly networkChanges = new Mutex();
+  /**
+   * Streams moving off the direct path when WireGuard only is turned on, at most two at a time:
+   * each move starts a second engine, and N at once would briefly need twice the engines' memory.
+   */
+  private readonly policyMoves = new MoveSlots(2);
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -116,15 +122,15 @@ export class Orchestrator {
   async setNetworkPolicy(policy: NetworkPolicy): Promise<NetworkPolicy> {
     return this.networkChanges.run(async () => {
       const current = this.deps.policy.get();
-      if (policy.wireguardOnly === current.wireguardOnly) {
-        return current;
+      if (policy.wireguardOnly !== current.wireguardOnly) {
+        const profiles = await this.deps.wireguard.list();
+        if (policy.wireguardOnly && profiles.length === 0) {
+          throw new NetworkPolicyError("Add a WireGuard profile before turning on WireGuard only.");
+        }
+        await this.deps.policy.save(policy);
+        this.logger.info({ wireguardOnly: policy.wireguardOnly }, "network policy changed");
       }
-      const profiles = await this.deps.wireguard.list();
-      if (policy.wireguardOnly && profiles.length === 0) {
-        throw new NetworkPolicyError("Add a WireGuard profile before turning on WireGuard only.");
-      }
-      await this.deps.policy.save(policy);
-      this.logger.info({ wireguardOnly: policy.wireguardOnly }, "network policy changed");
+      // Also when nothing changed: saving the same value again retries a reload that failed.
       await this.reloadGateway();
       return this.deps.policy.get();
     });
@@ -253,9 +259,12 @@ export class Orchestrator {
       return;
     }
     const known = new Set(this.paths.map((path) => path.id));
+    const policy = this.deps.policy.get();
+    // Engines still waiting to leave a path the policy turned off are not sent: the gateway would
+    // only refuse them.
     const assignments = supervisors
       .flatMap((supervisor) => supervisor.assignments())
-      .filter((assignment) => known.has(assignment.path));
+      .filter((assignment) => known.has(assignment.path) && isPathAllowed(policy, assignment.path));
     try {
       const rejected = await this.deps.netgw.sync(assignments);
       if (rejected.length > 0) {
@@ -278,6 +287,7 @@ export class Orchestrator {
       settings: this.deps.settings,
       paths: () => this.paths,
       pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
+      policyMoves: this.policyMoves,
       pathLoad: () => this.pathLoad(),
     });
     this.supervisors.set(stream.id, supervisor);
