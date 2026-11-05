@@ -8,6 +8,7 @@ import {
   snapshot,
   streamById,
   waitForPlaying,
+  waitForSteadyPlaying,
 } from "./helpers.ts";
 import { broadcasts, setBroadcastBlocked, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
 
@@ -87,7 +88,7 @@ test("turning it on in the Streams dialog moves playing streams onto one engine"
   run.watched = watched.id;
   run.bystander = bystander.id;
   await waitForPlaying(request, watched.id);
-  const before = await waitForPlaying(request, bystander.id);
+  const before = await waitForSteadyPlaying(request, bystander.id);
   expect(before.engine?.shared).toBe(false);
   expect(engineContainers(watched.id)).toHaveLength(1);
 

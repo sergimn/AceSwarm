@@ -31,6 +31,32 @@ export async function waitForPlaying(request: APIRequestContext, id: string, tim
 }
 
 /**
+ * Waits until the stream has kept playing, with no new recovery, for `steadyMs`. That is longer
+ * than the stall window (12 s in the E2E stack), so a stall that began just before, after a
+ * network cut for example, shows up and recovers first.
+ */
+export async function waitForSteadyPlaying(
+  request: APIRequestContext,
+  id: string,
+  steadyMs = 20_000,
+  timeout = 240_000,
+): Promise<StreamView> {
+  const deadline = Date.now() + timeout;
+  let since = await waitForPlaying(request, id, timeout);
+  let steadySince = Date.now();
+  while (Date.now() - steadySince < steadyMs) {
+    expect(Date.now(), `stream ${id} never played steadily`).toBeLessThan(deadline);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const current = await streamById(request, id);
+    if (current?.state !== "playing" || current.recoveries !== since.recoveries) {
+      since = await waitForPlaying(request, id, Math.max(deadline - Date.now(), 1000));
+      steadySince = Date.now();
+    }
+  }
+  return since;
+}
+
+/**
  * Removes every stream and WireGuard profile, and turns engine sharing off, so each spec starts
  * from an empty stack.
  */
@@ -88,14 +114,14 @@ export function compose(...args: string[]): string {
 
 /** Names of the engine containers the controller created for a stream. */
 export function engineContainers(streamId: string): string[] {
-  return docker("ps", "-q", "--filter", `label=aceswarm.stream=${streamId}`, "--format", "{{.Names}}")
+  return docker("ps", "--filter", `label=aceswarm.stream=${streamId}`, "--format", "{{.Names}}")
     .split("\n")
     .filter((name) => name.length > 0);
 }
 
 /** Names of the shared engine containers (one per network path while engine sharing is on). */
 export function sharedEngineContainers(): string[] {
-  return docker("ps", "-q", "--filter", "label=aceswarm.shared-path", "--format", "{{.Names}}")
+  return docker("ps", "--filter", "label=aceswarm.shared-path", "--format", "{{.Names}}")
     .split("\n")
     .filter((name) => name.length > 0)
     .toSorted((a, b) => a.localeCompare(b, "en"));

@@ -11,6 +11,7 @@ import {
   streamById,
   tryGatewayAssignments,
   waitForPlaying,
+  waitForSteadyPlaying,
 } from "./helpers.ts";
 import { MESH, broadcasts, lastAnnounce, newestSegment, remoteWireguardProfile, setDirectPathBlocked } from "./mesh.ts";
 
@@ -126,7 +127,8 @@ test("blocks engines while the gateway has no path for them, then restores their
 });
 
 test("stays on the VPN when the direct path works again", async ({ request }) => {
-  const before = await waitForPlaying(request, run.streamId);
+  // The gateway restart above cut the engine off for a few seconds; let any stall it caused pass.
+  const before = await waitForSteadyPlaying(request, run.streamId);
   setDirectPathBlocked(false);
   // Sticky path selection: a working stream never moves just because another path is fine too.
   for (let check = 0; check < 15; check += 1) {
