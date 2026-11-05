@@ -70,7 +70,7 @@ async function setup() {
       pathMinDwellMs: 300_000,
     },
   });
-  return { orchestrator, wireguard, gateway, policyFile: join(wireguard.directory, "policy.json") };
+  return { orchestrator, wireguard, policy, gateway, policyFile: join(wireguard.directory, "policy.json") };
 }
 
 describe("WireGuard only", () => {
@@ -123,6 +123,18 @@ describe("WireGuard only", () => {
     expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
     expect(profiles).toHaveLength(1);
     expect(orchestrator.snapshot().wireguardOnly).toBe(true);
+  });
+
+  it("rewrites a policy file it could not understand when the switch is sent again", async () => {
+    const { orchestrator, policy, policyFile } = await setup();
+    await orchestrator.saveProfile("vpn", PROFILE);
+    await writeFile(policyFile, "{ broken");
+    expect(await policy.load()).toContain("not valid JSON");
+    expect(orchestrator.snapshot().wireguardOnly).toBe(true);
+
+    await orchestrator.setNetworkPolicy({ wireguardOnly: true });
+    expect(JSON.parse(await readFile(policyFile, "utf8"))).toEqual({ version: 1, wireguardOnly: true });
+    expect(policy.needsSave).toBe(false);
   });
 
   it("stays on when the policy file can't be understood", async () => {

@@ -205,11 +205,20 @@ export class Navigator {
       return;
     }
     const others = items.filter((item) => item !== current);
-    // Elements that scroll with the focused one come first. Otherwise, in a scrolled dialog, its
-    // sticky header would be nearer than what scrolled out of view under it.
-    const part = stickyPart(current, root);
-    const scrollingTogether = others.filter((item) => stickyPart(item, root) === part);
-    const next = nearest(current, scrollingTogether, direction) ?? nearest(current, others, direction);
+    // Up and down, along which pages and dialogs scroll, try the elements that scroll with the
+    // focused one first. Otherwise, in a scrolled dialog, its sticky header would be nearer than
+    // what scrolled out of view under it. Left and right compare everything as it is on screen, so
+    // the grid's left edge leads to the sticky rail beside it.
+    let next: HTMLElement | undefined;
+    if (direction === "up" || direction === "down") {
+      const part = stickyPart(current, root);
+      next = nearest(
+        current,
+        others.filter((item) => stickyPart(item, root) === part),
+        direction,
+      );
+    }
+    next ??= nearest(current, others, direction);
     if (next === undefined) {
       return;
     }

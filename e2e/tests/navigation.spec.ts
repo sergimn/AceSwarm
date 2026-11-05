@@ -33,6 +33,16 @@ test("moves between tiles with the arrow keys", async ({ page }) => {
   await expect(page.locator(".rail-button:focus")).toHaveCount(1);
 });
 
+test("reaches the rail from the grid on a large screen too", async ({ page }) => {
+  // At this size the footer link is just left of the first column's centre and scrolls with the
+  // tiles, while the rail stays put. Left must still pick the rail beside the tile.
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto("/");
+  await page.locator(".tile").first().focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator(".rail-button:focus")).toHaveCount(1);
+});
+
 test("opens a stream full screen and goes back with the remote's Back key", async ({ page }) => {
   await page.goto("/");
   const tile = page.locator(".tile", { hasText: "Channel 12" });

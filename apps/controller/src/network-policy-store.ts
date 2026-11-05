@@ -16,6 +16,7 @@ export class NetworkPolicyStore {
   private readonly directory: string;
   private readonly path: string;
   private current: NetworkPolicy = { ...DEFAULT_NETWORK_POLICY };
+  private unreadable = false;
 
   /** `directory` is the WireGuard profile directory. */
   constructor(directory: string) {
@@ -27,7 +28,13 @@ export class NetworkPolicyStore {
   async load(): Promise<string | null> {
     const { policy, error } = await readNetworkPolicy(this.directory);
     this.current = policy;
+    this.unreadable = error !== null;
     return error;
+  }
+
+  /** The file could not be read or understood, so it should be written again. */
+  get needsSave(): boolean {
+    return this.unreadable;
   }
 
   get(): NetworkPolicy {
@@ -37,5 +44,6 @@ export class NetworkPolicyStore {
   async save(policy: NetworkPolicy): Promise<void> {
     await writeJsonFile(this.path, serializeNetworkPolicy(policy));
     this.current = { ...policy };
+    this.unreadable = false;
   }
 }

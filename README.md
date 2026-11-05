@@ -89,7 +89,7 @@ Turn on **WireGuard only** under **Network** to stop using the direct connection
 
 - It needs at least one profile. The switch stays greyed out until you add one, and the last profile can't be removed while it is on.
 - Streams on the direct path move to a WireGuard path right away. New streams only start on WireGuard.
-- If every WireGuard path is down, streams wait and say so. They never fall back to the direct connection.
+- If every WireGuard path is down, new streams wait and say so, and streams already on WireGuard keep recovering there. None fall back to the direct connection.
 - The gateway enforces it too: it refuses to route any engine through the direct connection.
 - Turning it off allows the direct connection again. Streams stay on their current path until they have a reason to move.
 
