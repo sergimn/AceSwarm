@@ -146,17 +146,11 @@ You need Node.js 26.13 or later and Docker.
 ```sh
 npm ci
 npm run check            # typecheck, lint, format check, unit tests
-e2e/run.sh               # end-to-end tests: builds the images and starts a mock stack
 pipx install pre-commit && pre-commit install
 ```
 
-- **E2E tests don't need Acestream or internet peers.** The stack runs a mock engine instead, which:
-  - streams a generated test video,
-  - accepts content IDs or infohashes the way the real engine does,
-  - can stall on purpose,
-  - talks to fake peers on a fake internet and through a throwaway WireGuard server.
-- **Real engines in CI.** A second suite runs on three GitHub runners: AceSwarm with real Acestream engines, a real broadcast of a dummy stream, and a WireGuard server. See [e2e/README.md](e2e/README.md), which also has diagrams of both suites.
-- **Mock behaviours by ID.** Mock stream IDs choose their behaviour by prefix (`0bad` stalls, `beef` only works through the VPN, `ec0d` is MPEG-2, `dead` never loads). The last hex digit decides whether the mock treats the ID as a content ID (`0`–`7`) or an infohash (`8`–`f`).
+- **End-to-end tests use real engines, no mocks.** They run on three GitHub runners: AceSwarm with real Acestream engines, real broadcasts of dummy streams, and a real WireGuard server. They run on every pull request, and on any branch with "Run workflow" in the E2E workflow. They don't run on one machine. See [e2e/README.md](e2e/README.md), which also has diagrams.
+- **Unit tests use small fakes** (Docker client, iptables, clock) to test logic without Docker.
 - **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions.
 
 ## Credits
