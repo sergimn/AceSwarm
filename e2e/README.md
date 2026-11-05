@@ -181,7 +181,7 @@ flowchart TB
   end
   subgraph stackjob["job: stack"]
     direction TB
-    c1[mesh.sh prepare stack] --> c2[upload artifact] --> c3[mesh.sh join] --> c4["npm ci, Playwright,<br/>stack.sh build + up"] --> c5["wait for client.conf<br/>and infohash"] --> c6[Playwright tests] --> c7["share 'done'"] --> c8["logs, artifacts on failure,<br/>stack.sh down"]
+    c1[mesh.sh prepare stack] --> c2[upload artifact] --> c3[mesh.sh join] --> c4["npm ci, Playwright,<br/>stack.sh build + up"] --> c5["wait for client.conf<br/>and infohash"] --> c6[Playwright tests] --> c7["share 'done', wait until<br/>both runners fetched it"] --> c8["logs, artifacts on failure,<br/>stack.sh down"]
   end
   a4 -. "client.conf over the mesh" .-> c5
   b4 -. "infohash over the mesh" .-> c5
@@ -189,7 +189,7 @@ flowchart TB
 ```
 
 - **Sharing files.** Each runner serves `$RUNNER_TEMP/mesh/share` on its mesh address, port 18999. `mesh.sh share` publishes a file, and `mesh.sh wait-file` polls a peer for one.
-- **Finishing.** The stack job shares `done` even when it fails, and the other two jobs stop waiting. If the stack runner disappears (cancelled or crashed), they stop after it hasn't answered pings for about five minutes.
+- **Finishing.** The stack job shares `done` even when it fails, and the other two jobs stop waiting. The stack job keeps serving it until both have fetched it (`mesh.sh wait-fetched`, at most two minutes), because its file server stops with the job. If the stack runner disappears (cancelled or crashed), they stop after it hasn't answered pings for about five minutes.
 - **Re-runs.** Use "Re-run all jobs". Re-running a single job can't work, because it would wait for runners that are gone.
 
 ### The broadcast

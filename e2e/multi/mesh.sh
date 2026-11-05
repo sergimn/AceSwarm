@@ -14,6 +14,8 @@
 #   mesh.sh ip ROLE                prints a role's mesh address
 #   mesh.sh share FILE [NAME]      serves FILE to the other runners at http://<mesh ip>:18999/NAME
 #   mesh.sh wait-file ROLE NAME    waits until ROLE serves NAME (or stops answering) and prints it
+#   mesh.sh wait-fetched NAME ROLE...
+#                                  waits (up to 2 minutes) until each ROLE fetched NAME from this runner
 #
 # Roles: wg (WireGuard server), source (Acestream broadcast), stack (AceSwarm and the tests).
 # Needs sudo, wireguard-tools, jq, node (for stun.ts) and gh with GH_TOKEN (actions: read).
@@ -171,14 +173,33 @@ wait_file() {
   return 1
 }
 
+# The file server stops with this runner's job, so a runner that shares a file and then finishes
+# has to wait until the others fetched it. A runner that is gone never will, hence the time limit.
+wait_fetched() {
+  local name="$1" role pattern deadline=$((SECONDS + ${MESH_FETCH_WAIT_SECONDS:-120}))
+  shift
+  for role in "$@"; do
+    # http.server logs each request as: 192.0.2.1 - - [date] "GET /done HTTP/1.1" 200 -
+    pattern="^$(mesh_ip "$role" | sed 's/\./\\./g') .*\"GET /$name HTTP/[0-9.]+\" 200 "
+    until grep -E "$pattern" "$MESH_DIR/share.log" >/dev/null 2>&1; do
+      if ((SECONDS > deadline)); then
+        log "$role did not fetch $name"
+        break
+      fi
+      sleep 1
+    done
+  done
+}
+
 case "${1:-}" in
   prepare) prepare "$2" ;;
   join) join "${@:2}" ;;
   ip) mesh_ip "$2" ;;
   share) share "${@:2}" ;;
   wait-file) wait_file "$2" "$3" ;;
+  wait-fetched) wait_fetched "${@:2}" ;;
   *)
-    sed -n '2,19p' "$0" >&2
+    sed -n '2,21p' "$0" >&2
     exit 2
     ;;
 esac
