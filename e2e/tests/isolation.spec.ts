@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import {
   addStream,
+  compose,
   engineContainers,
   engineNetworkIp,
   fetchFromEngine,
@@ -32,5 +33,21 @@ test("engines can't reach the gateway, controller or transcoder APIs", async ({ 
     const result = fetchFromEngine(engine!, url);
     expect(result.ok, url).toBe(false);
     expect(result.output, url).toContain("403");
+  }
+});
+
+// Peers live on the public internet. Engines must not reach the host's published ports (rootless
+// Podman exposes them on 169.254.1.2), the LAN or other private addresses, on any path.
+test("the gateway drops engine connections to private addresses before any engine is allowed out", () => {
+  const forward = compose("exec", "-T", "netgw", "iptables", "-S", "ACESWARM-FWD").split("\n");
+  const jump = forward.findIndex((rule) => rule.includes("-j ACESWARM-DST"));
+  const firstAccept = forward.findIndex((rule) => /-s \S+\/32 .*-j ACCEPT/.test(rule));
+  expect(jump).toBeGreaterThan(-1);
+  if (firstAccept !== -1) {
+    expect(jump).toBeLessThan(firstAccept);
+  }
+  const destinations = compose("exec", "-T", "netgw", "iptables", "-S", "ACESWARM-DST");
+  for (const network of ["169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"]) {
+    expect(destinations).toContain(`-d ${network} -j DROP`);
   }
 });

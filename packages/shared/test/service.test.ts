@@ -12,6 +12,12 @@ it("recognises clients on a blocked network, also as IPv4-mapped IPv6", () => {
   expect(isBlockedClient(undefined, engines)).toBe(false);
 });
 
+it("lets the service's own address through, which rootless Podman forwards published ports from", () => {
+  expect(isBlockedClient("172.31.250.144", engines, "172.31.250.144")).toBe(false);
+  expect(isBlockedClient("::ffff:172.31.250.144", engines, "::ffff:172.31.250.144")).toBe(false);
+  expect(isBlockedClient("172.31.250.130", engines, "172.31.250.144")).toBe(true);
+});
+
 it("refuses every request from a blocked network", async () => {
   const service = createService({ name: "test", logger: createLogger("test", "silent"), blockedClients: engines });
   service.app.put("/assignments/:ip", () => ({ ok: true }));
