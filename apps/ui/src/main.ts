@@ -10,6 +10,7 @@ import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
+import { WatchReporter } from "./watch.ts";
 
 const PREVIEW_MODE_KEY = "aceswarm.previewMode";
 const MAX_PREVIEWS = 12;
@@ -48,7 +49,8 @@ function savePreviewMode(mode: PreviewMode): void {
 class App {
   private readonly navigator = new Navigator(element("#app"));
   private readonly previews = new PreviewManager(loadPreviewMode(), MAX_PREVIEWS);
-  private readonly player = new Player(this.navigator);
+  private readonly watch = new WatchReporter();
+  private readonly player = new Player(this.navigator, this.watch);
   private readonly grid = new Grid(element("#grid"), this.previews, (id) => {
     this.openPlayer(id);
   });
@@ -93,6 +95,7 @@ class App {
 
   render(snapshot: Snapshot): void {
     this.snapshot = snapshot;
+    this.watch.setInterval(snapshot.viewerPingSeconds);
     this.grid.render(snapshot, Date.now());
     this.player.update(snapshot);
     this.streamList.update(snapshot);

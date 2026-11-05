@@ -10,7 +10,10 @@ import type { EngineManager } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import { NetworkPolicyStore } from "../src/network-policy-store.ts";
 import { NetworkPolicyError, Orchestrator } from "../src/orchestrator.ts";
+import { SettingsStore } from "../src/settings-store.ts";
+import { SharedEngines } from "../src/shared-engines.ts";
 import { StreamStore } from "../src/stream-store.ts";
+import { Viewers } from "../src/viewers.ts";
 import { WireguardStore } from "../src/wireguard-store.ts";
 
 // Throwaway, syntactically valid keys (not real credentials), the same as the shared tests use.
@@ -49,16 +52,27 @@ async function setup() {
     },
     paths: () => Promise.resolve([]),
   } as unknown as NetgwClient;
+  const metrics = new ControllerMetrics(new Registry(), () => ({ streams: [], paths: [] }));
+  const logger = createLogger("test", "silent");
   const orchestrator = new Orchestrator({
     store: new StreamStore(dataDir),
     wireguard,
     policy,
+    settingsStore: new SettingsStore(dataDir),
+    shared: new SharedEngines({
+      engines: {} as EngineManager,
+      netgw,
+      metrics,
+      logger,
+      settings: { maxFailures: 2, failureWindowMs: 60_000, retireTimeoutMs: 60_000, idleTimeoutMs: 30_000 },
+    }),
+    viewers: new Viewers({ pingMs: 60_000 }),
     engines: {} as EngineManager,
     ace: {} as AcestreamClient,
     transcoder: {} as TranscoderClient,
     netgw,
-    metrics: new ControllerMetrics(new Registry(), () => ({ streams: [], paths: [] })),
-    logger: createLogger("test", "silent"),
+    metrics,
+    logger,
     settings: {
       tickMs: 1000,
       stallAfterMs: 20_000,

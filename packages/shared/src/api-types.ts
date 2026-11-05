@@ -58,6 +58,10 @@ export interface StreamView {
   /** Network path currently used by the stream's engine ("direct" or "wg:<profile>"). */
   path: string | null;
   recoveries: number;
+  /** The engine the stream plays from; shared engines serve every stream on their path. */
+  engine: { name: string; shared: boolean } | null;
+  /** Players showing the stream full screen right now. */
+  viewers: number;
   hls: {
     preview: string;
     full: string;
@@ -96,6 +100,32 @@ export interface Snapshot {
   pathStrategy: PathStrategyName;
   /** Streams only use WireGuard paths; the direct path is off. */
   wireguardOnly: boolean;
+  sharedEngines: SharedEnginesView;
+  /** How often players report the stream they show full screen. */
+  viewerPingSeconds: number;
+}
+
+/** Settings the UI changes (`PATCH /api/settings`), kept in the controller's data volume. */
+export interface Settings {
+  /** Streams on the same network path share one engine instead of each having its own. */
+  sharedEngines: boolean;
+}
+
+export interface SharedEnginesView {
+  enabled: boolean;
+  /** A shared engine restarts once more than this many of its streams fail within the window. */
+  maxFailures: number;
+  failureWindowSeconds: number;
+}
+
+/** A player showing a stream full screen. */
+export interface ViewerView {
+  /** Random id the page made up when it loaded; it is kept only in the page's memory. */
+  viewer: string;
+  stream: string;
+  /** Rough browser and system, such as "Chrome on Android TV". */
+  device: string;
+  since: string;
 }
 
 export type PathStrategyName = "sticky-best" | "round-robin";

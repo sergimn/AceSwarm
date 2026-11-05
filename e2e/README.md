@@ -63,6 +63,7 @@ flowchart LR
   end
   FW -- "to 192.0.2.2<br/>setDirectPathBlocked" --x S["broadcasts<br/>(source runner)"]
   FW -- "UDP to 192.0.2.1:51820<br/>setVpnServerUnreachable" --x V["WireGuard server<br/>(wg runner)"]
+  FW -- "to one broadcast's P2P port<br/>setBroadcastBlocked" --x S
 ```
 
 | Condition                          | How the tests make it                                                                      | Used by                                                |
@@ -71,6 +72,7 @@ flowchart LR
 | an ISP that blocks Acestream peers | `setDirectPathBlocked(true)` with a WireGuard path up                                      | moving to the VPN, fail closed after a gateway restart |
 | a VPN provider that went away      | `setVpnServerUnreachable(true)`: the tunnel stops carrying anything and its path goes down | WireGuard only: streams wait instead of going direct   |
 | an engine that crashes             | `docker restart` of one engine container                                                   | the other streams are left alone                       |
+| one swarm that dries up            | `setBroadcastBlocked(broadcast, true)`: only that broadcast's P2P port on `192.0.2.2`      | one engine per path: the other stream keeps playing    |
 
 The direct-path block only drops traffic to the broadcast runner, so the direct path keeps answering the gateway's pings (they go to the WireGuard server's runner) and keeps its better probe score. That is what a connection that blocks Acestream peers looks like, and a stream still has to leave it.
 
@@ -165,21 +167,22 @@ The engine only reads HTTP sources (`--source -` for stdin isn't supported). ffm
 
 ## Tests
 
-The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only off).
+The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only and engine sharing off).
 
 ```mermaid
 flowchart LR
-  I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> S[streams] --> W[wireguard-only]
+  I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> S[streams] --> W[wireguard-only]
 ```
 
-| Spec                     | Engines | Checks                                                                                                                                                                         |
-| ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                      |
-| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                  |
-| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal |
-| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                   |
-| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                              |
-| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays              |
+| Spec                     | Engines | Checks                                                                                                                                                                                  |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                               |
+| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                           |
+| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal          |
+| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                            |
+| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids |
+| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                       |
+| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                       |
 
 ### Content IDs and infohashes
 
@@ -256,6 +259,32 @@ sequenceDiagram
   T->>AS: 45 s later still on the VPN, no recoveries (sticky path)
   T->>AS: delete the WireGuard profile
   AS->>SRC: back on the direct path: new announce from 192.0.2.3
+```
+
+### One engine per path
+
+`shared-engines.spec.ts` runs these in order, on two streams. All the while, the second stream (the bystander) has to keep playing, with no recovery.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Playwright
+  participant AS as AceSwarm (stack runner)
+  participant FW as host firewall
+  participant SRC as source runner
+  T->>AS: two broadcasts play, one engine each
+  T->>AS: turn "One engine per path" on in the Streams dialog
+  AS->>AS: shared engine for the direct path, both streams move make-before-break
+  T->>FW: DROP the first broadcast's P2P port
+  AS->>AS: nobody watches it: session restarts only, the shared engine stays
+  T->>FW: remove the DROP rule, it plays again
+  T->>AS: open the first stream in the player: 1 viewer, a random id, no cookies or storage
+  T->>FW: DROP the first broadcast's P2P port again
+  AS->>AS: the watched stream failed: start a second shared engine
+  T->>FW: remove the DROP rule
+  AS->>AS: both streams move to the new engine, the old one goes
+  T->>AS: restarts metric says "watched", closing the player leaves 0 viewers
+  T->>AS: turn it off: each stream moves to an engine of its own
 ```
 
 ### WireGuard only

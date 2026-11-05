@@ -45,6 +45,17 @@ const schema = z.object({
   RECOVERY_BASE_DELAY_SECONDS: envInt(5),
   RECOVERY_MAX_DELAY_SECONDS: envInt(300),
   HANDOVER_TIMEOUT_SECONDS: envInt(120),
+  /**
+   * With engine sharing on, a path's shared engine restarts once more than this many of its streams
+   * failed within SHARED_ENGINE_FAILURE_WINDOW_SECONDS (or when the stream someone watches fails).
+   */
+  SHARED_ENGINE_MAX_FAILURES: envInt(2),
+  SHARED_ENGINE_FAILURE_WINDOW_SECONDS: envInt(60),
+  /**
+   * How often a player showing a stream full screen reports it; it counts as gone after missing two.
+   * Players report at most every 5 s.
+   */
+  VIEWER_PING_SECONDS: z.coerce.number().int().min(5).default(60),
 });
 
 export type Config = z.infer<typeof schema>;

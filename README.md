@@ -12,9 +12,10 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   1. restart the stream,
   2. restart its engine,
   3. move it to another network path.
+- **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine only restarts when the stream you are watching fails or several of its streams fail at once, and its streams keep their picture while it does.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.
 - **WireGuard only.** One switch keeps every stream off the direct connection. If no VPN is up, streams wait instead of going direct.
-- **History.** Optional Prometheus, Loki and Grafana keep long-term records of stream health, peers, network paths and engine memory. A ready-made dashboard and alerts are included.
+- **History.** Optional Prometheus, Loki and Grafana keep long-term records of stream health, peers, network paths, engine memory and who watched what. A ready-made dashboard and alerts are included.
 - Runs on x86_64 and arm64 (including the Raspberry Pi 5), with Docker or Podman, rootful or rootless.
 
 ## Quick start
@@ -52,7 +53,8 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
 - The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`.
-- Lower `ENGINE_MEMORY_MB` (for example to 1024) when you run several streams on an 8 GB Pi. The dashboard shows how much each engine really uses.
+- Turn on **One engine per path** (under **Streams**) when you run several streams: they then share one engine instead of each starting its own.
+- Lower `ENGINE_MEMORY_MB` (for example to 1024) when you run several streams on an 8 GB Pi with their own engines. The dashboard shows how much each engine really uses.
 
 ### Podman
 
@@ -93,6 +95,27 @@ Turn on **WireGuard only** under **Network** to stop using the direct connection
 - The gateway enforces it too: it refuses to route any engine through the direct connection.
 - Engines on a WireGuard path reach everything through the tunnel, including the networks in `ENGINE_ALLOWED_PRIVATE`, and a VPN provider can't reach your LAN. Keep `ENGINE_DNS` on public resolvers: with a LAN DNS server, engines can't resolve anything and no stream starts.
 - Turning it off allows the direct connection again. Streams stay on their current path until they have a reason to move.
+
+## One engine per path
+
+Every stream normally gets an engine of its own. Turn on **One engine per path** under **Streams** and the streams on each network path share one engine instead: one for the direct connection, one for each WireGuard profile in use. Turning it on or off moves every stream to the other kind of engine without interrupting its picture.
+
+- **One stream failing leaves the engine alone.** Restarting a shared engine would interrupt every stream on it, so a failing stream only restarts its own session, and moves to another path if that doesn't help.
+- **The engine is replaced when:**
+  - the stream someone is watching full screen fails,
+  - more than `SHARED_ENGINE_MAX_FAILURES` (2) of its streams fail within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
+  - every stream on it is failing, or
+  - it stopped answering.
+
+  Only streams that had played from the engine count, since a broadcast that is down fails on any engine. Apart from **Restart**, it is replaced at most once per failure window.
+
+- **Replacing is make-before-break.** A new engine starts on the same path, and each stream moves over once the new engine delivers its video. The old engine goes once its last stream left.
+- **It needs more memory than one stream's engine**, though far less than an engine per stream. Watch the "Engines" dashboard row and raise `ENGINE_MEMORY_MB` if it gets close.
+- **Peer counts are shared too.** The engine reports connected peers per stream, but the peers sending data and their countries come from the engine's connections, so every stream on it shows the same ones.
+
+### Who is watching
+
+The player tells Ace Swarm which stream it shows full screen, right away and then every `VIEWER_PING_SECONDS` (60). That is how shared engines know which stream someone is watching. Each page load makes up a random viewer id and keeps it only in memory: there are no cookies and nothing is stored in the browser, so every visit is a new viewer. The "Viewers" dashboard row shows who watches what, with a rough guess of the device (such as "Chrome on TV").
 
 ## Monitoring
 

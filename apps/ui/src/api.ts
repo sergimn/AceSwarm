@@ -1,4 +1,4 @@
-import type { NetworkPolicy, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
+import type { NetworkPolicy, Settings, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -61,6 +61,20 @@ export const api = {
   },
   setNetworkPolicy: async (policy: NetworkPolicy): Promise<NetworkPolicy> =>
     (await json("PATCH", "/api/network", policy)) as NetworkPolicy,
+  updateSettings: async (settings: Partial<Settings>): Promise<Settings> =>
+    (await json("PATCH", "/api/settings", settings)) as Settings,
+  reportViewer: async (viewer: string, stream: string | null): Promise<void> => {
+    await send("POST", `/api/viewers/${encodeURIComponent(viewer)}`, { stream });
+  },
+  /** Like `reportViewer`, for a page that is going away: the request outlives it. */
+  leaveViewer: (viewer: string): void => {
+    void fetch(`/api/viewers/${encodeURIComponent(viewer)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stream: null }),
+      keepalive: true,
+    }).catch(() => undefined);
+  },
 };
 
 export type ConnectionStatus = "connecting" | "live" | "reconnecting";

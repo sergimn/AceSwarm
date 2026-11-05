@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as wait } from "node:timers/promises";
 import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import { kindsToTry, type AceIdKind } from "@aceswarm/shared/ace-id";
 import { EngineError, type AcestreamClient, type EngineSession } from "./acestream.ts";
 import type { TranscoderClient } from "./clients.ts";
+
+export async function sleep(ms: number): Promise<void> {
+  await wait(ms);
+}
+
+/** The pipeline as exited, for one the transcoder no longer knows (for example after it restarted). */
+export function exitedPipeline(previous: PipelineStatus | undefined, error: string): PipelineStatus | undefined {
+  return previous === undefined ? undefined : { ...previous, state: "exited", error };
+}
 
 /**
  * Starts an engine session. A bare 40 character value can be a content ID or an infohash, and

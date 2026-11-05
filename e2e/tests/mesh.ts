@@ -96,6 +96,18 @@ export function setDirectPathBlocked(blocked: boolean): void {
 }
 
 /**
+ * Drops traffic from this runner's containers to one broadcast's source engine (its P2P port,
+ * 776(3+N) for bcN), like a swarm that dries up for that stream only. The other broadcasts, which
+ * an engine shared by several streams also plays, keep working.
+ */
+export function setBroadcastBlocked(broadcast: Broadcast, blocked: boolean): void {
+  const port = String(7763 + Number.parseInt(broadcast.name.replace(/^bc/, ""), 10));
+  for (const protocol of ["tcp", "udp"]) {
+    setForwardDrop(["-d", `${MESH.source}/32`, "-p", protocol, "--dport", port], blocked);
+  }
+}
+
+/**
  * Drops the gateway's WireGuard packets to the WireGuard server, like a VPN provider that went
  * away: the tunnel stops working and its path goes down. The direct path keeps working.
  */
