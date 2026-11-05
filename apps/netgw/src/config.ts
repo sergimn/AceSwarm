@@ -1,6 +1,8 @@
 import { envBool, envInt, envList, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
+const cidrList = z.array(z.cidrv4());
+
 const schema = z.object({
   PORT: envInt(8082),
   /** Directory with the WireGuard profiles (shared read-only with the controller). */
@@ -23,6 +25,11 @@ const schema = z.object({
   IGNORED_PEER_PORTS: envList(["53", "80", "443"]),
   /** Use wireguard-go when the kernel has no WireGuard module (needs /dev/net/tun). */
   WIREGUARD_USERSPACE_FALLBACK: envBool(true),
+  /**
+   * Private networks engines may reach anyway, as CIDRs (for example LAN peers). Everything else
+   * private, link-local or local is dropped, including the host's published ports.
+   */
+  ENGINE_ALLOWED_PRIVATE: envList([]).pipe(cidrList),
   /** iptables flavour; use `iptables-legacy` on hosts whose kernel lacks nf_tables. */
   IPTABLES: z.enum(["iptables", "iptables-nft", "iptables-legacy"]).default("iptables"),
 });

@@ -40,6 +40,24 @@ const NAT_CHAIN = "ACESWARM-NAT";
 const MSS_CHAIN = "ACESWARM-MSS";
 const FORWARD_CHAIN = "ACESWARM-FWD";
 const INPUT_CHAIN = "ACESWARM-IN";
+const DESTINATION_CHAIN = "ACESWARM-DST";
+
+/**
+ * Destinations engines may never reach, whatever their path: the host and its published ports
+ * (rootless Podman exposes them on 169.254.1.2), the LAN, other containers and VPN-internal
+ * addresses. Peers live on the public internet.
+ */
+export const PRIVATE_NETWORKS: readonly string[] = [
+  "0.0.0.0/8",
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "224.0.0.0/4",
+  "240.0.0.0/4",
+];
 
 /**
  * Owns the gateway's iptables rules: forwarding permissions per engine (fail closed), masquerading
@@ -50,11 +68,19 @@ export class Firewall {
   private readonly runner: CommandRunner;
   private readonly engineSubnet: string;
   private readonly command: string;
+  private readonly allowedPrivate: readonly string[];
 
-  constructor(runner: CommandRunner, engineSubnet: string, command = "iptables") {
+  /** `allowedPrivate` lists private networks engines may still reach, such as LAN peers. */
+  constructor(
+    runner: CommandRunner,
+    engineSubnet: string,
+    command = "iptables",
+    allowedPrivate: readonly string[] = [],
+  ) {
     this.runner = runner;
     this.engineSubnet = engineSubnet;
     this.command = command;
+    this.allowedPrivate = allowedPrivate;
   }
 
   /**
@@ -98,6 +124,16 @@ export class Firewall {
       "-j",
       "ACCEPT",
     ]);
+    // New connections to private destinations are dropped before the per-engine accepts.
+    await this.iptables(["-N", DESTINATION_CHAIN], true);
+    await this.iptables(["-F", DESTINATION_CHAIN]);
+    for (const network of this.allowedPrivate) {
+      await this.iptables(["-A", DESTINATION_CHAIN, "-d", network, "-j", "RETURN"]);
+    }
+    for (const network of PRIVATE_NETWORKS) {
+      await this.iptables(["-A", DESTINATION_CHAIN, "-d", network, "-j", "DROP"]);
+    }
+    await this.iptables(["-A", FORWARD_CHAIN, "-s", this.engineSubnet, "-j", DESTINATION_CHAIN]);
     await this.ensureChain("nat", NAT_CHAIN, "POSTROUTING");
     await this.ensureChain("mangle", MSS_CHAIN, "FORWARD");
     await this.iptables(["-t", "mangle", "-F", MSS_CHAIN]);
