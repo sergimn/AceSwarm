@@ -85,7 +85,7 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
 - **Engines can't reach the APIs.** Engines run third-party P2P software, so nothing trusts them:
   - The gateway, controller and transcoder answer 403 to requests from engine addresses (the engines network's `ip_range`). A request from the service's own address is let through: rootless Podman forwards published ports from inside the container, sometimes from its address on the engines network.
   - The gateway's firewall also drops new connections from engines to the gateway itself.
-  - It drops engine connections to private, link-local and local addresses on every path, so engines can't reach the host's published ports (rootless Podman exposes them on `169.254.1.2`) or the LAN. `ENGINE_ALLOWED_PRIVATE` lists private networks they may reach anyway, such as LAN peers.
+  - It drops engine connections to private, link-local and local addresses on every path, so engines can't reach the host's published ports (rootless Podman exposes them on `169.254.1.2`) or the LAN. `ENGINE_ALLOWED_PRIVATE` lists private networks they may reach anyway, such as LAN peers or a private resolver used in `ENGINE_DNS`.
   - The controller calls the gateway and transcoder by names that exist only on the backend network (`netgw-api`, `transcoder-api`).
 - **Paths.** The gateway has a direct path (its egress network) and one WireGuard interface per profile.
   - It uses the kernel module, falling back to `wireguard-go`.

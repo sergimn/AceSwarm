@@ -44,3 +44,20 @@ it("lets engines reach the private networks listed as allowed", async () => {
   expect(allowed).toBeGreaterThan(-1);
   expect(allowed).toBeLessThan(rules.indexOf("-A ACESWARM-DST -d 192.168.0.0/16 -j DROP"));
 });
+
+it("keeps one jump, after the reply accept and before every engine, when the gateway sets up again", async () => {
+  const { runner, rules } = recorder();
+  const firewall = new Firewall(runner, "172.31.250.0/24");
+  await firewall.init("eth2");
+  rules.length = 0; // init flushes the chains, so only the second set of rules is in place.
+  await firewall.init("eth2");
+  await firewall.allow("172.31.250.130", "eth0");
+
+  const forward = rules.filter((rule) => rule.startsWith("-A ACESWARM-FWD"));
+  expect(forward.filter((rule) => rule.endsWith("-j ACESWARM-DST"))).toHaveLength(1);
+  expect(forward).toEqual([
+    "-A ACESWARM-FWD -d 172.31.250.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+    "-A ACESWARM-FWD -s 172.31.250.0/24 -j ACESWARM-DST",
+    "-A ACESWARM-FWD -s 172.31.250.130/32 -o eth0 -j ACCEPT",
+  ]);
+});

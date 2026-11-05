@@ -45,7 +45,8 @@ const DESTINATION_CHAIN = "ACESWARM-DST";
 /**
  * Destinations engines may never reach, whatever their path: the host and its published ports
  * (rootless Podman exposes them on 169.254.1.2), the LAN, other containers and VPN-internal
- * addresses. Peers live on the public internet.
+ * addresses. Peers live on the public internet. The documentation ranges (192.0.2.0/24,
+ * 198.51.100.0/24, 203.0.113.0/24) stay reachable on purpose: the E2E suites use them as the internet.
  */
 export const PRIVATE_NETWORKS: readonly string[] = [
   "0.0.0.0/8",
@@ -124,7 +125,8 @@ export class Firewall {
       "-j",
       "ACCEPT",
     ]);
-    // New connections to private destinations are dropped before the per-engine accepts.
+    // Engine traffic to private destinations is dropped before the per-engine accepts (replies to
+    // connections an engine was allowed to open were accepted above).
     await this.iptables(["-N", DESTINATION_CHAIN], true);
     await this.iptables(["-F", DESTINATION_CHAIN]);
     for (const network of this.allowedPrivate) {
