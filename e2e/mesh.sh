@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Joins the GitHub-hosted runners of one workflow run into a private WireGuard network (the
-# "mesh"), so the multi-machine E2E jobs can reach each other. See e2e/README.md for diagrams.
+# "mesh"), so the end-to-end test jobs can reach each other. See e2e/README.md for diagrams.
 #
 # Runners can't accept connections from the internet: they sit behind a NAT that only lets packets
 # in from an address the runner has sent to. That NAT keeps one public port per local port whatever
@@ -155,7 +155,7 @@ share() {
 wait_file() {
   local role="$1" name="$2" ip silent=0
   ip="$(mesh_ip "$role")"
-  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3000}))
+  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3400}))
   while ((SECONDS < deadline)); do
     if curl -sf -m 5 "http://$ip:$SHARE_PORT/$name"; then
       log "got $name from $role"

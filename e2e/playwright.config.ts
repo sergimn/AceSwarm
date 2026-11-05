@@ -1,8 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * End-to-end tests against the stack started by `e2e/run.sh` (mock engine, fake peers and a
- * throwaway WireGuard server). They share one stack, so they run in order with one worker.
+ * End-to-end tests against the stack started by `e2e/stack.sh`: real Acestream engines playing
+ * real broadcasts from another runner, directly or through a WireGuard server on a third runner.
+ * See e2e/README.md. The specs share one stack, so they run in order with one worker.
  */
 const channel = process.env["PW_CHANNEL"];
 const executablePath = process.env["PW_CHROMIUM_PATH"];
@@ -13,11 +14,13 @@ export default defineConfig({
   workers: 1,
   forbidOnly: process.env["CI"] !== undefined,
   retries: 0,
-  timeout: 240_000,
+  // Real engines buffer, and recovering a stream climbs a ladder of restarts before a path move.
+  timeout: 480_000,
   expect: { timeout: 60_000 },
   reporter: process.env["CI"] === undefined ? "list" : [["list"], ["html", { open: "never" }]],
   use: {
-    baseURL: process.env["E2E_BASE_URL"] ?? `http://localhost:${process.env["E2E_HTTP_PORT"] ?? "18080"}`,
+    // The stack only publishes its UI on the loopback address (compose.e2e.yaml).
+    baseURL: process.env["E2E_BASE_URL"] ?? `http://127.0.0.1:${process.env["E2E_HTTP_PORT"] ?? "18080"}`,
     trace: "retain-on-failure",
     // Recording needs Playwright's ffmpeg build, which CI installs.
     video: process.env["CI"] === undefined ? "off" : "retain-on-failure",

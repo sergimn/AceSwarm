@@ -5,16 +5,17 @@ import {
   engineContainers,
   engineNetworkIp,
   fetchFromEngine,
-  mockId,
   resetStack,
   waitForPlaying,
 } from "./helpers.ts";
+import { broadcasts } from "./mesh.ts";
 
 // Engines run third-party P2P software, so they must not be able to steer the stack, for example
 // by asking the gateway to move them off their VPN.
 test("engines can't reach the gateway, controller or transcoder APIs", async ({ request }) => {
   await resetStack(request);
-  const stream = await addStream(request, mockId("e1", "content-id", 31), "Isolation");
+  const [broadcast] = await broadcasts(1);
+  const stream = await addStream(request, broadcast!.infohash, "Isolation");
   await waitForPlaying(request, stream.id);
   const [engine] = engineContainers(stream.id);
   expect(engine).toBeDefined();

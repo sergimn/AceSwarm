@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The AceSwarm side of the multi-machine E2E tests: builds the images (with the real engine image,
-# not the mock) and starts or stops the stack. See e2e/README.md.
+# The AceSwarm side of the end-to-end tests: builds the images (with the real engine image) and
+# starts or stops the stack. See e2e/README.md.
 #
-#   e2e/multi/stack.sh build|up|down|logs
+#   e2e/stack.sh build|up|down|logs
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 
 export COMPOSE_PROJECT_NAME=aceswarm-e2e
 export COMPOSE_PROFILES=""
@@ -13,7 +13,7 @@ export ACESWARM_ENGINE_NETWORK=aceswarm-e2e_engines
 export E2E_HTTP_PORT="${E2E_HTTP_PORT:-18080}"
 
 compose() {
-  docker compose -f compose.yaml -f e2e/multi/compose.multi.yaml "$@"
+  docker compose -f compose.yaml -f e2e/compose.e2e.yaml "$@"
 }
 
 build() {

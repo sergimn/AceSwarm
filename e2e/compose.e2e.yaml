@@ -1,43 +1,24 @@
-# End-to-end test stack: the real services, with the mock engine instead of Acestream, fake peers
-# on a fake internet and a throwaway WireGuard server. e2e/run.sh builds the images and runs it.
-#
-#   egress (198.51.100.0/24)  netgw, peer-a (.10), peer-b (.11), wg-server   <- the "direct" path reaches these
-#   vpn (203.0.113.0/24)      wg-server, vpn-peer                <- only reachable through WireGuard
-
-# Fake internet peers. Docker 28+ drops packets addressed to a container's IP when they arrive from
-# another bridge, and with br_netfilter that includes the engine traffic the gateway forwards. A
-# real peer is never a local container, so each fake peer answers on an extra address (PEER_ADDRESS)
-# that Docker doesn't manage, and the engines are pointed at those addresses. Replies must come from
-# that address too, or the gateway's connection tracking never sees them.
-x-fake-peer: &fake-peer
-  image: aceswarm-mock-engine:e2e
-  cap_add: [NET_ADMIN]
-  entrypoint:
-    - /bin/sh
-    - -ec
-    - >-
-      bb=/usr/local/lib/aceswarm/busybox;
-      dev=$$($$bb ip -o -4 addr show | $$bb awk '$$4 ~ /^198[.]51[.]100[.]/ { print $$2; exit }');
-      $$bb ip addr add "$$PEER_ADDRESS/24" dev "$$dev";
-      $$bb ip route replace 198.51.100.0/24 dev "$$dev" src "$$PEER_ADDRESS";
-      exec /usr/local/lib/aceswarm/entrypoint.sh
+# End-to-end test stack: the real services with real Acestream engines, on the runner that runs
+# the tests. The broadcasts and the WireGuard server run on two other runners, reached through the
+# mesh (e2e/mesh.sh): see e2e/README.md. e2e/stack.sh builds the images and starts it.
 
 services:
   controller:
     image: aceswarm-controller:e2e
     environment:
-      ENGINE_IMAGE: aceswarm-mock-engine:e2e
-      ENGINE_MEMORY_MB: "256"
-      ENGINE_DNS: ""
-      ENGINE_READY_TIMEOUT_SECONDS: "30"
-      STARTUP_GRACE_SECONDS: "20"
-      STALL_SECONDS: "8"
+      ENGINE_IMAGE: aceswarm-engine:e2e
+      ENGINE_MEMORY_MB: "1536"
+      ENGINE_READY_TIMEOUT_SECONDS: "90"
+      # Real engines need a few seconds to open a session and buffer.
+      STARTUP_GRACE_SECONDS: "45"
+      STALL_SECONDS: "12"
       TICK_MS: "1000"
       RECOVERY_BASE_DELAY_SECONDS: "1"
       RECOVERY_MAX_DELAY_SECONDS: "4"
+      # Stickiness then comes only from a healthy stream never moving, which the tests check.
       PATH_MIN_DWELL_SECONDS: "0"
     ports: !override
-      - ${E2E_HTTP_PORT:-18080}:8080
+      - 127.0.0.1:${E2E_HTTP_PORT:-18080}:8080
 
   transcoder:
     image: aceswarm-transcoder:e2e
@@ -49,67 +30,11 @@ services:
     image: aceswarm-netgw:e2e
     environment:
       GEOIP_DOWNLOAD: "false"
-      GEOIP_STATIC: 198.51.100.10=ES,198.51.100.11=FR,203.0.113.10=SE
-      PROBE_TARGETS: 198.51.100.10
+      # Mesh addresses: the broadcast runner and the WireGuard server's runner.
+      GEOIP_STATIC: 192.0.2.2=ES,192.0.2.1=SE
+      # GitHub's runners can't ping the internet (Azure drops ICMP), so every path would stay down
+      # and engines would get no path at all. Probe the WireGuard server's runner instead: it is
+      # reachable directly over the mesh and through the tunnel alike.
+      PROBE_TARGETS: 192.0.2.1
       PROBE_INTERVAL_SECONDS: "3"
       PEERS_INTERVAL_SECONDS: "2"
-    networks:
-      egress:
-        ipv4_address: 198.51.100.2
-
-  peer-a:
-    <<: *fake-peer
-    environment:
-      MOCK_MODE: peer
-      PEER_ADDRESS: 198.51.100.10
-    networks:
-      egress:
-        ipv4_address: 198.51.100.110
-
-  peer-b:
-    <<: *fake-peer
-    environment:
-      MOCK_MODE: peer
-      PEER_ADDRESS: 198.51.100.11
-    networks:
-      egress:
-        ipv4_address: 198.51.100.111
-
-  vpn-peer:
-    image: aceswarm-mock-engine:e2e
-    environment:
-      MOCK_MODE: peer
-    networks:
-      vpn:
-        ipv4_address: 203.0.113.10
-
-  # Throwaway WireGuard server. It writes the client profile the tests upload to /state.
-  wg-server:
-    image: aceswarm-wg-server:e2e
-    cap_add: [NET_ADMIN]
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    sysctls:
-      net.ipv4.ip_forward: 1
-    volumes:
-      - wg-state:/state
-    networks:
-      egress:
-        ipv4_address: 198.51.100.20
-      vpn:
-        ipv4_address: 203.0.113.2
-
-networks:
-  egress:
-    ipam:
-      config:
-        - subnet: 198.51.100.0/24
-          gateway: 198.51.100.1
-  vpn:
-    internal: true
-    ipam:
-      config:
-        - subnet: 203.0.113.0/24
-
-volumes:
-  wg-state: {}

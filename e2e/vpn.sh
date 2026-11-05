@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The throwaway WireGuard server for the multi-machine E2E tests (the same image as the
-# single-machine tests, e2e/wg-server). It listens on UDP 51820 of this runner, so AceSwarm on
-# another runner reaches it through the mesh, and it NATs client traffic out of this runner: to
-# the broadcast runner over the mesh, and to the internet. See e2e/README.md for diagrams.
+# The throwaway WireGuard server for the end-to-end tests (image: e2e/wg-server). It listens on
+# UDP 51820 of this runner, so AceSwarm on another runner reaches it through the mesh, and it NATs
+# client traffic out of this runner: to the broadcast runner over the mesh, and to the internet.
+# See e2e/README.md for diagrams.
 #
 #   vpn.sh build                 builds the server image
 #   vpn.sh start ENDPOINT_HOST   starts it on ENDPOINT_HOST:51820, which the client profile points at

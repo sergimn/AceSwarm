@@ -2,8 +2,8 @@
 # Generates a server and a client key pair, brings wg0 up and NATs client traffic to the other
 # networks. The client profile is written to /state/client.conf for the tests to upload.
 #
-# WG_ENDPOINT (host:port) overrides the endpoint written into the profile, and WG_CLIENT_MTU adds an
-# MTU line; the multi-machine tests use both because the server is reached through another tunnel.
+# WG_ENDPOINT (host:port) is the endpoint written into the profile, and WG_CLIENT_MTU adds an MTU
+# line. The tests reach the server through another tunnel (the mesh), hence the smaller MTU.
 set -eu
 umask 077
 mkdir -p /state
@@ -11,7 +11,7 @@ mkdir -p /state
 [ -f /state/client.key ] || wg genkey > /state/client.key
 server_pub=$(wg pubkey < /state/server.key)
 client_pub=$(wg pubkey < /state/client.key)
-endpoint="${WG_ENDPOINT:-$(ip -4 -o addr show | awk '/198\.51\.100\./ { split($4, a, "/"); print a[1] }'):51820}"
+endpoint="${WG_ENDPOINT:?set WG_ENDPOINT to the host:port clients reach this server on}"
 mtu_line=""
 [ -z "${WG_CLIENT_MTU:-}" ] || mtu_line="MTU = ${WG_CLIENT_MTU}"
 
