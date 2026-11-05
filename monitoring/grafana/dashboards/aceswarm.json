@@ -252,6 +252,183 @@
     },
     {
       "type": "row",
+      "title": "Viewers",
+      "id": 33,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Who is watching what",
+      "id": 34,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Players showing a stream full screen right now. A viewer is a random id the page makes up when it loads and keeps only in memory, so every visit is a new viewer; the device is a rough guess from the browser.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_viewer_watching * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "stream": true,
+              "service": true
+            },
+            "indexByName": {
+              "name": 0,
+              "viewer": 1,
+              "device": 2
+            },
+            "renameByName": {
+              "name": "Stream",
+              "viewer": "Viewer",
+              "device": "Device"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Stream",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Viewers per stream",
+      "id": 35,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_viewers * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"} > 0",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 30
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "state-timeline",
+      "title": "What each viewer watched",
+      "id": 36,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "One lane per viewer and stream: when each player showed which stream.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_viewer_watching * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{viewer}} ({{device}}): {{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "watching"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      }
+    },
+    {
+      "type": "row",
       "title": "Stream stability",
       "id": 6,
       "collapsed": false,
@@ -259,7 +436,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 23
       },
       "panels": []
     },
@@ -275,7 +452,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 24
       },
       "targets": [
         {
@@ -345,7 +522,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 32
       },
       "targets": [
         {
@@ -409,7 +586,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 32
       },
       "targets": [
         {
@@ -452,7 +629,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 40
       },
       "targets": [
         {
@@ -487,7 +664,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 40
       },
       "targets": [
         {
@@ -519,7 +696,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 48
       },
       "panels": []
     },
@@ -535,7 +712,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 31
+        "y": 49
       },
       "targets": [
         {
@@ -571,7 +748,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 31
+        "y": 49
       },
       "targets": [
         {
@@ -606,7 +783,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 57
       },
       "targets": [
         {
@@ -651,7 +828,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 57
       },
       "targets": [
         {
@@ -683,7 +860,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 65
       },
       "panels": []
     },
@@ -695,12 +872,12 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Memory used by each stream's engine. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB if it gets close.",
+      "description": "Memory used by each engine: a stream's own engine, or a shared engine (named after its path) that every stream on the path plays from. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB if it gets close.",
       "gridPos": {
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 48
+        "y": 66
       },
       "targets": [
         {
@@ -709,6 +886,17 @@
           "instant": false,
           "legendFormat": "{{name}}",
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "C",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -773,7 +961,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 48
+        "y": 66
       },
       "targets": [
         {
@@ -782,6 +970,17 @@
           "instant": false,
           "legendFormat": "{{name}}",
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_bytes{stream=\"\"} / aceswarm_engine_memory_limit_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "B",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -832,7 +1031,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 48
+        "y": 66
       },
       "targets": [
         {
@@ -879,6 +1078,81 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Streams per shared engine",
+      "id": 31,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "With \"One engine per path\" on, streams on the same network path share one engine. While a replaced engine's streams move to its successor, both show.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_shared_engine_streams",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Shared engine restarts per hour",
+      "id": 32,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Why shared engines were replaced: the stream someone watched failed (watched), too many of its streams failed at once (failures), every stream on it was failing (all-failed), or someone pressed Restart (manual).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "sum by (path, reason) (increase(aceswarm_shared_engine_restarts_total[1h]))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{path}}: {{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
       "type": "row",
       "title": "Network paths",
       "id": 17,
@@ -887,7 +1161,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 82
       },
       "panels": []
     },
@@ -903,7 +1177,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 83
       },
       "targets": [
         {
@@ -971,7 +1245,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 63
+        "y": 89
       },
       "targets": [
         {
@@ -1006,7 +1280,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 63
+        "y": 89
       },
       "targets": [
         {
@@ -1041,7 +1315,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 63
+        "y": 89
       },
       "targets": [
         {
@@ -1078,7 +1352,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 97
       },
       "targets": [
         {
@@ -1119,7 +1393,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 97
       },
       "targets": [
         {
@@ -1155,7 +1429,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 105
       },
       "panels": []
     },
@@ -1171,7 +1445,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 106
       },
       "targets": [
         {
@@ -1205,7 +1479,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 90
+        "y": 116
       },
       "targets": [
         {

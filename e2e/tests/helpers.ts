@@ -30,11 +30,16 @@ export async function waitForPlaying(request: APIRequestContext, id: string, tim
   return stream;
 }
 
-/** Removes every stream and WireGuard profile so each spec starts from an empty stack. */
+/**
+ * Removes every stream and WireGuard profile, and turns engine sharing off, so each spec starts
+ * from an empty stack.
+ */
 export async function resetStack(request: APIRequestContext): Promise<void> {
   // WireGuard only keeps the last profile, so it goes first.
   const policy = await request.patch("/api/network", { data: { wireguardOnly: false } });
   expect(policy.ok(), await policy.text()).toBe(true);
+  const settings = await request.patch("/api/settings", { data: { sharedEngines: false } });
+  expect(settings.ok(), await settings.text()).toBe(true);
   const { streams } = await snapshot(request);
   for (const stream of streams) {
     await request.delete(`/api/streams/${stream.id}`);
@@ -86,6 +91,14 @@ export function engineContainers(streamId: string): string[] {
   return docker("ps", "-q", "--filter", `label=aceswarm.stream=${streamId}`, "--format", "{{.Names}}")
     .split("\n")
     .filter((name) => name.length > 0);
+}
+
+/** Names of the shared engine containers (one per network path while engine sharing is on). */
+export function sharedEngineContainers(): string[] {
+  return docker("ps", "-q", "--filter", "label=aceswarm.shared-path", "--format", "{{.Names}}")
+    .split("\n")
+    .filter((name) => name.length > 0)
+    .toSorted((a, b) => a.localeCompare(b, "en"));
 }
 
 /** The gateway's current engine-to-path assignments. */

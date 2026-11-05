@@ -37,6 +37,12 @@ discovery.relabel "containers" {
     source_labels = ["__meta_docker_container_label_aceswarm_stream"]
     target_label  = "stream"
   }
+
+  // Shared engines belong to a network path rather than a stream.
+  rule {
+    source_labels = ["__meta_docker_container_label_aceswarm_shared_path"]
+    target_label  = "path"
+  }
 }
 
 loki.source.docker "containers" {
