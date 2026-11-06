@@ -110,8 +110,14 @@ const orchestrator: Orchestrator = new Orchestrator({
   },
 });
 
-await registerRoutes(service, orchestrator, { uiDir: config.UI_DIR, transcoderUrl: config.TRANSCODER_URL });
-await orchestrator.start();
+// Listening doesn't wait for the orchestrator: after a restart, players get their segments back
+// sooner (the API waits for it, see `ServerOptions.ready`).
+const started = orchestrator.start();
+await registerRoutes(service, orchestrator, {
+  uiDir: config.UI_DIR,
+  transcoderUrl: config.TRANSCODER_URL,
+  ready: started,
+});
 const sampleEngines = (): void => {
   void engineResources.sample().catch((error: unknown) => {
     logger.debug({ err: error }, "could not sample engine resources");
@@ -123,4 +129,5 @@ await runService(service, config.PORT, logger, async () => {
   clearInterval(engineResourceTimer);
   await orchestrator.stop();
 });
+await started;
 logger.info({ port: config.PORT, strategy: config.PATH_STRATEGY }, "controller ready");

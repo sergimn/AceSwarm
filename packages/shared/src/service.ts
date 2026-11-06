@@ -78,7 +78,55 @@ export function isBlockedClient(
   return networks.some((network) => inSubnet(ipv4, network));
 }
 
-/** Starts listening and wires SIGTERM/SIGINT to a graceful shutdown. */
+/**
+ * How long a service may take to shut down before it exits anyway. Docker and Podman kill a
+ * container that hasn't stopped 10 seconds after SIGTERM.
+ */
+export const SHUTDOWN_TIMEOUT_MS = 5000;
+
+export interface ShutdownOptions {
+  timeoutMs?: number;
+  /** Ends the process (tests pass their own). */
+  exit?: (code: number) => void;
+}
+
+/**
+ * Runs the service's own shutdown, then closes its server, then exits. Exits anyway after
+ * `timeoutMs`, so a step that hangs never gets the container killed.
+ */
+export async function shutDown(
+  service: Service,
+  logger: Logger,
+  onShutdown: () => Promise<void>,
+  options: ShutdownOptions = {},
+): Promise<void> {
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const timeoutMs = options.timeoutMs ?? SHUTDOWN_TIMEOUT_MS;
+  let exited = false;
+  const exitOnce = (): void => {
+    if (exited) {
+      return;
+    }
+    exited = true;
+    exit(0);
+  };
+  const timer = setTimeout(() => {
+    logger.warn({ timeoutMs }, "shutdown is taking too long; exiting now");
+    exitOnce();
+  }, timeoutMs);
+  timer.unref();
+  try {
+    await onShutdown();
+    await service.app.close();
+  } catch (error) {
+    logger.error({ err: error }, "error during shutdown");
+  } finally {
+    clearTimeout(timer);
+    exitOnce();
+  }
+}
+
+/** Starts listening and wires SIGTERM/SIGINT to a graceful shutdown (see `shutDown`). */
 export async function runService(
   service: Service,
   port: number,
@@ -92,16 +140,7 @@ export async function runService(
     }
     stopping = true;
     logger.info({ signal }, "shutting down");
-    void (async () => {
-      try {
-        await onShutdown();
-        await service.app.close();
-      } catch (error) {
-        logger.error({ err: error }, "error during shutdown");
-      } finally {
-        process.exit(0);
-      }
-    })();
+    void shutDown(service, logger, onShutdown);
   };
   process.once("SIGTERM", () => {
     stop("SIGTERM");

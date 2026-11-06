@@ -171,18 +171,43 @@ The specs share one stack, so they run one after the other, in file order. Each 
 
 ```mermaid
 flowchart LR
-  I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> S[streams] --> W[wireguard-only]
+  CR[controller-restart] --> I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> S[streams] --> W[wireguard-only]
 ```
 
-| Spec                     | Engines | Checks                                                                                                                                                                                  |
-| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                               |
-| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                           |
-| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal          |
-| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                            |
-| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids |
-| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                       |
-| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                       |
+| Spec                         | Engines | Checks                                                                                                                                                                                                                                          |
+| ---------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `controller-restart.spec.ts` | 1, 2    | a controller restart with the UI open: the stream's engine and ffmpeg run keep going, the controller stops within 5 s and is unreachable for under 4 s, and (with Google Chrome) the video never freezes; on its own engine and on a shared one |
+| `isolation.spec.ts`          | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                                                                       |
+| `navigation.spec.ts`         | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                                                                   |
+| `paths.spec.ts`              | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                                                                  |
+| `recovery.spec.ts`           | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                                                                                    |
+| `shared-engines.spec.ts`     | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids                                                         |
+| `streams.spec.ts`            | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                                                               |
+| `wireguard-only.spec.ts`     | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                                                               |
+
+### Controller restarts
+
+Real streams keep playing while the controller restarts: the new run takes over each stream's engine session and the ffmpeg reading it. The spec prints what it measured (stop time, how long the controller was unreachable, the longest wait for a new segment, the video's longest stall) and adds it to the report's annotations. Chromium builds can't decode H.264, so the video part runs only where Google Chrome is installed, as it is on GitHub's runners.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Playwright
+  participant B as browser (player open)
+  participant C as controller
+  participant TR as transcoder
+  participant E as real engine
+  T->>B: open the stream full screen
+  T->>C: poll the playlist through the controller every 200 ms
+  T->>C: docker compose stop (UI event stream open)
+  C-->>B: ends the event stream, exits within 5 s
+  Note over TR,E: the session and ffmpeg keep going
+  B->>B: plays from its buffer, retries the playlist
+  T->>C: docker compose start
+  C->>E: take over the engine and its saved session
+  C->>TR: the same ffmpeg still reads it: nothing restarts
+  T->>T: one ffmpeg run, short outage, no video stall
+```
 
 ### Content IDs and infohashes
 

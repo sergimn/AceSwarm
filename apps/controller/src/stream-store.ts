@@ -20,6 +20,12 @@ const streamSchema = z.object({
    * restart the controller takes that one over, rather than a newer engine a failed move left.
    */
   ownEngine: z.string().nullable().default(null),
+  /**
+   * The engine session the transcoder reads, on the engine the stream plays from. After a restart
+   * the controller takes it over, together with the ffmpeg still reading it, rather than opening
+   * a new one: a new session needs a new ffmpeg, and players would wait for its first segment.
+   */
+  session: z.object({ playbackUrl: z.string(), statUrl: z.string(), commandUrl: z.string() }).nullable().default(null),
 });
 
 const fileSchema = z.object({
@@ -42,7 +48,9 @@ export interface NewStream {
   name?: string | undefined;
 }
 
-export type StreamPatch = Partial<Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind" | "ownEngine">>;
+export type StreamPatch = Partial<
+  Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind" | "ownEngine" | "session">
+>;
 
 /**
  * Persists the list of streams in `<data>/streams.json`. The file is the source of truth, so
@@ -86,6 +94,7 @@ export class StreamStore {
         createdAt: new Date().toISOString(),
         path: null,
         ownEngine: null,
+        session: null,
       };
       await this.persist([...this.streams, stream]);
       return { ...stream };

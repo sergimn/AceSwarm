@@ -12,7 +12,8 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
-import { sleep, startSessionOfAnyKind } from "./playback.ts";
+import { SavedPlayback } from "./saved-playback.ts";
+import { sleep, startSessionOfAnyKind, waitAtMost } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { StreamEngines, type StreamEnginesDeps } from "./stream-engines.ts";
 import { StreamPaths } from "./stream-paths.ts";
@@ -77,6 +78,8 @@ export class StreamSupervisor {
   /** Its own engines (with their gateway paths) or its place on a shared engine. */
   private readonly engines: StreamEngines;
   private bootstrapped = false;
+  /** The session it plays from, saved for a restarted controller. */
+  private readonly saved: SavedPlayback;
 
   private timer: NodeJS.Timeout | undefined;
   private running = false;
@@ -87,6 +90,7 @@ export class StreamSupervisor {
     this.deps = deps;
     this.engines = new StreamEngines(stream.id, deps);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
+    this.saved = new SavedPlayback(stream.id, deps, this.logger);
     this.paths = new StreamPaths({
       paths: deps.paths,
       pathAllowed: deps.pathAllowed,
@@ -98,10 +102,6 @@ export class StreamSupervisor {
     this.sleep = deps.sleep ?? sleep;
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.stateSince = this.now();
-  }
-
-  get id(): string {
-    return this.stream.id;
   }
 
   get path(): string | null {
@@ -123,10 +123,6 @@ export class StreamSupervisor {
     return this.engines.tried || !this.running;
   }
 
-  get isPlaying(): boolean {
-    return this.state === "playing";
-  }
-
   start(): void {
     if (this.running) {
       return;
@@ -135,13 +131,16 @@ export class StreamSupervisor {
     this.schedule(0);
   }
 
-  /** Stops supervising. With `teardown`, also removes the engine and pipeline. */
-  async stop(teardown: boolean): Promise<void> {
+  /**
+   * Stops supervising. With `teardown`, also removes the engine and pipeline, once the step in
+   * progress is done. Without, it waits at most `waitMs` for that step: opening a session or a
+   * handover can take minutes, and the controller only stops this way to shut down. What the step
+   * leaves, the next run takes over.
+   */
+  async stop(teardown: boolean, waitMs = Infinity): Promise<void> {
     this.running = false;
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer);
-    }
-    await this.current;
+    clearTimeout(this.timer);
+    await waitAtMost(this.current, teardown ? Infinity : waitMs);
     if (teardown) {
       await this.teardown();
     }
@@ -293,7 +292,7 @@ export class StreamSupervisor {
         await this.assignStartPath(this.engine);
       }
       this.setState("starting", "opening stream");
-      await this.startPlayback(this.engine);
+      await this.adoptOrStartPlayback(this.engine);
     } catch (error) {
       this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
       this.setState("error", describeError(error));
@@ -319,7 +318,7 @@ export class StreamSupervisor {
     this.engine = await this.engines.startShared(path, this.engine);
     await this.persistPath(path);
     this.setState("starting", "opening stream");
-    await this.startPlayback(this.engine);
+    await this.adoptOrStartPlayback(this.engine);
   }
 
   /** Moves the stream to the kind of engine the setting asks for (see `StreamEngines.moveToWanted`). */
@@ -493,6 +492,7 @@ export class StreamSupervisor {
         this.engine = moved.engine;
         this.session = moved.session;
         this.pipeline = moved.pipeline;
+        await this.saved.save(moved.session);
         this.attemptStartedAt = this.now();
         await this.persistPath(target);
         if (options.switchingPath) {
@@ -534,6 +534,21 @@ export class StreamSupervisor {
     this.attemptStartedAt = this.now();
     this.stats = undefined;
     this.pipeline = await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl });
+    // Once the transcoder reads it.
+    await this.saved.save(session);
+  }
+
+  /** The first start takes over the playback a previous run left (see `SavedPlayback`), if any. */
+  private async adoptOrStartPlayback(engine: EngineHandle): Promise<void> {
+    const running = await this.saved.takeOver(engine, this.now());
+    if (running === undefined) {
+      await this.startPlayback(engine);
+      return;
+    }
+    this.session = running.session;
+    this.pipeline = running.pipeline;
+    this.stats = running.stats;
+    this.attemptStartedAt = running.startedAt;
   }
 
   /** Starts an engine session and remembers which kind of identifier the engine accepted. */
@@ -587,6 +602,7 @@ export class StreamSupervisor {
 
     await this.deps.ace.stopSession(this.session.commandUrl).catch(() => undefined);
     this.session = undefined;
+    await this.saved.save(undefined);
   }
 
   private async teardown(): Promise<void> {
