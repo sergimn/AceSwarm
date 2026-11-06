@@ -150,7 +150,8 @@ export class SharedEngines {
       instance.users.delete(streamId);
       if (!(error instanceof EngineGoneError)) {
         if (instance.users.size === 0) {
-          instance.idleSince ??= this.now();
+          // The error says nothing about the engine, and the stream comes straight back.
+          instance.idleSince = this.now();
         }
         throw error;
       }

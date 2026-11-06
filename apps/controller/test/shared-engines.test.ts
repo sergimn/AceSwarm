@@ -396,6 +396,20 @@ describe("starting again on the same engine", () => {
     expect(await fake.shared.rejoin(engine, "s1")).toBe(engine);
   });
 
+  test("keeps the engine a lone stream played from when the Docker API fails", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("direct", "s1");
+    await fake.shared.release(engine, "s1", true);
+    // Another stream takes it warm and plays from it for a long time.
+    await fake.shared.acquire("direct", "s2");
+    fake.clock.now += settings.idleTimeoutMs * 10;
+    fake.docker.fail = true;
+    await expect(fake.shared.rejoin(engine, "s2")).rejects.toThrow("socket hang up");
+    await fake.shared.sweepIdle(true);
+    expect(fake.removed).toEqual([]);
+    expect(await fake.shared.rejoin(engine, "s2")).toBe(engine);
+  });
+
   test("an engine the Docker API failed to tell about still goes once nobody uses it", async () => {
     const fake = pool();
     const engine = await fake.shared.acquire("direct", "s1");
