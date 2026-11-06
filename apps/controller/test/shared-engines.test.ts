@@ -130,13 +130,21 @@ test("streams on the same path share one engine, which gets the path at the gate
   ]);
 });
 
-test("removes an engine once its last stream left", async () => {
-  const { shared, removed, unassigned } = pool();
+test("removes a path's engine once no stream used it for the idle timeout", async () => {
+  const { shared, removed, unassigned, clock } = pool();
   const engine = await shared.acquire("direct", "s1");
   await shared.acquire("direct", "s2");
-  await shared.release(engine, "s1");
+  await shared.release(engine, "s1", true);
+  await shared.release(engine, "s2", true);
+  // A stream whose move to it failed comes back to the same engine, which is warm.
+  await shared.sweepIdle(true);
   expect(removed).toEqual([]);
-  await shared.release(engine, "s2");
+  clock.now += settings.idleTimeoutMs / 2;
+  expect(await shared.acquire("direct", "s3")).toBe(engine);
+  // It fails again, and never played from it: that doesn't keep the engine any longer.
+  await shared.release(engine, "s3", false);
+  clock.now += settings.idleTimeoutMs / 2;
+  await shared.sweepIdle(true);
   expect(removed).toEqual([engine.containerId]);
   expect(unassigned).toEqual([engine.ip]);
   expect(shared.assignments()).toEqual([]);
@@ -144,6 +152,36 @@ test("removes an engine once its last stream left", async () => {
   // The next stream on the path starts a new one.
   const next = await shared.acquire("direct", "s3");
   expect(next.containerId).not.toBe(engine.containerId);
+});
+
+test("an engine kept warm stays while a stream that played from it left only lately", async () => {
+  const { shared, removed, clock } = pool();
+  const engine = await shared.acquire("direct", "s1");
+  await shared.acquire("direct", "s2");
+  clock.now += settings.idleTimeoutMs;
+  await shared.release(engine, "s1", true);
+  // The other stream never got video from it and leaves last.
+  await shared.release(engine, "s2", false);
+  await shared.sweepIdle(true);
+  expect(removed).toEqual([]);
+  clock.now += settings.idleTimeoutMs;
+  await shared.sweepIdle(true);
+  expect(removed).toEqual([engine.containerId]);
+});
+
+test("checks that an engine nobody uses still answers before a stream takes it", async () => {
+  const fake = pool();
+  const engine = await fake.shared.acquire("direct", "s1");
+  await fake.shared.release(engine, "s1", true);
+  expect(await fake.shared.acquire("direct", "s1")).toBe(engine);
+  expect(fake.revived).toEqual([engine.containerId]);
+  await fake.shared.release(engine, "s1", false);
+  // It stopped while nobody used it: the stream gets a new one instead of failing on it again.
+  fake.dead.add(engine.containerId);
+  const next = await fake.shared.acquire("direct", "s1");
+  expect(next.containerId).not.toBe(engine.containerId);
+  expect(fake.removed).toEqual([engine.containerId]);
+  expect(fake.shared.isCurrent(next)).toBe(true);
 });
 
 test("takes over the engine a previous run left, and removes older ones", async () => {
@@ -193,12 +231,12 @@ describe("restarting a shared engine", () => {
     expect(shared.isCurrent(replacement)).toBe(true);
     for (const stream of ["s1", "s2"]) {
       await shared.acquire("direct", stream);
-      await shared.release(engine, stream);
+      await shared.release(engine, stream, true);
     }
     expect(removed).toEqual([]);
     expect(shared.assignments()).toHaveLength(2);
     await shared.acquire("direct", "s3");
-    await shared.release(engine, "s3");
+    await shared.release(engine, "s3", true);
     expect(removed).toEqual([engine.containerId]);
     expect(shared.assignments()).toEqual([{ ip: replacement.ip, path: "direct" }]);
     expect(await registry.getSingleMetricAsString("aceswarm_shared_engine_restarts_total")).toContain(
@@ -256,7 +294,7 @@ describe("restarting a shared engine", () => {
     expect(shared.reportFailure(engine, "s1", watched)).toBe(true);
     await settle();
     const replacement = await shared.acquire("direct", "s1");
-    await shared.release(engine, "s1");
+    await shared.release(engine, "s1", true);
     expect(replacement).toBe(created[1]);
     // The watched stream fails again on the new engine: its own recovery goes on.
     expect(shared.reportFailure(replacement, "s1", watched)).toBe(false);
@@ -288,9 +326,12 @@ describe("restarting a shared engine", () => {
     const fake = pool({ holdReplacements: true });
     const engine = await fake.shared.acquire("direct", "s1");
     fake.shared.restart(engine);
-    await fake.shared.release(engine, "s1");
+    await settle();
+    // The old engine dies while its replacement starts.
+    fake.dead.add(engine.containerId);
+    const next = fake.shared.rejoin(engine, "s2");
+    await settle();
     expect(fake.removed).toEqual([engine.containerId]);
-    const next = fake.shared.acquire("direct", "s2");
     fake.gate.resolve(undefined);
     const replacement = await next;
     expect(fake.created.map(({ generation }) => generation)).toEqual([1, 2]);
@@ -323,10 +364,10 @@ describe("starting again on the same engine", () => {
     const { shared, revived, removed } = pool();
     const engine = await shared.acquire("direct", "s1");
     await shared.acquire("direct", "s2");
-    await shared.release(engine, "s1");
+    await shared.release(engine, "s1", true);
     expect(await shared.rejoin(engine, "s1")).toBe(engine);
     expect(revived).toEqual([engine.containerId]);
-    await shared.release(engine, "s2");
+    await shared.release(engine, "s2", true);
     expect(removed).toEqual([]);
   });
 
@@ -354,6 +395,30 @@ describe("starting again on the same engine", () => {
     expect(fake.unassigned).toEqual([]);
     expect(await fake.shared.rejoin(engine, "s1")).toBe(engine);
   });
+
+  test("keeps the engine a lone stream played from when the Docker API fails", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("direct", "s1");
+    await fake.shared.release(engine, "s1", true);
+    // Another stream takes it warm and plays from it for a long time.
+    await fake.shared.acquire("direct", "s2");
+    fake.clock.now += settings.idleTimeoutMs * 10;
+    fake.docker.fail = true;
+    await expect(fake.shared.rejoin(engine, "s2")).rejects.toThrow("socket hang up");
+    await fake.shared.sweepIdle(true);
+    expect(fake.removed).toEqual([]);
+    expect(await fake.shared.rejoin(engine, "s2")).toBe(engine);
+  });
+
+  test("an engine the Docker API failed to tell about still goes once nobody uses it", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("direct", "s1");
+    fake.docker.fail = true;
+    await expect(fake.shared.rejoin(engine, "s1")).rejects.toThrow("socket hang up");
+    fake.clock.now += settings.idleTimeoutMs;
+    await fake.shared.sweepIdle(true);
+    expect(fake.removed).toEqual([engine.containerId]);
+  });
 });
 
 describe("sweeping", () => {
@@ -363,12 +428,12 @@ describe("sweeping", () => {
     shared.restart(engine);
     await settle();
     // The only stream went away before moving.
-    await shared.release(engine, "s1");
+    await shared.release(engine, "s1", true);
     const replacement = created[1]!;
-    await shared.sweep();
+    await shared.sweepIdle(true);
     expect(removed).toEqual([engine.containerId]);
     clock.now += settings.idleTimeoutMs;
-    await shared.sweep();
+    await shared.sweepIdle(true);
     expect(removed).toEqual([engine.containerId, replacement.containerId]);
   });
 
@@ -379,10 +444,10 @@ describe("sweeping", () => {
     await settle();
     // The stream takes long to move (a handover, a path that is down for a while).
     clock.now += settings.idleTimeoutMs * 3;
-    await shared.sweep();
+    await shared.sweepIdle(true);
     expect(removed).toEqual([]);
     await shared.acquire("direct", "s1");
-    await shared.release(engine, "s1");
+    await shared.release(engine, "s1", true);
     expect(removed).toEqual([engine.containerId]);
     expect(shared.isCurrent(created[1]!)).toBe(true);
   });
@@ -391,7 +456,31 @@ describe("sweeping", () => {
     const left = handle(1, "wg:gone", 1);
     const { shared, removed } = pool({ existing: [left] });
     await shared.acquire("direct", "s1");
-    await shared.sweep();
+    await shared.sweepOrphans();
     expect(removed).toEqual([left.containerId]);
+  });
+
+  test("removes an engine nobody uses right away while sharing is off", async () => {
+    const { shared, removed } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    await shared.release(engine, "s1", true);
+    await shared.sweepIdle(false);
+    expect(removed).toEqual([engine.containerId]);
+  });
+
+  test("keeps an engine that a stream takes while the sweep removes another", async () => {
+    const { shared, removed, clock } = pool();
+    const direct = await shared.acquire("direct", "s1");
+    const vpn = await shared.acquire("wg:a", "s2");
+    await shared.release(direct, "s1", true);
+    await shared.release(vpn, "s2", true);
+    clock.now += settings.idleTimeoutMs;
+    const sweeping = shared.sweepIdle(true);
+    // While Docker removes the first engine, a stream takes the second.
+    const taken = shared.acquire("wg:a", "s3");
+    await sweeping;
+    expect(await taken).toBe(vpn);
+    expect(removed).toEqual([direct.containerId]);
+    expect(shared.isCurrent(vpn)).toBe(true);
   });
 });

@@ -10,7 +10,10 @@ export interface SharedEngineSettings {
   failureWindowMs: number;
   /** A replaced engine is removed after this long, even if a stream did not manage to leave it. */
   retireTimeoutMs: number;
-  /** A path's engine that no stream uses any more is removed after this long. */
+  /**
+   * A path's engine that no stream uses any more is removed after this long (at the next sweep),
+   * counted from when the last stream that played from it left.
+   */
   idleTimeoutMs: number;
 }
 
@@ -49,7 +52,10 @@ interface Instance {
   readonly users: Set<string>;
   /** Last failure of each stream on this engine, and whether the stream had played from it. */
   readonly failures: Map<string, { at: number; hadVideo: boolean }>;
-  /** When the last stream left it (or when it became ready without one). */
+  /**
+   * Where the idle timeout starts, once no stream uses it: when the last stream that played from it
+   * left, or the first stream that didn't (or when it became ready without one).
+   */
   idleSince: number | undefined;
   retiring: boolean;
   retireTimer: NodeJS.Timeout | undefined;
@@ -105,12 +111,18 @@ export class SharedEngines {
    * Waits until its API answers. The stream holds it until it calls `release`.
    */
   async acquire(path: string, streamId: string): Promise<EngineHandle> {
+    const current = this.current.get(path);
+    if (current?.handle !== undefined && (current.users.size === 0 || current.checking !== undefined)) {
+      // No stream uses it, so none noticed if it stopped or hangs: check it first.
+      return this.rejoin(current.handle, streamId);
+    }
     // While a replacement starts and the old engine is already gone, streams wait for it.
-    const instance = this.current.get(path) ?? this.pending.get(path) ?? this.start(path, true);
+    const instance = current ?? this.pending.get(path) ?? this.start(path, true);
     instance.users.add(streamId);
-    instance.idleSince = undefined;
     try {
-      return await instance.ready;
+      const ready = await instance.ready;
+      // It may have restarted on a new address since it became ready (see `check`).
+      return instance.handle ?? ready;
     } catch (error) {
       instance.users.delete(streamId);
       throw error;
@@ -127,17 +139,20 @@ export class SharedEngines {
     const instance = this.find(handle);
     if (instance === undefined || this.current.get(instance.path) !== instance) {
       if (instance !== undefined) {
-        await this.release(handle, streamId);
+        await this.release(handle, streamId, false);
       }
       return this.acquire(handle.sharedPath ?? "", streamId);
     }
     instance.users.add(streamId);
-    instance.idleSince = undefined;
     try {
       return await this.check(instance, handle);
     } catch (error) {
       instance.users.delete(streamId);
       if (!(error instanceof EngineGoneError)) {
+        if (instance.users.size === 0) {
+          // The error says nothing about the engine, and the stream comes straight back.
+          instance.idleSince = this.now();
+        }
         throw error;
       }
       if (this.current.get(instance.path) === instance) {
@@ -152,15 +167,24 @@ export class SharedEngines {
     }
   }
 
-  /** The stream left the engine. An engine without streams is removed. */
-  async release(handle: EngineHandle, streamId: string): Promise<void> {
+  /**
+   * The stream left the engine. A replaced engine without streams is removed. A path's engine stays
+   * for the idle timeout (see `sweepIdle`): a stream whose move to it failed comes back to it, and a
+   * new engine would start cold, which can take minutes to find peers. A stream that never `played`
+   * from it doesn't start the timeout again, so an engine that only ever failed goes after it and
+   * the next try gets a new one.
+   */
+  async release(handle: EngineHandle, streamId: string, played: boolean): Promise<void> {
     const instance = this.find(handle);
     if (instance === undefined) {
       return;
     }
     instance.users.delete(streamId);
     instance.failures.delete(streamId);
-    if (instance.users.size === 0 && instance.handle !== undefined) {
+    if (played || instance.idleSince === undefined) {
+      instance.idleSince = this.now();
+    }
+    if (instance.retiring && instance.users.size === 0) {
       await this.remove(instance, "no streams left on it");
     }
   }
@@ -232,19 +256,26 @@ export class SharedEngines {
   }
 
   /**
-   * Removes shared engines nobody uses: a path's engine whose streams all left it a while ago, and
-   * engines left from a previous run that no stream took over. Call it once every stream had the
-   * chance to take its engine (the orchestrator does, after every stream's first start attempt).
+   * Removes the paths' engines that no stream used for the idle timeout. While sharing is off no
+   * stream comes back to them, so they go once no stream uses them.
    */
-  async sweep(): Promise<void> {
-    const now = this.now();
-    const idle = this.current
-      .values()
-      .filter((instance) => this.isIdle(instance, now))
-      .toArray();
-    for (const instance of idle) {
-      await this.remove(instance, "no stream uses it");
+  async sweepIdle(sharing: boolean): Promise<void> {
+    const timeoutMs = sharing ? this.deps.settings.idleTimeoutMs : 0;
+    for (const instance of this.current.values()) {
+      // Checked again for each: a stream may take an engine while the one before it is removed.
+      if (this.current.get(instance.path) === instance && this.isIdle(instance, timeoutMs)) {
+        await this.remove(instance, "no stream uses it");
+      }
     }
+  }
+
+  /**
+   * Removes shared engines left from a previous run that no stream took over. Call it once every
+   * stream had the chance to take its engine (the orchestrator does, after every stream's first
+   * start attempt).
+   */
+  async sweepOrphans(): Promise<void> {
+    const now = this.now();
     if (now - this.lastOrphanSweep < 60_000) {
       return;
     }
@@ -279,14 +310,14 @@ export class SharedEngines {
    * A path's engine nobody used for the idle timeout. While its path still has an engine being
    * replaced, streams are still on their way to it.
    */
-  private isIdle(instance: Instance, now: number): boolean {
+  private isIdle(instance: Instance, timeoutMs: number): boolean {
     const replacing = this.pending.has(instance.path) || [...this.retiring].some(({ path }) => path === instance.path);
     return (
       instance.handle !== undefined &&
       instance.users.size === 0 &&
       !replacing &&
       instance.idleSince !== undefined &&
-      now - instance.idleSince >= this.deps.settings.idleTimeoutMs
+      this.now() - instance.idleSince >= timeoutMs
     );
   }
 

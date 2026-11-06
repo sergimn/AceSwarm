@@ -312,17 +312,21 @@ export class Orchestrator {
   }
 
   /**
-   * Removes shared engines nobody uses, once every stream had the chance to take its engine: a
+   * Removes shared engines nobody uses: the paths' engines that nobody used for a while, and,
+   * once every stream had the chance to take its engine, the ones left from a previous run. A
    * stream still waiting for a path it may use (the gateway restarting, WireGuard only with no
    * tunnel up yet) would take over the engine of its previous run.
    */
   private async sweepSharedEngines(): Promise<void> {
-    const tried = this.supervisors.values().every((supervisor) => supervisor.triedEngine);
-    if (!this.allSettled() || !tried) {
+    if (!this.launched) {
       return;
     }
     try {
-      await this.deps.shared.sweep();
+      await this.deps.shared.sweepIdle(this.deps.settingsStore.get().sharedEngines);
+      const tried = this.supervisors.values().every((supervisor) => supervisor.triedEngine);
+      if (this.allSettled() && tried) {
+        await this.deps.shared.sweepOrphans();
+      }
     } catch (error) {
       this.logger.debug({ err: describeError(error) }, "could not look for unused shared engines");
     }
