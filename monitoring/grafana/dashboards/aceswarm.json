@@ -872,7 +872,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Memory used by each engine: a stream's own engine, or a shared engine (named after its path) that every stream on the path plays from. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB if it gets close.",
+      "description": "Memory used by each engine: a stream's own engine, or a shared engine (named after its path) that every stream on the path plays from. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB or lower ENGINE_MEMORY_CACHE_MB if it gets close.",
       "gridPos": {
         "h": 8,
         "w": 10,

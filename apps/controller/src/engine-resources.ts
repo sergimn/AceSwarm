@@ -81,7 +81,7 @@ export class EngineResourceMonitor {
     }
     this.logger.warn(
       { stream, engine, limitMb: this.limitMb(engine) },
-      "engine was killed for running out of memory; raise ENGINE_MEMORY_MB",
+      "engine was killed for running out of memory; raise ENGINE_MEMORY_MB or lower ENGINE_MEMORY_CACHE_MB",
     );
     this.options.onOomKill(stream);
   }

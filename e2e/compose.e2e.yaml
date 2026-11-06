@@ -7,7 +7,6 @@ services:
     image: aceswarm-controller:e2e
     environment:
       ENGINE_IMAGE: aceswarm-engine:e2e
-      ENGINE_MEMORY_MB: "1536"
       ENGINE_READY_TIMEOUT_SECONDS: "90"
       # Real engines need a few seconds to open a session and buffer.
       STARTUP_GRACE_SECONDS: "45"
