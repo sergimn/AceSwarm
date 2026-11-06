@@ -2,7 +2,7 @@ import { envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
 /**
- * What an engine uses besides its memory cache, as the dashboards count it: 147 to 162 MB in
+ * What an engine uses besides its memory cache, as the dashboards count it: 146 to 162 MB in
  * testing, rounded up so that an engine at the minimum limit stays clear of the memory alert.
  */
 export const ENGINE_MEMORY_OVERHEAD_MB = 200;
