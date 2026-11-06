@@ -44,9 +44,19 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 
 1. **Start or adopt the engine.** It adopts an engine left from a previous run, or creates `<stack>-engine-<stream>-<generation>`. `streams.json` remembers which of its engines the stream played from, so after a restart the controller adopts that one, not an engine a failed move kept (see [kept engines](#kept-engines)). Without that record, it adopts the newest.
 2. **Pick a network path** and tell the gateway.
-3. **Open a session.** It calls `/ace/getstream`. A pasted value is a content ID or an infohash, and both are 40 hex characters. If the input doesn't say which (a magnet link does), the controller tries one kind, then the other, and saves the kind that worked.
-4. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
-5. **Check health every tick.** A stream is healthy only while new video frames arrive.
+3. **Take over the playback** a previous run left, if there is one (see [controller restarts](#controller-restarts)). Otherwise it goes on with the next two steps.
+4. **Open a session.** It calls `/ace/getstream`. A pasted value is a content ID or an infohash, and both are 40 hex characters. If the input doesn't say which (a magnet link does), the controller tries one kind, then the other, and saves the kind that worked.
+5. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
+6. **Check health every tick.** A stream is healthy only while new video frames arrive.
+
+### Controller restarts
+
+Engines, the transcoder and its ffmpeg runs keep going while the controller restarts (after an update, say), so streams don't stop:
+
+- **The playback is taken over.** `streams.json` also keeps the engine session the transcoder reads. A restarted controller takes over the stream's engine, then that session, as long as the engine still knows it and the transcoder's ffmpeg still reads it. Nothing restarts, so there is no new ffmpeg run and no discontinuity. Otherwise (the engine or the transcoder restarted too) the stream starts as usual, and a saved session that still answers is stopped.
+- **Shutting down is quick.** On SIGTERM, the controller waits at most 2 seconds for steps in progress (opening a session or a handover can take minutes) and ends the UI's event streams, which closing the server would otherwise wait for. Every service exits after 5 seconds whatever happens, before Docker or Podman kill it at 10.
+- **The proxy comes back first.** The controller serves the HLS proxy as soon as it listens; the API waits until the stream list is loaded.
+- **Players ride out the gap.** The controller is unreachable for a moment, and refused connections have no HTTP status, which hls.js doesn't retry by default. The UI's players retry them for about 10 seconds and play on from their buffer meanwhile.
 
 ### Recovery ladder
 

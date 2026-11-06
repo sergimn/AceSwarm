@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { createLogger } from "../src/logger.ts";
-import { createService, isBlockedClient } from "../src/service.ts";
+import { createService, isBlockedClient, shutDown } from "../src/service.ts";
 
 const engines = ["172.31.250.0/24"];
 
@@ -36,4 +36,35 @@ it("refuses every request from a blocked network", async () => {
   });
   expect(fromBackend.statusCode).toBe(200);
   await service.app.close();
+});
+
+it("exits after its shutdown timeout when a shutdown step hangs", async () => {
+  const service = createService({ name: "test", logger: createLogger("test", "silent") });
+  const exits: number[] = [];
+  const started = Date.now();
+  await new Promise<void>((resolve) => {
+    void shutDown(service, createLogger("test", "silent"), () => new Promise(() => undefined), {
+      timeoutMs: 50,
+      exit: (code) => {
+        exits.push(code);
+        resolve();
+      },
+    });
+  });
+  expect(exits).toEqual([0]);
+  expect(Date.now() - started).toBeLessThan(1000);
+  await service.app.close();
+});
+
+it("exits once, right after a shutdown that finishes", async () => {
+  const service = createService({ name: "test", logger: createLogger("test", "silent") });
+  const exits: number[] = [];
+  await shutDown(service, createLogger("test", "silent"), () => Promise.resolve(), {
+    timeoutMs: 20,
+    exit: (code) => {
+      exits.push(code);
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(exits).toEqual([0]);
 });
