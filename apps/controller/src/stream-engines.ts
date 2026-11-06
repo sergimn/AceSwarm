@@ -3,15 +3,21 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
-import type { EngineHandle, EngineManager, OnEngineAddress } from "./engines.ts";
+import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import { exitedPipeline, waitForHandover, type HandoverTiming } from "./playback.ts";
 import { nextRecovery, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { FailureReport, SharedEngines } from "./shared-engines.ts";
 import type { MoveSlots } from "./stream-paths.ts";
+import type { StreamStore } from "./stream-store.ts";
 
 export interface StreamEnginesDeps {
   engines: EngineManager;
+  /** Remembers the stream's own engine (see `startOwn`). */
+  store: StreamStore;
+  logger: Logger;
+  /** A spare waits through two of the recovery ladder's longest delays (see `move`). */
+  settings: { recoveryMaxDelayMs: number };
   ace: AcestreamClient;
   transcoder: TranscoderClient;
   netgw: NetgwClient;
@@ -19,6 +25,31 @@ export interface StreamEnginesDeps {
   shared?: SharedEngines | undefined;
   /** Limits how many streams start an engine of their own at once (shared by every stream). */
   policyMoves?: MoveSlots | undefined;
+  /**
+   * Limits how many spares there are at once (shared by every stream): each is an engine more. A
+   * failed move without a free slot removes its engine. No limit without it.
+   */
+  spareSlots?: MoveSlots | undefined;
+  now?: (() => number) | undefined;
+}
+
+/** Moves to the same spare that may fail before it goes (see `StreamEngines.move`). */
+const SPARE_MAX_FAILURES = 3;
+
+/**
+ * A new engine of the stream's own that a move to `path` started, which answered but didn't
+ * deliver video in time. The next move to that path tries it again instead of starting a new
+ * engine, which would start from no peers. The session the move opened stays open meanwhile, so
+ * the engine keeps its peers.
+ */
+interface Spare {
+  engine: EngineHandle;
+  path: string;
+  session: EngineSession | undefined;
+  /** Moves to it that failed. */
+  failures: number;
+  /** When the last one failed. */
+  failedAt: number;
 }
 
 /** How a stream moves between kinds of engine; see `moveToWanted`. */
@@ -66,6 +97,10 @@ export class StreamEngines {
   readonly gateway: EnginePaths;
   private readonly streamId: string;
   private readonly deps: StreamEnginesDeps;
+  private readonly logger: Logger;
+  private readonly now: () => number;
+  /** A new engine of its own whose move failed, kept for the next try. */
+  private spare: Spare | undefined;
   /** Failed moves to the kind of engine the setting asks for, and when to try again. */
   private wanted: RecoveryState = { failures: 0, lastActionAt: undefined };
   /** The engine the stream last played from (container id). */
@@ -75,39 +110,52 @@ export class StreamEngines {
   constructor(streamId: string, deps: StreamEnginesDeps) {
     this.streamId = streamId;
     this.deps = deps;
+    this.logger = deps.logger.child({ stream: streamId });
+    this.now = deps.now ?? Date.now;
     this.gateway = new EnginePaths(deps.netgw);
   }
 
   /**
-   * Adopts the stream's own engine left from a previous run (removing older ones), or creates one,
-   * leaving `current` if it is a shared engine (sharing was turned off while the stream had no
-   * session). `onAddress` gives the starting engine its path; its other addresses' paths go.
+   * Takes over the stream's own engine, or creates one, leaving `current` if it is a shared engine
+   * (sharing was turned off while the stream had no session). The engine taken over is `current`,
+   * or else the one the stream store remembers (the one it played from before the controller
+   * restarted), or else the newest; its other engines go, a spare included. `onAddress` gives the
+   * starting engine its path; its other addresses' paths go.
    */
   async startOwn(current: EngineHandle | undefined, onAddress: OnEngineAddress): Promise<EngineHandle> {
     this.startTried = true;
+    const spare = this.clearSpare();
     if (current !== undefined && current.sharedPath !== null) {
       await this.release(current);
     }
-    const [newest, ...older] = await this.deps.engines.find(this.streamId);
-    for (const engine of older) {
-      await this.deps.engines.remove(engine);
+    const found = await this.deps.engines.find(this.streamId);
+    const wanted = current?.sharedPath === null ? current.name : this.deps.store.get(this.streamId)?.ownEngine;
+    const kept = found.find((engine) => engine.name === wanted) ?? found[0];
+    for (const engine of found) {
+      if (engine !== kept) {
+        await this.deps.engines.remove(engine);
+      }
+    }
+    if (spare?.session !== undefined && spare.engine.containerId === kept?.containerId) {
+      // The stream starts a session of its own on it.
+      await this.deps.ace.stopSession(spare.session.commandUrl).catch(() => undefined);
     }
     const assign = async (starting: EngineHandle): Promise<void> => {
       await this.gateway.keepOnly(starting.ip);
       await onAddress(starting);
     };
-    if (newest !== undefined) {
-      return this.deps.engines.revive(newest, assign);
+    if (kept !== undefined) {
+      return this.remember(await this.deps.engines.revive(kept, assign));
     }
     const engine = await this.deps.engines.create(this.streamId, 1, assign);
     this.deps.metrics.engineStarts.inc({ stream: this.streamId });
-    return engine;
+    return this.remember(engine);
   }
 
-  /** Restarts the stream's own engine in place. */
+  /** Restarts the stream's own engine in place. A spare keeps its path. */
   async restartOwn(engine: EngineHandle, onAddress: OnEngineAddress): Promise<EngineHandle> {
     return this.deps.engines.restart(engine, async (starting) => {
-      await this.gateway.keepOnly(starting.ip);
+      await this.gateway.keepOnly(starting.ip, ...(this.spare === undefined ? [] : [this.spare.engine.ip]));
       await onAddress(starting);
     });
   }
@@ -127,9 +175,10 @@ export class StreamEngines {
     if (current !== undefined) {
       await this.release(current);
     }
+    this.clearSpare();
     await this.gateway.dropAll();
     await this.deps.engines.removeAllFor(this.streamId);
-    return shared.acquire(path, this.streamId);
+    return this.remember(await shared.acquire(path, this.streamId));
   }
 
   /**
@@ -164,9 +213,23 @@ export class StreamEngines {
     };
   }
 
-  /** The stream receives video from the engine. */
-  played(engine: EngineHandle): void {
+  /**
+   * The stream receives video from the engine. A spare goes, unless the stream still wants to move
+   * to an engine of its own: it plays from a shared engine while sharing is off.
+   */
+  async played(engine: EngineHandle, sharing: boolean): Promise<void> {
     this.playedOn = engine.containerId;
+    if (engine.sharedPath === null || sharing) {
+      await this.dropSpare("the stream plays again without it");
+    }
+  }
+
+  /** Removes the spare once no move tried it again for the spare timeout. */
+  async expireSpare(): Promise<void> {
+    // A path move during recovery comes back after an engine restart step in between.
+    if (this.spare !== undefined && this.now() - this.spare.failedAt >= 2 * this.deps.settings.recoveryMaxDelayMs) {
+      await this.dropSpare("no move tried it again in time");
+    }
   }
 
   /** It tried to start an engine, or to take over the one it had. */
@@ -207,14 +270,25 @@ export class StreamEngines {
     return true;
   }
 
-  /** Moves the stream from one engine to another, make-before-break (see `EngineMove`). */
+  /**
+   * Moves the stream from one engine to another, make-before-break (see `EngineMove`).
+   *
+   * A move to a new engine of the stream's own that fails once the engine answers keeps that engine
+   * as a spare, with the session the move opened: on a slow swarm a new engine can take minutes to
+   * find its peers, so the next move to the same path tries it again rather than a new engine that
+   * starts from none. It goes after `maxFailures` failed moves, once it stops answering, or when the
+   * stream no longer needs it (see `played`, `expireSpare`).
+   */
   async move(move: EngineMove): Promise<void> {
-    // The engine being started, once it has an address, so a failed move can remove it.
+    // The engine being started, once it has an address, so a failed move can let go of it.
     const starting: { engine: EngineHandle | undefined } = { engine: undefined };
+    // The same engine, once it answers.
+    let ready: EngineHandle | undefined;
     let opened: EngineSession | undefined;
     try {
       const engine = await this.forMove(move.from, move.target, move.shared, starting);
-      const session = await move.openSession(engine.baseUrl);
+      ready = engine;
+      const session = (await this.spareSession(engine)) ?? (await move.openSession(engine.baseUrl));
       opened = session;
       const source = { source: session.playbackUrl };
       let pipeline: PipelineStatus | undefined;
@@ -226,7 +300,11 @@ export class StreamEngines {
       }
       // The move is done: a later failure must not remove the engine the stream now plays from.
       starting.engine = undefined;
+      if (this.spare?.engine.containerId === engine.containerId) {
+        this.clearSpare();
+      }
       await move.commit({ engine, session, pipeline });
+      await this.remember(engine);
       if (move.session !== undefined) {
         await this.deps.ace.stopSession(move.session.commandUrl).catch(() => undefined);
       }
@@ -235,29 +313,152 @@ export class StreamEngines {
         await this.release(move.from);
       }
     } catch (error) {
-      await this.abandon(starting.engine, opened, move.from);
+      if (starting.engine !== undefined) {
+        await this.abandon(ready ?? starting.engine, ready !== undefined, opened, move);
+      }
       throw error;
     }
   }
 
   /**
    * A move to `engine` failed before the stream played from it: lets go of it. A shared engine
-   * stays for other streams, so the session nobody reads stops.
+   * stays for other streams, so the session nobody reads stops. A new engine of the stream's own
+   * that `answered` stays as the spare, until too many moves to it failed.
    */
   private async abandon(
-    engine: EngineHandle | undefined,
+    engine: EngineHandle,
+    answered: boolean,
     session: EngineSession | undefined,
-    from: EngineHandle,
+    move: EngineMove,
   ): Promise<void> {
-    if (engine === undefined) {
+    if (engine.containerId === move.from.containerId) {
+      // A move to the shared engine the stream is on (it was current again): it stays there.
+      if (session !== undefined) {
+        await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
+      }
       return;
     }
-    if (session !== undefined && engine.sharedPath !== null) {
-      await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
-    }
-    if (engine.containerId !== from.containerId) {
+    if (engine.sharedPath !== null) {
+      if (session !== undefined) {
+        await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
+      }
       await this.release(engine).catch(() => undefined);
+      return;
     }
+    const spare = this.spare?.engine.containerId === engine.containerId ? this.spare : undefined;
+    const failures = (spare?.failures ?? 0) + 1;
+    // A new spare needs a slot; the spare being tried again has one.
+    if (
+      answered &&
+      failures < SPARE_MAX_FAILURES &&
+      (spare !== undefined || this.deps.spareSlots?.tryTake() !== false)
+    ) {
+      this.spare = { engine, path: move.target, session, failures, failedAt: this.now() };
+      this.logger.info({ engine: engine.name, failures }, "keeping the new engine to try again on it");
+      return;
+    }
+    if (spare !== undefined) {
+      this.clearSpare();
+    }
+    if (answered) {
+      this.logger.info({ engine: engine.name, failures }, "removing the new engine after its move failed");
+    }
+    await this.release(engine).catch(() => undefined);
+  }
+
+  /** The spare's session, for a move to the spare, while the engine still knows it. */
+  private async spareSession(engine: EngineHandle): Promise<EngineSession | undefined> {
+    const spare = this.spare;
+    if (spare?.engine.containerId !== engine.containerId || spare.session === undefined) {
+      return undefined;
+    }
+    const session = spare.session;
+    spare.session = undefined;
+    try {
+      await this.deps.ace.stats(session.statUrl);
+      return session;
+    } catch {
+      await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
+      return undefined;
+    }
+  }
+
+  /**
+   * The spare, for a move to `path`, once it answers. A spare on another path goes, and so does
+   * one that is gone or doesn't answer; other errors (the Docker API failing for a moment) leave it
+   * for the next try.
+   */
+  private async takeSpare(
+    path: string,
+    starting: { engine: EngineHandle | undefined },
+  ): Promise<EngineHandle | undefined> {
+    const spare = this.spare;
+    if (spare === undefined) {
+      return undefined;
+    }
+    if (spare.path !== path) {
+      await this.dropSpare(`the stream moves to ${path} instead`);
+      return undefined;
+    }
+    try {
+      const engine = await this.deps.engines.revive(spare.engine, async (handle) => {
+        if (handle.ip !== spare.engine.ip) {
+          // It restarted on a new address: its old one may go to another engine.
+          await this.gateway.drop(spare.engine.ip);
+          spare.engine = handle;
+        }
+        starting.engine = handle;
+        await this.gateway.assign(handle.ip, path);
+      });
+      spare.engine = engine;
+      this.logger.info({ engine: engine.name, failures: spare.failures }, "trying the kept engine again");
+      return engine;
+    } catch (error) {
+      starting.engine = undefined;
+      if (!(error instanceof EngineGoneError)) {
+        throw error;
+      }
+      await this.dropSpare(`it stopped answering: ${error.message}`);
+      return undefined;
+    }
+  }
+
+  /** Forgets the spare, freeing its slot, and returns it; its engine is left alone. */
+  private clearSpare(): Spare | undefined {
+    const spare = this.spare;
+    if (spare !== undefined) {
+      this.spare = undefined;
+      this.deps.spareSlots?.release();
+    }
+    return spare;
+  }
+
+  /** Removes the spare, if there is one. */
+  private async dropSpare(why: string): Promise<void> {
+    const spare = this.clearSpare();
+    if (spare === undefined) {
+      return;
+    }
+    this.logger.info({ engine: spare.engine.name, reason: why }, "removing the kept engine");
+    await this.gateway.drop(spare.engine.ip);
+    await this.deps.engines.remove(spare.engine).catch((error: unknown) => {
+      this.logger.warn({ err: error, engine: spare.engine.name }, "could not remove the kept engine");
+    });
+  }
+
+  /**
+   * Saves the name of the stream's own engine it plays from (none on a shared engine) in the stream
+   * store, so that a restarted controller takes over that one rather than a spare. Returns the engine.
+   * Failing to save only matters after a restart, so it doesn't fail the start or move.
+   */
+  private async remember(engine: EngineHandle): Promise<EngineHandle> {
+    const ownEngine = engine.sharedPath === null ? engine.name : null;
+    if (this.deps.store.get(this.streamId)?.ownEngine !== ownEngine) {
+      await this.deps.store.update(this.streamId, { ownEngine }).catch((error: unknown) => {
+        this.logger.warn({ err: error }, "could not remember the stream's engine");
+      });
+    }
+    return engine;
   }
 
   /** Whether the engine is the one new sessions on its shared path go to (false for the stream's own). */
@@ -277,9 +478,14 @@ export class StreamEngines {
     starting: { engine: EngineHandle | undefined },
   ): Promise<EngineHandle> {
     if (shared) {
+      await this.dropSpare("the stream moves to the shared engine");
       const handle = await this.required().acquire(path, this.streamId);
       starting.engine = handle;
       return handle;
+    }
+    const spare = await this.takeSpare(path, starting);
+    if (spare !== undefined) {
+      return spare;
     }
     // A stream coming from a shared engine has no engine of its own: it starts at generation 1.
     const generation = current.sharedPath === null ? current.generation + 1 : 1;
@@ -310,6 +516,7 @@ export class StreamEngines {
     if (engine !== undefined && engine.sharedPath !== null) {
       await this.deps.shared?.release(engine, this.streamId, this.playedOn === engine.containerId);
     }
+    this.clearSpare();
     await this.gateway.dropAll();
     await this.deps.engines.removeAllFor(this.streamId);
   }

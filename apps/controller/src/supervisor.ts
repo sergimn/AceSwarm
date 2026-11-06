@@ -9,18 +9,16 @@ import type {
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
-import type { NetgwClient, TranscoderClient } from "./clients.ts";
-import type { EngineHandle, EngineManager } from "./engines.ts";
+import type { EngineSession, EngineStats } from "./acestream.ts";
+import type { EngineHandle } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
-import type { ControllerMetrics } from "./metrics.ts";
 import { sleep, startSessionOfAnyKind } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { SharedEngines } from "./shared-engines.ts";
-import { StreamEngines } from "./stream-engines.ts";
+import { StreamEngines, type StreamEnginesDeps } from "./stream-engines.ts";
 import { StreamPaths, type MoveSlots } from "./stream-paths.ts";
 import { streamView } from "./stream-view.ts";
-import type { StreamConfig, StreamStore } from "./stream-store.ts";
+import type { StreamConfig } from "./stream-store.ts";
 
 export interface SupervisorSettings {
   tickMs: number;
@@ -33,14 +31,8 @@ export interface SupervisorSettings {
   pathMinDwellMs: number;
 }
 
-export interface SupervisorDeps {
-  engines: EngineManager;
-  ace: AcestreamClient;
-  transcoder: TranscoderClient;
-  netgw: NetgwClient;
-  store: StreamStore;
-  metrics: ControllerMetrics;
-  logger: Logger;
+/** What a supervisor needs: its stream's engines' needs (see `StreamEngines`), and these. */
+export interface SupervisorDeps extends StreamEnginesDeps {
   settings: SupervisorSettings;
   /** Latest network path status from the gateway (empty when it is unreachable). */
   paths: () => PathStatus[];
@@ -56,7 +48,6 @@ export interface SupervisorDeps {
   sharedEngines?: () => boolean;
   /** Number of players showing this stream full screen. */
   viewers?: () => number;
-  now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -182,6 +173,7 @@ export class StreamSupervisor {
 
   /** Runs a single supervision step. Public for tests; the timer calls it in production. */
   async tick(): Promise<void> {
+    await this.engines.expireSpare();
     if (this.engine === undefined || this.session === undefined) {
       await this.bootstrap();
       return;
@@ -225,7 +217,7 @@ export class StreamSupervisor {
       this.paths.remember(this.stream.path, health.healthy);
     }
     if (health.healthy) {
-      this.engines.played(this.engine);
+      await this.engines.played(this.engine, this.sharing);
       if (this.recovery.failures > 0) {
         this.logger.info({ failures: this.recovery.failures }, "stream recovered");
       }

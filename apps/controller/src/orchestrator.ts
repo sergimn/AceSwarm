@@ -69,6 +69,8 @@ export class Orchestrator {
    * would briefly need twice the engines' memory.
    */
   private readonly policyMoves = new MoveSlots(2);
+  /** Engines kept after a failed move to try again on them; each is an engine more, so only a few. */
+  private readonly spareSlots = new MoveSlots(2);
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -378,6 +380,7 @@ export class Orchestrator {
       paths: () => this.paths,
       pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
       policyMoves: this.policyMoves,
+      spareSlots: this.spareSlots,
       pathLoad: () => this.pathLoad(),
       shared: this.deps.shared,
       sharedEngines: () => this.deps.settingsStore.get().sharedEngines,

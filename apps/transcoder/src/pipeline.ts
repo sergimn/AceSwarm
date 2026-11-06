@@ -40,6 +40,8 @@ class Generation {
   readonly directory: string;
   readonly mode: FullMode;
   readonly startedAt: number;
+  /** How long ffmpeg waits for data from the source before it gives up. */
+  readonly inputTimeoutSeconds: number;
   process: ChildProcess | undefined;
   state: PipelineState = "starting";
   frames = 0;
@@ -50,12 +52,20 @@ class Generation {
   error: string | null = null;
   readonly stderrTail: string[] = [];
 
-  constructor(number: number, source: string, directory: string, mode: FullMode, startedAt: number) {
+  constructor(
+    number: number,
+    source: string,
+    directory: string,
+    mode: FullMode,
+    startedAt: number,
+    inputTimeoutSeconds: number,
+  ) {
     this.number = number;
     this.source = source;
     this.directory = directory;
     this.mode = mode;
     this.startedAt = startedAt;
+    this.inputTimeoutSeconds = inputTimeoutSeconds;
   }
 }
 
@@ -106,14 +116,19 @@ export class Pipeline {
     }, 1000);
   }
 
-  /** Points the pipeline at a (new) source. */
+  /**
+   * Points the pipeline at a (new) source. With `handover`, ffmpeg waits for the source's first data
+   * as long as the controller waits for the handover, even when there is no picture left to keep:
+   * a new engine on a slow swarm can take longer than the usual input timeout to deliver.
+   */
   async start(source: string, handover: boolean): Promise<void> {
+    const inputTimeoutSeconds = handover ? this.handoverInputTimeoutSeconds() : this.settings.plan.inputTimeoutSeconds;
     const canHandOver = handover && this.active !== undefined && this.active.state !== "exited";
     if (canHandOver) {
       if (this.pending !== undefined) {
         this.retire(this.pending);
       }
-      this.pending = await this.launch(source, "handover");
+      this.pending = await this.launch(source, "handover", inputTimeoutSeconds);
       return;
     }
     if (this.pending !== undefined) {
@@ -121,7 +136,7 @@ export class Pipeline {
       this.pending = undefined;
     }
     const previous = this.active;
-    this.active = await this.launch(source, previous === undefined ? "start" : "restart");
+    this.active = await this.launch(source, previous === undefined ? "start" : "restart", inputTimeoutSeconds);
     if (previous !== undefined) {
       this.retire(previous);
     }
@@ -241,7 +256,12 @@ export class Pipeline {
     return parseMediaPlaylist(text).segments.length > 0;
   }
 
-  private async launch(source: string, reason: string): Promise<Generation> {
+  /** The input timeout of a handover: the usual one, or the handover timeout when that is longer. */
+  private handoverInputTimeoutSeconds(): number {
+    return Math.max(this.settings.plan.inputTimeoutSeconds, Math.ceil(this.settings.handoverTimeoutMs / 1000));
+  }
+
+  private async launch(source: string, reason: string, inputTimeoutSeconds: number): Promise<Generation> {
     const number = this.nextNumber;
     this.nextNumber += 1;
     const directory = join(this.root, `g${String(number)}`);
@@ -253,9 +273,16 @@ export class Pipeline {
       directory,
       this.forceTranscode ? "transcode" : "copy",
       this.now(),
+      inputTimeoutSeconds,
     );
-    const args = buildFfmpegArgs({ ...this.settings.plan, source, directory, fullMode: generation.mode });
-    this.logger.info({ generation: number, mode: generation.mode, reason }, "starting ffmpeg");
+    const args = buildFfmpegArgs({
+      ...this.settings.plan,
+      source,
+      directory,
+      fullMode: generation.mode,
+      inputTimeoutSeconds,
+    });
+    this.logger.info({ generation: number, mode: generation.mode, reason, inputTimeoutSeconds }, "starting ffmpeg");
     this.events.generationStarted(this.id, reason);
 
     const child = this.spawner(this.settings.ffmpegPath, args);
@@ -316,10 +343,10 @@ export class Pipeline {
   private async relaunchAsTranscode(generation: Generation): Promise<void> {
     if (generation === this.active) {
       this.retire(generation);
-      this.active = await this.launch(generation.source, "transcode");
+      this.active = await this.launch(generation.source, "transcode", generation.inputTimeoutSeconds);
     } else if (generation === this.pending) {
       this.retire(generation);
-      this.pending = await this.launch(generation.source, "transcode");
+      this.pending = await this.launch(generation.source, "transcode", generation.inputTimeoutSeconds);
     }
   }
 
