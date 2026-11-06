@@ -28,7 +28,7 @@ COPY --from=busybox /bin/busybox /usr/local/lib/aceswarm/busybox
 COPY --chmod=0755 engine/entrypoint.sh /usr/local/lib/aceswarm/entrypoint.sh
 ENV ACESWARM_ENGINE_USER=1000:1000 \
     ACESWARM_LIVE_CACHE_BYTES=104857600 \
-    ACESWARM_MEMORY_CACHE_BYTES=536870912 \
+    ACESWARM_MEMORY_CACHE_BYTES=134217728 \
     ACESWARM_ENGINE_FLAGS=""
 EXPOSE 6878
 ENTRYPOINT ["/usr/local/lib/aceswarm/entrypoint.sh"]

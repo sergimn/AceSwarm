@@ -57,12 +57,12 @@ const schema = z
     ENGINE_IP_RANGE: z.cidrv4().default("172.31.250.128/25"),
     ENGINE_HTTP_PORT: envInt(6878),
     /** Memory limit of each engine container; 0 sets none. */
-    ENGINE_MEMORY_MB: envInt(1024),
+    ENGINE_MEMORY_MB: envInt(512),
     /**
      * How much stream data an engine keeps in memory (the engine's `--memory-cache-limit`). Without a
      * cap an engine grows for over an hour, to about 1.7 GB in testing. 0 leaves it to the engine.
      */
-    ENGINE_MEMORY_CACHE_MB: z.coerce.number().int().min(0).max(65_536).default(512),
+    ENGINE_MEMORY_CACHE_MB: z.coerce.number().int().min(0).max(65_536).default(128),
     /** How often engine memory is sampled for the metrics. */
     ENGINE_STATS_SECONDS: envInt(15),
     ENGINE_EXTRA_FLAGS: z.string().default(""),
