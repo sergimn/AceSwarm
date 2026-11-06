@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ENGINE_MEMORY_OVERHEAD_MB, loadConfig, minEngineMemoryMb } from "../src/config.ts";
+import { ENGINE_MEMORY_OVERHEAD_MB, loadConfig, maxEngineMemoryCacheMb, minEngineMemoryMb } from "../src/config.ts";
 import { engineEnvironment } from "../src/engines.ts";
 
 describe("engine memory settings", () => {
@@ -20,11 +20,24 @@ describe("engine memory settings", () => {
 
   it("refuses a limit too small for the memory cache, and says what to set", () => {
     expect(() => loadConfig({ ENGINE_MEMORY_MB: "768", ENGINE_MEMORY_CACHE_MB: "768" })).toThrow(
-      /ENGINE_MEMORY_MB=768 is too small for ENGINE_MEMORY_CACHE_MB=768\. .*256 MB.*up to 200 MB.*at 85% of the limit.*at least 1139.*\n.*at ENGINE_MEMORY_MB/s,
+      /ENGINE_MEMORY_MB=768 is too small for ENGINE_MEMORY_CACHE_MB=768\. .*256 MB.*up to 200 MB.*at 85% of the limit.*at least 1139, or lower ENGINE_MEMORY_CACHE_MB to at most 452\n.*at ENGINE_MEMORY_MB/s,
     );
+    // A limit too small for any cache only asks for a larger limit.
+    expect(() => loadConfig({ ENGINE_MEMORY_MB: "200", ENGINE_MEMORY_CACHE_MB: "1" })).toThrow(/at least 257\n/);
     expect(() => loadConfig({ ENGINE_MEMORY_MB: "1138", ENGINE_MEMORY_CACHE_MB: "768" })).toThrow();
     expect(loadConfig({ ENGINE_MEMORY_MB: "1139", ENGINE_MEMORY_CACHE_MB: "768" }).ENGINE_MEMORY_CACHE_MB).toBe(768);
     expect(loadConfig({ ENGINE_MEMORY_MB: "768", ENGINE_MEMORY_CACHE_MB: "256" }).ENGINE_MEMORY_MB).toBe(768);
+  });
+
+  it("names the largest cache that fits a limit, consistently with the minimum limit", () => {
+    expect(maxEngineMemoryCacheMb(768)).toBe(452);
+    expect(maxEngineMemoryCacheMb(1024)).toBe(670);
+    expect(maxEngineMemoryCacheMb(1440)).toBe(1024);
+    for (let limitMb = 257; limitMb <= 4096; limitMb += 1) {
+      const cacheMb = maxEngineMemoryCacheMb(limitMb);
+      expect(minEngineMemoryMb(cacheMb), String(limitMb)).toBeLessThanOrEqual(limitMb);
+      expect(minEngineMemoryMb(cacheMb + 1), String(limitMb)).toBeGreaterThan(limitMb);
+    }
   });
 
   it("accepts any limit when the cache is left to the engine, and no limit at all", () => {

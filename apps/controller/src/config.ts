@@ -6,15 +6,28 @@ import { z } from "zod";
  * testing, rounded up so that an engine at the minimum limit stays clear of the memory alert.
  */
 export const ENGINE_MEMORY_OVERHEAD_MB = 200;
-/** Share of its limit above which an engine sets off the AceSwarmEngineMemoryHigh alert. */
-const ENGINE_MEMORY_ALERT_RATIO = 0.85;
+/** Share of its limit, in percent, above which an engine sets off the AceSwarmEngineMemoryHigh alert. */
+const ENGINE_MEMORY_ALERT_PERCENT = 85;
+/** Room an engine needs besides its memory cache, whatever the alert says. */
+const ENGINE_MEMORY_MIN_ROOM_MB = 256;
 
 /**
  * The smallest memory limit that suits an engine with this memory cache: 256 MB of room besides
- * the cache, and enough that a full cache stays under the memory alert.
+ * the cache, and enough that an engine with a full cache stays under the memory alert.
  */
 export function minEngineMemoryMb(cacheMb: number): number {
-  return Math.max(cacheMb + 256, Math.ceil((cacheMb + ENGINE_MEMORY_OVERHEAD_MB) / ENGINE_MEMORY_ALERT_RATIO));
+  return Math.max(
+    cacheMb + ENGINE_MEMORY_MIN_ROOM_MB,
+    Math.ceil(((cacheMb + ENGINE_MEMORY_OVERHEAD_MB) * 100) / ENGINE_MEMORY_ALERT_PERCENT),
+  );
+}
+
+/** The largest memory cache that suits this memory limit (the inverse of minEngineMemoryMb). */
+export function maxEngineMemoryCacheMb(limitMb: number): number {
+  return Math.min(
+    limitMb - ENGINE_MEMORY_MIN_ROOM_MB,
+    Math.floor((limitMb * ENGINE_MEMORY_ALERT_PERCENT) / 100) - ENGINE_MEMORY_OVERHEAD_MB,
+  );
 }
 
 const schema = z
@@ -84,19 +97,24 @@ const schema = z
     // An engine whose full cache doesn't fit under its limit is killed over and over, or sets off
     // the memory alert for good.
     const cacheMb = config.ENGINE_MEMORY_CACHE_MB;
+    const limitMb = config.ENGINE_MEMORY_MB;
     const minMb = minEngineMemoryMb(cacheMb);
-    if (cacheMb > 0 && config.ENGINE_MEMORY_MB > 0 && config.ENGINE_MEMORY_MB < minMb) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["ENGINE_MEMORY_MB"],
-        message:
-          `ENGINE_MEMORY_MB=${String(config.ENGINE_MEMORY_MB)} is too small for ENGINE_MEMORY_CACHE_MB=` +
-          `${String(cacheMb)}. An engine needs at least 256 MB besides its cache, and with a full cache it uses up ` +
-          `to ${String(ENGINE_MEMORY_OVERHEAD_MB)} MB more than the cache, which has to stay under the memory alert ` +
-          `at ${String(ENGINE_MEMORY_ALERT_RATIO * 100)}% of the limit. Raise ENGINE_MEMORY_MB to at least ` +
-          `${String(minMb)}, or lower ENGINE_MEMORY_CACHE_MB (0 leaves the cache to the engine)`,
-      });
+    if (cacheMb === 0 || limitMb === 0 || limitMb >= minMb) {
+      return;
     }
+    // Leaving the cache to the engine is no way out: uncapped, an engine outgrows any small limit.
+    const maxCacheMb = maxEngineMemoryCacheMb(limitMb);
+    ctx.addIssue({
+      code: "custom",
+      path: ["ENGINE_MEMORY_MB"],
+      message:
+        `ENGINE_MEMORY_MB=${String(limitMb)} is too small for ENGINE_MEMORY_CACHE_MB=${String(cacheMb)}. An ` +
+        `engine needs at least ${String(ENGINE_MEMORY_MIN_ROOM_MB)} MB besides its cache, and with a full cache ` +
+        `it uses up to ${String(ENGINE_MEMORY_OVERHEAD_MB)} MB more than the cache, which has to stay under the ` +
+        `memory alert at ${String(ENGINE_MEMORY_ALERT_PERCENT)}% of the limit. Raise ENGINE_MEMORY_MB to at ` +
+        `least ${String(minMb)}` +
+        (maxCacheMb >= 1 ? `, or lower ENGINE_MEMORY_CACHE_MB to at most ${String(maxCacheMb)}` : ""),
+    });
   });
 
 export type Config = z.infer<typeof schema>;

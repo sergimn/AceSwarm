@@ -3,7 +3,8 @@
 set -eu
 cd /acestream
 # ACESWARM_MEMORY_CACHE_BYTES caps the stream data the engine keeps in memory (--memory-cache-limit).
-# Without a cap that cache grows for over an hour, past what an engine needs. 0 leaves it uncapped.
+# Without a cap that cache grows for over an hour, past what an engine needs. 0 leaves the size to
+# the engine, which picks it from the host's RAM (1 GiB on hosts with 4 GB or more).
 cache_bytes="${ACESWARM_MEMORY_CACHE_BYTES:-536870912}"
 cache_limit=""
 case "$cache_bytes" in
