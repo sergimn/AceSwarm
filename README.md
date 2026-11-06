@@ -44,7 +44,8 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 | --------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `COMPOSE_PROFILES`          | `metrics,logs,grafana` | Optional monitoring. Remove any you don't want; the app works without them.                                      |
 | `DOCKER_SOCKET`             | `/var/run/docker.sock` | Docker or Podman API socket that engines are created through.                                                    |
-| `ENGINE_MEMORY_MB`          | `2048`                 | Memory limit per engine. Watch the "Engines" dashboard row and adjust.                                           |
+| `ENGINE_MEMORY_CACHE_MB`    | `512`                  | Stream data each engine keeps in memory. An engine uses about this plus 150 MB.                                  |
+| `ENGINE_MEMORY_MB`          | `1024`                 | Memory limit per engine. The controller refuses one too small for the cache and names the minimum.               |
 | `PREVIEW_MODE`              | `video`                | `keyframes` makes previews much cheaper. Use it on a Raspberry Pi.                                               |
 | `PATH_STRATEGY`             | `sticky-best`          | `sticky-best` moves a stream only when its path fails. `round-robin` spreads streams over the paths that are up. |
 | `ACESWARM_ENGINES_INTERNAL` | `false`                | Set to `true` on Podman.                                                                                         |
@@ -54,7 +55,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
 - The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`.
 - Turn on **One engine per path** (under **Streams**) when you run several streams: they then share one engine instead of each starting its own.
-- Lower `ENGINE_MEMORY_MB` (for example to 1024) when you run several streams on an 8 GB Pi with their own engines. The dashboard shows how much each engine really uses.
+- Set `ENGINE_MEMORY_CACHE_MB=256` and `ENGINE_MEMORY_MB=768` when you run several streams on an 8 GB Pi with their own engines. Each engine then levelled off at about 400 MB in testing, with the x86 engine and with the Pi's arm64 engine. The dashboard shows how much each engine really uses.
 
 ### Podman
 
@@ -110,7 +111,7 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
   Only streams that had played from the engine count, since a broadcast that is down fails on any engine. Apart from **Restart**, it is replaced at most once per failure window.
 
 - **Replacing is make-before-break.** A new engine starts on the same path, and each stream moves over once the new engine delivers its video. The old engine goes once its last stream left.
-- **It needs more memory than one stream's engine**, though far less than an engine per stream. Watch the "Engines" dashboard row and raise `ENGINE_MEMORY_MB` if it gets close.
+- **It needs about the same memory as one stream's engine.** The `ENGINE_MEMORY_CACHE_MB` cap is per engine, not per stream: in testing, an engine playing two streams levelled off at 674 MB, against 662 MB for one. It fills its cache sooner, though. Watch the "Engines" dashboard row. After changing `ENGINE_MEMORY_CACHE_MB` or `ENGINE_MEMORY_MB`, run `docker compose up -d`, then press **Restart** on one stream of each path to replace its engine with one that uses them.
 - **Peer counts are shared too.** The engine reports connected peers per stream, but the peers sending data and their countries come from the engine's connections, so every stream on it shows the same ones.
 
 ### Who is watching

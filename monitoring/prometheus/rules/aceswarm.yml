@@ -47,7 +47,7 @@ groups:
         annotations:
           summary: >-
             Engine {{ $labels.engine }} uses {{ $value | humanizePercentage }} of its memory limit;
-            raise ENGINE_MEMORY_MB
+            raise ENGINE_MEMORY_MB, or lower ENGINE_MEMORY_CACHE_MB (set it if it is 0)
       - alert: AceSwarmEngineOomKilled
         expr: increase(aceswarm_engine_oom_kills_total[1h]) > 0
         labels:
@@ -55,7 +55,7 @@ groups:
         annotations:
           summary: >-
             An engine of stream {{ $labels.stream }} was killed for running out of memory;
-            raise ENGINE_MEMORY_MB
+            raise ENGINE_MEMORY_MB, or lower ENGINE_MEMORY_CACHE_MB (set it if it is 0)
       - alert: AceSwarmServiceDown
         expr: up{job="aceswarm"} == 0
         for: 2m

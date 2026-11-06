@@ -37,9 +37,23 @@ export interface EngineManagerOptions {
   gatewayIp: string;
   httpPort: number;
   memoryMb: number;
+  /** The engine's memory cache limit; 0 leaves it to the engine. */
+  memoryCacheMb: number;
   extraFlags: string;
   dns: string;
   readyTimeoutMs: number;
+}
+
+/** The environment of an engine container, which its entrypoint and start script read. */
+export function engineEnvironment(
+  options: Pick<EngineManagerOptions, "gatewayIp" | "dns" | "memoryCacheMb" | "extraFlags">,
+): string[] {
+  return [
+    `ACESWARM_GATEWAY=${options.gatewayIp}`,
+    `ACESWARM_DNS=${options.dns}`,
+    `ACESWARM_MEMORY_CACHE_BYTES=${String(options.memoryCacheMb * 1024 * 1024)}`,
+    `ACESWARM_ENGINE_FLAGS=${options.extraFlags}`,
+  ];
 }
 
 const ROLE_LABEL = "aceswarm.role";
@@ -152,11 +166,7 @@ export class EngineManager {
     }
     const id = await this.docker.createContainer(name, {
       Image: this.options.image,
-      Env: [
-        `ACESWARM_GATEWAY=${this.options.gatewayIp}`,
-        `ACESWARM_DNS=${this.options.dns}`,
-        `ACESWARM_ENGINE_FLAGS=${this.options.extraFlags}`,
-      ],
+      Env: engineEnvironment(this.options),
       Labels: {
         [STACK_LABEL]: this.options.stack,
         [ROLE_LABEL]: "engine",
