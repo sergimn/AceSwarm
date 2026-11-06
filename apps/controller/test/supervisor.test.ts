@@ -119,6 +119,8 @@ interface Fakes {
   sources?: Set<string>;
   /** Playback URLs that start to deliver at a time on the fake clock, added to `sources` then. */
   arrives?: Map<string, number>;
+  /** Playback URLs whose current ffmpeg exits at a time on the fake clock; a new start clears it. */
+  exits?: Map<string, number>;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -209,10 +211,13 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     if (real.active === undefined) {
       return undefined;
     }
-    if (sources.has(real.active)) {
+    const exitsAt = fakes.exits?.get(real.active);
+    const state = exitsAt !== undefined && clock.now >= exitsAt ? "exited" : "running";
+    if (state === "running" && sources.has(real.active)) {
       real.lastFrameAt = new Date(clock.now).toISOString();
     }
-    return { ...pipeline, source: real.active, pendingSource: real.pending ?? null, lastFrameAt: real.lastFrameAt };
+    const source = real.active;
+    return { ...pipeline, state, source, pendingSource: real.pending ?? null, lastFrameAt: real.lastFrameAt };
   };
   const transcoder = {
     start: (_id: string, input: { source: string }, handover?: boolean) => {
@@ -224,6 +229,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
         active = input.source;
       }
       if (fakes.sources !== undefined) {
+        fakes.exits?.delete(input.source);
         const keep = handover === true && real.active !== undefined && fakes.sources.has(real.active);
         if (keep) {
           real.pending = input.source;
@@ -601,6 +607,18 @@ describe("moving a stream to another path", () => {
     expect(fake.handovers.at(-1)).toBe(`${replacement.baseUrl}/play`);
   });
 
+  test("removes the kept engine once taking it over failed again and again", async () => {
+    const reviveFails = { on: true };
+    const fake = await moveOffDirect({ handover: "stops", video: { on: false }, reviveFails });
+    for (let tick = 0; tick < 100 && !fake.removed.includes(replacement.containerId); tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+    }
+    // The failed move and two Docker errors.
+    expect(fake.revived.filter((id) => id === replacement.containerId)).toHaveLength(2);
+    expect(fake.removed).toContain(replacement.containerId);
+  });
+
   test("follows the kept engine to its new address when it came back on one", async () => {
     const moved: EngineHandle = { ...replacement, ip: "172.31.250.13", baseUrl: "http://172.31.250.13:6878" };
     const fake = await moveOffDirect({
@@ -875,6 +893,21 @@ describe("WireGuard only", () => {
     expect(fake.revived).toEqual([replacement.containerId]);
     // The transcoder already read the kept session, so the move only waited for it.
     expect(fake.handovers).toEqual([`${replacement.baseUrl}/play`]);
+    expect(fake.sessions()).toBe(2);
+    expect(fake.removed).toEqual([engine.containerId]);
+  });
+
+  test("starts a reader of its own on the kept engine when the one it waited for gives up", async () => {
+    const arrives = new Map<string, number>();
+    const exits = new Map<string, number>();
+    const fake = await lostDirect({ arrives, exits });
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    // The first move's ffmpeg is still reading the kept session, but not for long.
+    exits.set(`${replacement.baseUrl}/play`, fake.clock.now + 5000);
+    arrives.set(`${replacement.baseUrl}/play`, fake.clock.now + 30_000);
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.handovers).toEqual([`${replacement.baseUrl}/play`, `${replacement.baseUrl}/play`]);
     expect(fake.sessions()).toBe(2);
     expect(fake.removed).toEqual([engine.containerId]);
   });

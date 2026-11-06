@@ -5,7 +5,7 @@ import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
-import { exitedPipeline, waitForHandover, type HandoverTiming } from "./playback.ts";
+import { exitedPipeline, SourceExitedError, waitForHandover, type HandoverTiming } from "./playback.ts";
 import { nextRecovery, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { FailureReport, SharedEngines } from "./shared-engines.ts";
 import type { MoveSlots } from "./stream-paths.ts";
@@ -130,11 +130,11 @@ export class StreamEngines {
    */
   async startOwn(current: EngineHandle | undefined, onAddress: OnEngineAddress): Promise<EngineHandle> {
     this.startTried = true;
-    const spare = this.clearSpare();
     if (current !== undefined && current.sharedPath !== null) {
       await this.release(current);
     }
     const found = await this.deps.engines.find(this.streamId);
+    const spare = this.clearSpare();
     const wanted = current?.sharedPath === null ? current.name : this.deps.store.get(this.streamId)?.ownEngine;
     const kept = found.find((engine) => engine.name === wanted) ?? found[0];
     for (const engine of found) {
@@ -301,16 +301,10 @@ export class StreamEngines {
       const reused = await this.spareSession(engine);
       const session = reused ?? (await move.openSession(engine.baseUrl));
       opened = session;
-      const source = { source: session.playbackUrl };
-      let pipeline: PipelineStatus | undefined;
-      if (move.handover === undefined) {
-        pipeline = await this.deps.transcoder.start(this.streamId, source);
-      } else {
-        if (reused === undefined || !(await this.transcoderReads(session))) {
-          await this.deps.transcoder.start(this.streamId, source, true);
-        }
-        pipeline = await waitForHandover(this.deps.transcoder, this.streamId, session.playbackUrl, move.handover);
-      }
+      const pipeline =
+        move.handover === undefined
+          ? await this.deps.transcoder.start(this.streamId, { source: session.playbackUrl })
+          : await this.handOver(session, reused !== undefined, move.handover);
       // The move is done: a later failure must not remove the engine the stream now plays from.
       starting.engine = undefined;
       if (this.spare?.engine.containerId === engine.containerId) {
@@ -349,6 +343,25 @@ export class StreamEngines {
     this.clearSpare();
     await this.finish({ from, session, commit: spare.commit }, { engine: spare.engine, session: kept, pipeline });
     return true;
+  }
+
+  /**
+   * Starts the transcoder's handover to `session` and waits for its video. A kept session the
+   * transcoder still reads gets no second reader, unless that one gives up first (its input timeout).
+   */
+  private async handOver(session: EngineSession, reused: boolean, timing: HandoverTiming): Promise<PipelineStatus> {
+    const source = session.playbackUrl;
+    if (reused && (await this.transcoderReads(session))) {
+      try {
+        return await waitForHandover(this.deps.transcoder, this.streamId, source, timing);
+      } catch (error) {
+        if (!(error instanceof SourceExitedError)) {
+          throw error;
+        }
+      }
+    }
+    await this.deps.transcoder.start(this.streamId, { source }, true);
+    return waitForHandover(this.deps.transcoder, this.streamId, source, timing);
   }
 
   /** Whether the transcoder's current ffmpeg still reads the session (an engine allows one reader). */
@@ -473,6 +486,12 @@ export class StreamEngines {
     } catch (error) {
       starting.engine = undefined;
       if (!(error instanceof EngineGoneError)) {
+        // A failed try too, so a container that keeps failing to start goes in time.
+        spare.failures += 1;
+        spare.failedAt = this.now();
+        if (spare.failures >= SPARE_MAX_FAILURES) {
+          await this.dropSpare(`taking it over failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         throw error;
       }
       await this.dropSpare(`it stopped answering: ${error.message}`);
