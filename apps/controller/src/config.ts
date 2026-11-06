@@ -1,8 +1,11 @@
 import { envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
-/** What an engine uses besides its memory cache, as the dashboards count it (measured at 150 MB). */
-export const ENGINE_MEMORY_OVERHEAD_MB = 150;
+/**
+ * What an engine uses besides its memory cache, as the dashboards count it: 147 to 162 MB in
+ * testing, rounded up so that an engine at the minimum limit stays clear of the memory alert.
+ */
+export const ENGINE_MEMORY_OVERHEAD_MB = 200;
 /** Share of its limit above which an engine sets off the AceSwarmEngineMemoryHigh alert. */
 const ENGINE_MEMORY_ALERT_RATIO = 0.85;
 
@@ -87,9 +90,11 @@ const schema = z
         code: "custom",
         path: ["ENGINE_MEMORY_MB"],
         message:
-          `${String(config.ENGINE_MEMORY_MB)} is too small for ENGINE_MEMORY_CACHE_MB=${String(cacheMb)}: an engine ` +
-          `needs about ${String(ENGINE_MEMORY_OVERHEAD_MB)} MB besides its cache. Raise ENGINE_MEMORY_MB to at ` +
-          `least ${String(minMb)}, or lower ENGINE_MEMORY_CACHE_MB (0 leaves the cache to the engine)`,
+          `ENGINE_MEMORY_MB=${String(config.ENGINE_MEMORY_MB)} is too small for ENGINE_MEMORY_CACHE_MB=` +
+          `${String(cacheMb)}. An engine needs at least 256 MB besides its cache, and with a full cache it uses up ` +
+          `to ${String(ENGINE_MEMORY_OVERHEAD_MB)} MB more than the cache, which has to stay under the memory alert ` +
+          `at ${String(ENGINE_MEMORY_ALERT_RATIO * 100)}% of the limit. Raise ENGINE_MEMORY_MB to at least ` +
+          `${String(minMb)}, or lower ENGINE_MEMORY_CACHE_MB (0 leaves the cache to the engine)`,
       });
     }
   });

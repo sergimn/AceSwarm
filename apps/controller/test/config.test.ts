@@ -11,18 +11,19 @@ describe("engine memory settings", () => {
   });
 
   it("asks for 256 MB of room besides the cache, and for a full cache to stay under the 85% alert", () => {
-    expect(minEngineMemoryMb(256)).toBe(512);
-    expect(minEngineMemoryMb(512)).toBe(779);
-    expect(minEngineMemoryMb(768)).toBe(1080);
-    expect(minEngineMemoryMb(1024)).toBe(1382);
+    expect(minEngineMemoryMb(128)).toBe(386);
+    expect(minEngineMemoryMb(256)).toBe(537);
+    expect(minEngineMemoryMb(512)).toBe(838);
+    expect(minEngineMemoryMb(768)).toBe(1139);
+    expect(minEngineMemoryMb(1024)).toBe(1440);
   });
 
   it("refuses a limit too small for the memory cache, and says what to set", () => {
     expect(() => loadConfig({ ENGINE_MEMORY_MB: "768", ENGINE_MEMORY_CACHE_MB: "768" })).toThrow(
-      /768 is too small for ENGINE_MEMORY_CACHE_MB=768.*at least 1080.*\n.*at ENGINE_MEMORY_MB/s,
+      /ENGINE_MEMORY_MB=768 is too small for ENGINE_MEMORY_CACHE_MB=768\. .*256 MB.*up to 200 MB.*at 85% of the limit.*at least 1139.*\n.*at ENGINE_MEMORY_MB/s,
     );
-    expect(() => loadConfig({ ENGINE_MEMORY_MB: "1079", ENGINE_MEMORY_CACHE_MB: "768" })).toThrow();
-    expect(loadConfig({ ENGINE_MEMORY_MB: "1080", ENGINE_MEMORY_CACHE_MB: "768" }).ENGINE_MEMORY_CACHE_MB).toBe(768);
+    expect(() => loadConfig({ ENGINE_MEMORY_MB: "1138", ENGINE_MEMORY_CACHE_MB: "768" })).toThrow();
+    expect(loadConfig({ ENGINE_MEMORY_MB: "1139", ENGINE_MEMORY_CACHE_MB: "768" }).ENGINE_MEMORY_CACHE_MB).toBe(768);
     expect(loadConfig({ ENGINE_MEMORY_MB: "768", ENGINE_MEMORY_CACHE_MB: "256" }).ENGINE_MEMORY_MB).toBe(768);
   });
 
