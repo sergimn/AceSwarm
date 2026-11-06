@@ -5,7 +5,8 @@ import { engineEnvironment } from "../src/engines.ts";
 describe("engine memory settings", () => {
   it("defaults to a memory cache that fits under the engine's memory limit, below the alert", () => {
     const config = loadConfig({});
-    expect(config.ENGINE_MEMORY_CACHE_MB).toBe(512);
+    expect(config.ENGINE_MEMORY_CACHE_MB).toBe(128);
+    expect(config.ENGINE_MEMORY_MB).toBe(512);
     expect(config.ENGINE_MEMORY_MB).toBeGreaterThanOrEqual(minEngineMemoryMb(config.ENGINE_MEMORY_CACHE_MB));
     expect((config.ENGINE_MEMORY_CACHE_MB + ENGINE_MEMORY_OVERHEAD_MB) / config.ENGINE_MEMORY_MB).toBeLessThan(0.85);
   });
