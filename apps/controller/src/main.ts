@@ -39,6 +39,7 @@ const engines = new EngineManager(
     gatewayIp: config.ENGINE_GATEWAY_IP,
     httpPort: config.ENGINE_HTTP_PORT,
     memoryMb: config.ENGINE_MEMORY_MB,
+    memoryCacheMb: config.ENGINE_MEMORY_CACHE_MB,
     extraFlags: config.ENGINE_EXTRA_FLAGS,
     dns: config.ENGINE_DNS,
     readyTimeoutMs: config.ENGINE_READY_TIMEOUT_SECONDS * 1000,

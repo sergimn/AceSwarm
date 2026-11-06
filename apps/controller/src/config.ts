@@ -26,7 +26,14 @@ const schema = z.object({
    */
   ENGINE_IP_RANGE: z.cidrv4().default("172.31.250.128/25"),
   ENGINE_HTTP_PORT: envInt(6878),
-  ENGINE_MEMORY_MB: envInt(2048),
+  /** Memory limit of each engine container. */
+  ENGINE_MEMORY_MB: envInt(1024),
+  /**
+   * How much stream data an engine keeps in memory (the engine's `--memory-cache-limit`). Without
+   * it the engine sizes this cache from the host's memory, not from its container's limit, and
+   * keeps growing for over an hour. 0 leaves it to the engine.
+   */
+  ENGINE_MEMORY_CACHE_MB: envInt(512),
   /** How often engine memory is sampled for the metrics. */
   ENGINE_STATS_SECONDS: envInt(15),
   ENGINE_EXTRA_FLAGS: z.string().default(""),
@@ -60,6 +67,19 @@ const schema = z.object({
 
 export type Config = z.infer<typeof schema>;
 
+/** Memory an engine needs on top of its memory cache (measured at about 150 MB). */
+export const ENGINE_MEMORY_OVERHEAD_MB = 256;
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  return parseEnv(schema, env);
+  const config = parseEnv(schema, env);
+  const cacheMb = config.ENGINE_MEMORY_CACHE_MB;
+  const limitMb = config.ENGINE_MEMORY_MB;
+  // An engine whose cache doesn't fit under its limit gets killed over and over once the cache fills.
+  if (cacheMb > 0 && limitMb > 0 && cacheMb + ENGINE_MEMORY_OVERHEAD_MB > limitMb) {
+    throw new Error(
+      `invalid configuration: ENGINE_MEMORY_MB (${String(limitMb)}) must be at least ENGINE_MEMORY_CACHE_MB ` +
+        `(${String(cacheMb)}) + ${String(ENGINE_MEMORY_OVERHEAD_MB)}, the memory an engine needs besides its cache`,
+    );
+  }
+  return config;
 }
