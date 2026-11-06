@@ -97,6 +97,7 @@ const orchestrator: Orchestrator = new Orchestrator({
   netgw,
   metrics,
   logger,
+  maxKeptEngines: config.MAX_KEPT_ENGINES,
   settings: {
     tickMs: config.TICK_MS,
     stallAfterMs: config.STALL_SECONDS * 1000,

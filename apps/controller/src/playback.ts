@@ -46,10 +46,13 @@ export interface HandoverTiming {
   sleep: (ms: number) => Promise<void>;
 }
 
+/** The transcoder's ffmpeg for a move's new source exited before video came from it. */
+export class SourceExitedError extends Error {}
+
 /**
  * Waits until the transcoder has cut a stream over to `source` (a make-before-break move) and
  * video arrives from it. Returns the pipeline's status then; throws when the new source stops
- * first or takes longer than the timeout.
+ * first (`SourceExitedError` once its ffmpeg exited) or takes longer than the timeout.
  */
 export async function waitForHandover(
   transcoder: TranscoderClient,
@@ -58,6 +61,8 @@ export async function waitForHandover(
   timing: HandoverTiming,
 ): Promise<PipelineStatus> {
   const deadline = timing.now() + timing.timeoutMs;
+  // Checks in a row that found its ffmpeg exited: a transcode relaunch shows one for a moment.
+  let exited = 0;
   while (timing.now() < deadline) {
     await timing.sleep(timing.pollMs);
     const status = await transcoder.status(id).catch(() => undefined);
@@ -66,6 +71,10 @@ export async function waitForHandover(
     }
     if (status !== undefined && status.pendingSource !== source && status.source !== source) {
       throw new Error("the new engine stopped before delivering video");
+    }
+    exited = status?.source === source && status.state === "exited" ? exited + 1 : 0;
+    if (exited === 2) {
+      throw new SourceExitedError("the transcoder stopped reading the new engine before it delivered video");
     }
   }
   throw new Error("the new path did not deliver video in time");

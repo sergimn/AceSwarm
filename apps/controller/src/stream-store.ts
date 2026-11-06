@@ -15,6 +15,11 @@ const streamSchema = z.object({
   createdAt: z.string(),
   /** Last network path the stream used; kept so the sticky choice survives restarts. */
   path: z.string().nullable().default(null),
+  /**
+   * The container name of the stream's own engine it plays from; null on a shared engine. After a
+   * restart the controller takes that one over, rather than a newer engine a failed move left.
+   */
+  ownEngine: z.string().nullable().default(null),
 });
 
 const fileSchema = z.object({
@@ -37,7 +42,7 @@ export interface NewStream {
   name?: string | undefined;
 }
 
-export type StreamPatch = Partial<Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind">>;
+export type StreamPatch = Partial<Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind" | "ownEngine">>;
 
 /**
  * Persists the list of streams in `<data>/streams.json`. The file is the source of truth, so
@@ -80,6 +85,7 @@ export class StreamStore {
         enabled: true,
         createdAt: new Date().toISOString(),
         path: null,
+        ownEngine: null,
       };
       await this.persist([...this.streams, stream]);
       return { ...stream };

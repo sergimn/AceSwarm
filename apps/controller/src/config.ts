@@ -82,6 +82,11 @@ const schema = z
     RECOVERY_MAX_DELAY_SECONDS: envInt(300),
     HANDOVER_TIMEOUT_SECONDS: envInt(120),
     /**
+     * How many streams at once may keep the new engine of a failed move, to try again on it rather
+     * than on a new one that starts from no peers. Each is an engine more; 0 turns this off.
+     */
+    MAX_KEPT_ENGINES: envInt(2),
+    /**
      * With engine sharing on, a path's shared engine restarts once more than this many of its streams
      * failed within SHARED_ENGINE_FAILURE_WINDOW_SECONDS (or when the stream someone watches fails).
      */

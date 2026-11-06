@@ -34,10 +34,10 @@ export class EnginePaths {
     await this.netgw.unassign(ip).catch(() => undefined);
   }
 
-  /** Drops the paths of every address but `ip`. */
-  async keepOnly(ip: string): Promise<void> {
+  /** Drops the paths of every address but these. */
+  async keepOnly(...ips: string[]): Promise<void> {
     for (const other of this.assigned.keys()) {
-      if (other !== ip) {
+      if (!ips.includes(other)) {
         await this.drop(other);
       }
     }

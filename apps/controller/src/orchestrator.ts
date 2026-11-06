@@ -49,6 +49,8 @@ export interface OrchestratorDeps {
   metrics: ControllerMetrics;
   logger: Logger;
   settings: SupervisorSettings;
+  /** How many streams at once may keep the new engine of a failed move (see `StreamEngines.move`). */
+  maxKeptEngines?: number;
   pathPollMs?: number;
 }
 
@@ -69,9 +71,12 @@ export class Orchestrator {
    * would briefly need twice the engines' memory.
    */
   private readonly policyMoves = new MoveSlots(2);
+  /** Engines kept after a failed move to try again on them; each is an engine more, so only a few. */
+  private readonly spareSlots: MoveSlots;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
+    this.spareSlots = new MoveSlots(deps.maxKeptEngines ?? 2);
     this.logger = deps.logger.child({ component: "orchestrator" });
   }
 
@@ -378,6 +383,7 @@ export class Orchestrator {
       paths: () => this.paths,
       pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
       policyMoves: this.policyMoves,
+      spareSlots: this.spareSlots,
       pathLoad: () => this.pathLoad(),
       shared: this.deps.shared,
       sharedEngines: () => this.deps.settingsStore.get().sharedEngines,
