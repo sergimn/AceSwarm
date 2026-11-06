@@ -17,6 +17,20 @@ function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: Str
   }
 }
 
+type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<"stream" | "engine">>;
+
+function setEngineGauges(gauges: EngineGauges, engines: EngineMemory[]): void {
+  for (const engine of engines) {
+    const labels = { stream: engine.stream, engine: engine.engine };
+    gauges.memory.set(labels, engine.usedBytes);
+    gauges.memoryLimit.set(labels, engine.limitBytes);
+    gauges.cache.set(labels, engine.cacheBytes);
+    if (engine.cacheLimitBytes !== null) {
+      gauges.cacheLimit.set(labels, engine.cacheLimitBytes);
+    }
+  }
+}
+
 /**
  * Prometheus metrics of the controller. Gauges are filled at scrape time from the current
  * snapshot, so they always match what the UI shows.
@@ -77,7 +91,7 @@ export class ControllerMetrics {
       collect: () => {
         const current = snapshot();
         const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
-        for (const gauge of [...gauges, watching, sharedStreams, sharedStandbys, standbys]) {
+        for (const gauge of [...gauges, cache, cacheLimit, watching, sharedStreams, sharedStandbys, standbys]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -96,6 +110,9 @@ export class ControllerMetrics {
           }
           if (stream.peers.active !== null) {
             peers.set({ ...labels, kind: "active" }, stream.peers.active);
+          }
+          if (stream.peers.uploading !== null) {
+            peers.set({ ...labels, kind: "uploading" }, stream.peers.uploading);
           }
           for (const country of stream.peers.countries) {
             countries.set({ ...labels, country: country.code }, country.count);
@@ -124,11 +141,7 @@ export class ControllerMetrics {
           );
           sharedStandbys.set({ path: engine.path, engine: engine.engine }, engine.standbys);
         }
-        for (const engine of engineMemory()) {
-          const labels = { stream: engine.stream, engine: engine.engine };
-          memory.set(labels, engine.usedBytes);
-          memoryLimit.set(labels, engine.limitBytes);
-        }
+        setEngineGauges({ memory, memoryLimit, cache, cacheLimit }, engineMemory());
         total.set(current.streams.length);
       },
     });
@@ -159,7 +172,7 @@ export class ControllerMetrics {
     });
     const peers = new Gauge({
       name: "aceswarm_stream_peers",
-      help: "Peers of the stream (connected: reported by the engine, active: sending data)",
+      help: "Peers of the stream (connected: reported by the engine, active: sending us data, uploading: getting data from us)",
       labelNames: ["stream", "kind"],
       registers,
     });
@@ -191,6 +204,18 @@ export class ControllerMetrics {
     const memoryLimit = new Gauge({
       name: "aceswarm_engine_memory_limit_bytes",
       help: "Memory limit of each engine container",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
+    const cache = new Gauge({
+      name: "aceswarm_engine_memory_cache_bytes",
+      help: "Estimated stream data in each engine's memory cache: its memory above an idle engine's, at most the cap",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
+    const cacheLimit = new Gauge({
+      name: "aceswarm_engine_memory_cache_limit_bytes",
+      help: "Memory cache cap of each engine (ENGINE_MEMORY_CACHE_MB when it started); missing when it has none",
       labelNames: ["stream", "engine"],
       registers,
     });

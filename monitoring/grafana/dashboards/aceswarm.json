@@ -852,6 +852,80 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Peers getting data from us",
+      "id": 37,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Peers each engine sent stream data to (at least 16 KiB in 5 s), from the gateway's connection table. Without an open inbound port, an engine only reaches the peers it connects to itself, which rarely need data from it, so this stays low. Every stream on a shared engine shows the same peers.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_peers{kind=\"uploading\"} * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Upload speed",
+      "id": 38,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Upload rate each stream's engine reports.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_speed_kbytes{direction=\"up\"} * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "KBs",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
       "type": "row",
       "title": "Engines",
       "id": 27,
@@ -860,7 +934,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "panels": []
     },
@@ -877,7 +951,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -961,7 +1035,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -1031,7 +1105,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -1090,7 +1164,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1128,7 +1202,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1153,6 +1227,140 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Engine memory cache (estimated)",
+      "id": 39,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above an idle engine's (about 145 MiB), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "max(aceswarm_engine_memory_cache_limit_bytes{stream=~\"$stream\"})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Cap",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cap"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine memory cache, share of the cap",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How full each engine's memory cache is (estimated, see the panel on the left). Engines without a cap (ENGINE_MEMORY_CACHE_MB=0) don't show here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes / aceswarm_engine_memory_cache_limit_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"} / aceswarm_engine_memory_cache_limit_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
       "type": "row",
       "title": "Network paths",
       "id": 17,
@@ -1161,7 +1369,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 98
       },
       "panels": []
     },
@@ -1177,7 +1385,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 99
       },
       "targets": [
         {
@@ -1245,7 +1453,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 105
       },
       "targets": [
         {
@@ -1280,7 +1488,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 105
       },
       "targets": [
         {
@@ -1315,7 +1523,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 105
       },
       "targets": [
         {
@@ -1352,7 +1560,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 97
+        "y": 113
       },
       "targets": [
         {
@@ -1393,7 +1601,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 113
       },
       "targets": [
         {
@@ -1429,7 +1637,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 105
+        "y": 121
       },
       "panels": []
     },
@@ -1445,7 +1653,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 122
       },
       "targets": [
         {
@@ -1479,7 +1687,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 116
+        "y": 132
       },
       "targets": [
         {

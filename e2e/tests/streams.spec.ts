@@ -44,6 +44,28 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   expect(stream?.aceIdKind).toBe("content-id");
 });
 
+test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {
+  const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
+  expect(stream).toBeDefined();
+  const value = async (series: string): Promise<number | undefined> => {
+    const text = await (await request.get("/metrics")).text();
+    const match = new RegExp(String.raw`^${series} (\S+)$`, "m").exec(text);
+    return match === null ? undefined : Number(match[1]);
+  };
+  const engine = String.raw`\{stream="${stream!.id}",engine="[^"]+"\}`;
+  // The default ENGINE_MEMORY_CACHE_MB (128).
+  await expect
+    .poll(() => value(`aceswarm_engine_memory_cache_limit_bytes${engine}`), { timeout: 60_000 })
+    .toBe(128 * 1024 * 1024);
+  const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
+  expect(cache).toBeGreaterThanOrEqual(0);
+  expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
+  // The broadcast runner is the only peer and needs nothing from us, but the count is there.
+  await expect
+    .poll(() => value(String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"\}`))
+    .toBeGreaterThanOrEqual(0);
+});
+
 test("detects infohashes without being told", async ({ page, request }) => {
   // A bare value is tried as a content ID first; the engine rejects it, so it must fall back.
   const bare = await addStream(request, bc[1]!.infohash);

@@ -34,6 +34,8 @@ export interface PeerSummary {
   connected: number | null;
   /** Peers that sent us data during the last measurement window (from connection tracking). */
   active: number | null;
+  /** Peers we sent stream data to during the last measurement window (from connection tracking). */
+  uploading: number | null;
   /** Top countries of the peers, most common first. */
   countries: CountryCount[];
 }
@@ -199,6 +201,8 @@ export interface PeerStats {
   connected: number;
   /** Peers whose traffic grew since the previous sample; null without conntrack accounting. */
   active: number | null;
+  /** Peers the engine sent stream data to since the previous sample; null without accounting. */
+  uploading: number | null;
   countries: CountryCount[];
   updatedAt: string;
 }

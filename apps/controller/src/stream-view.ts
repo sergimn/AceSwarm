@@ -41,7 +41,7 @@ function stopped(stream: StreamConfig): LiveFields {
     stateSince: stream.createdAt,
     message: null,
     lastFrameAt: null,
-    peers: { connected: null, active: null, countries: [] },
+    peers: { connected: null, active: null, uploading: null, countries: [] },
     downloadKBps: null,
     uploadKBps: null,
     recoveries: 0,
@@ -60,6 +60,7 @@ function running(live: LiveStream): LiveFields {
     peers: {
       connected: stats?.peers ?? peers?.connected ?? null,
       active: peers?.active ?? null,
+      uploading: peers?.uploading ?? null,
       countries: peers?.countries.slice(0, 3) ?? [],
     },
     downloadKBps: stats?.speedDown ?? null,

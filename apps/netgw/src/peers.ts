@@ -14,8 +14,16 @@ export interface Flow {
   replied: boolean;
   /** Bytes received from the remote side; undefined without conntrack accounting. */
   receivedBytes: number | undefined;
+  /** Bytes the engine sent to the remote side; undefined without conntrack accounting. */
+  sentBytes: number | undefined;
   key: string;
 }
+
+/**
+ * Bytes an engine must send a peer between two samples to count as uploading to it: one 16 KiB
+ * block of stream data. Requests and other protocol messages stay far below that.
+ */
+export const UPLOAD_MIN_BYTES = 16_384;
 
 /** Parses `conntrack -L` output (default format, with or without accounting counters). */
 export function parseConntrack(output: string): Flow[] {
@@ -58,6 +66,7 @@ export function parseConntrack(output: string): Flow[] {
       remotePort: Number.parseInt(destinationPorts[0] ?? "0", 10),
       replied: established && !line.includes("[UNREPLIED]"),
       receivedBytes: bytes.length >= 2 ? bytes[1] : undefined,
+      sentBytes: bytes.length >= 2 ? bytes[0] : undefined,
       key: `${protocol}|${source}|${sourcePorts[0] ?? ""}|${remote}|${destinationPorts[0] ?? ""}`,
     });
   }
@@ -81,7 +90,8 @@ function topCountries(ips: Iterable<string>, geo: GeoLookup, limit: number): Cou
 /**
  * Derives peer statistics per engine from the gateway's connection tracking table: the gateway
  * routes every engine, so it sees each engine's peers, which the engine API does not expose.
- * "Active" peers are those whose received byte counter grew since the previous sample.
+ * "Active" peers are those whose received byte counter grew since the previous sample, and
+ * "uploading" peers those the engine sent at least UPLOAD_MIN_BYTES since then.
  */
 export class PeerTracker {
   private readonly runner: CommandRunner;
@@ -90,6 +100,7 @@ export class PeerTracker {
   private readonly ignoredPorts: ReadonlySet<number>;
   private readonly now: () => number;
   private previousBytes = new Map<string, number>();
+  private previousSent = new Map<string, number>();
   private stats = new Map<string, PeerStats>();
 
   constructor(
@@ -112,6 +123,7 @@ export class PeerTracker {
         ip,
         connected: 0,
         active: null,
+        uploading: null,
         countries: [],
         updatedAt: new Date(this.now()).toISOString(),
       }
@@ -128,15 +140,19 @@ export class PeerTracker {
   }
 
   update(flows: Flow[]): void {
-    const perEngine = new Map<string, { connected: Set<string>; active: Set<string>; accounted: boolean }>();
+    const perEngine = new Map<
+      string,
+      { connected: Set<string>; active: Set<string>; uploading: Set<string>; accounted: boolean }
+    >();
     const bytes = new Map<string, number>();
+    const sent = new Map<string, number>();
     for (const flow of flows) {
       if (!inSubnet(flow.source, this.subnet) || isPrivate(flow.remote) || this.ignoredPorts.has(flow.remotePort)) {
         continue;
       }
       let entry = perEngine.get(flow.source);
       if (entry === undefined) {
-        entry = { connected: new Set(), active: new Set(), accounted: false };
+        entry = { connected: new Set(), active: new Set(), uploading: new Set(), accounted: false };
         perEngine.set(flow.source, entry);
       }
       if (flow.replied) {
@@ -150,8 +166,15 @@ export class PeerTracker {
       if (flow.receivedBytes > (this.previousBytes.get(flow.key) ?? 0)) {
         entry.active.add(flow.remote);
       }
+      if (flow.sentBytes !== undefined) {
+        sent.set(flow.key, flow.sentBytes);
+        if (flow.sentBytes - (this.previousSent.get(flow.key) ?? 0) >= UPLOAD_MIN_BYTES) {
+          entry.uploading.add(flow.remote);
+        }
+      }
     }
     this.previousBytes = bytes;
+    this.previousSent = sent;
     const updatedAt = new Date(this.now()).toISOString();
     const stats = new Map<string, PeerStats>();
     for (const [ip, entry] of perEngine) {
@@ -160,6 +183,7 @@ export class PeerTracker {
         ip,
         connected: entry.connected.size,
         active: entry.accounted ? entry.active.size : null,
+        uploading: entry.accounted ? entry.uploading.size : null,
         countries: topCountries(ranked, this.geo, 5),
         updatedAt,
       });

@@ -1,7 +1,12 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, it } from "vitest";
 import type { ContainerDetails, ContainerSummary, DockerClient, MemoryUsage } from "../src/docker.ts";
-import { EngineResourceMonitor } from "../src/engine-resources.ts";
+import {
+  engineCacheLimit,
+  EngineResourceMonitor,
+  estimateCacheBytes,
+  IDLE_ENGINE_MEMORY_BYTES,
+} from "../src/engine-resources.ts";
 
 interface FakeEngine {
   id: string;
@@ -10,7 +15,10 @@ interface FakeEngine {
   finishedAt: string;
   oomKilled: boolean;
   memory: MemoryUsage | undefined;
+  env?: string[] | null;
 }
+
+const MB = 1024 * 1024;
 
 const NEVER = "0001-01-01T00:00:00Z";
 
@@ -53,7 +61,7 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
                 FinishedAt: entry.finishedAt,
                 OOMKilled: entry.oomKilled,
               },
-              Config: { Labels: { "aceswarm.stream": entry.stream } },
+              Config: { Labels: { "aceswarm.stream": entry.stream }, Env: entry.env ?? null },
               NetworkSettings: { Networks: {} },
             },
       );
@@ -80,16 +88,49 @@ function setup(engines: FakeEngine[]): { monitor: EngineResourceMonitor; kills: 
 }
 
 describe("EngineResourceMonitor", () => {
-  it("reports the memory of running engines only", async () => {
+  it("reports the memory and estimated cache of running engines only", async () => {
     const stopped = { ...engine("c", "s3", 10), running: false };
-    const { monitor } = setup([engine("a", "s1", 300), engine("b", "s2", 500), stopped]);
+    const capped = { ...engine("a", "s1", 300), env: ["PATH=/bin", `ACESWARM_MEMORY_CACHE_BYTES=${String(128 * MB)}`] };
+    const { monitor } = setup([capped, engine("b", "s2", 500), stopped]);
 
     await monitor.sample();
 
     expect(monitor.latest()).toEqual([
-      { stream: "s1", engine: "aceswarm-engine-s1-1", usedBytes: 300 * 1024 * 1024, limitBytes: 768 * 1024 * 1024 },
-      { stream: "s2", engine: "aceswarm-engine-s2-1", usedBytes: 500 * 1024 * 1024, limitBytes: 768 * 1024 * 1024 },
+      {
+        stream: "s1",
+        engine: "aceswarm-engine-s1-1",
+        usedBytes: 300 * MB,
+        limitBytes: 768 * MB,
+        cacheLimitBytes: 128 * MB,
+        cacheBytes: 128 * MB,
+      },
+      {
+        stream: "s2",
+        engine: "aceswarm-engine-s2-1",
+        usedBytes: 500 * MB,
+        limitBytes: 768 * MB,
+        cacheLimitBytes: null,
+        cacheBytes: 500 * MB - IDLE_ENGINE_MEMORY_BYTES,
+      },
     ]);
+  });
+
+  it("reads the cache cap from the engine's environment", () => {
+    expect(engineCacheLimit(["A=1", "ACESWARM_MEMORY_CACHE_BYTES=134217728"])).toBe(134_217_728);
+    // The container's own value comes after the image's.
+    expect(engineCacheLimit(["ACESWARM_MEMORY_CACHE_BYTES=536870912", "ACESWARM_MEMORY_CACHE_BYTES=134217728"])).toBe(
+      134_217_728,
+    );
+    for (const env of [["ACESWARM_MEMORY_CACHE_BYTES=0"], ["ACESWARM_MEMORY_CACHE_BYTES=12x"], ["OTHER=1"], [], null]) {
+      expect(engineCacheLimit(env)).toBeNull();
+    }
+  });
+
+  it("estimates the cache as the memory above an idle engine's, at most the cap", () => {
+    expect(estimateCacheBytes(100 * MB, 128 * MB)).toBe(0);
+    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 40 * MB, 128 * MB)).toBe(40 * MB);
+    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 140 * MB, 128 * MB)).toBe(128 * MB);
+    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 900 * MB, null)).toBe(900 * MB);
   });
 
   it("counts each out-of-memory kill once, after the runtime restarted the engine", async () => {
