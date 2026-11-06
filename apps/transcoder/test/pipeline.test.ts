@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createLogger } from "@aceswarm/shared/logger";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 
 /** An ffmpeg process that never delivers anything, as with an engine still looking for peers. */
@@ -32,10 +32,13 @@ describe("Pipeline", () => {
   let pipeline: Pipeline | undefined;
   /** The arguments of every ffmpeg run, in order. */
   const runs: string[][] = [];
+  /** Every ffmpeg process, in the same order. */
+  const children: ChildProcess[] = [];
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-test-"));
     runs.length = 0;
+    children.length = 0;
   });
 
   afterEach(async () => {
@@ -64,7 +67,9 @@ describe("Pipeline", () => {
     const events = { generationStarted: () => undefined, handover: () => undefined };
     pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, (_command, args) => {
       runs.push(args);
-      return silentProcess();
+      const child = silentProcess();
+      children.push(child);
+      return child;
     });
     return pipeline;
   }
@@ -89,6 +94,19 @@ describe("Pipeline", () => {
     await instance.start("http://engine-2/play", true);
     expect(inputTimeout(runs[0])).toBe("120000000");
     expect(instance.status().source).toBe("http://engine-2/play");
+  });
+
+  it("keeps the handover's input timeout when the new source needs re-encoding", async () => {
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    await instance.start("http://engine-2/play", true);
+    (children[1]?.stderr as PassThrough).write("  Stream #0:0: Video: hevc (Main), yuv420p, 1920x1080\n");
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(runs[2]).toContain("libx264");
+    expect(inputTimeout(runs[2])).toBe("120000000");
+    expect(instance.status().pendingSource).toBe("http://engine-2/play");
   });
 
   it("keeps the usual input timeout when the handover timeout is shorter", async () => {

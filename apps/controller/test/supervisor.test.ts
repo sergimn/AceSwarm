@@ -117,6 +117,8 @@ interface Fakes {
    * otherwise the new source is the only one at once. A handover that doesn't deliver in time goes.
    */
   sources?: Set<string>;
+  /** Playback URLs that start to deliver at a time on the fake clock, added to `sources` then. */
+  arrives?: Map<string, number>;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -192,6 +194,12 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   };
   const realStatus = (): PipelineStatus | undefined => {
     const sources = fakes.sources ?? new Set();
+    const arrivals = fakes.arrives ?? new Map<string, number>();
+    for (const [url, at] of arrivals) {
+      if (clock.now >= at) {
+        sources.add(url);
+      }
+    }
     if (real.pending !== undefined && sources.has(real.pending)) {
       real.active = real.pending;
       real.pending = undefined;
@@ -543,8 +551,8 @@ describe("moving a stream to another path", () => {
   });
 
   test("moves to the kept engine once its video arrives after the move gave up", async () => {
-    // The direct path dies, so its engine delivers nothing and there is no picture to keep: the
-    // new engine becomes the transcoder's only source, and the transcoder goes on reading it.
+    // The direct path dies, so its engine delivers nothing and the old ffmpeg has exited: with no
+    // picture to keep, the new engine becomes the transcoder's only source, and it goes on reading it.
     const spareSlots = new MoveSlots(1);
     const sources = new Set([`${engine.baseUrl}/play`]);
     const paths = [direct, vpn];
@@ -815,6 +823,60 @@ describe("WireGuard only", () => {
     expect(restarted).toEqual([engine.containerId]);
     expect(assigned.at(-1)).toEqual({ ip: engine.ip, path: "wg:a" });
     expect(instance.path).toBe("wg:a");
+  });
+
+  /** A playing stream whose direct engine stops just as WireGuard only goes on; the move fails. */
+  async function lostDirect(fakes: Fakes = {}) {
+    const { state, pathAllowed } = policy(false);
+    const sources = new Set([`${engine.baseUrl}/play`]);
+    const fake = supervisor([direct, vpn], { created: [engine, replacement], sources, pathAllowed, ...fakes });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    state.on = true;
+    // Its ffmpeg has exited, so there is no picture to keep: the new engine is the only source.
+    sources.clear();
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.real.active).toBe(`${replacement.baseUrl}/play`);
+    return { ...fake, sources };
+  }
+
+  test("moves to the kept engine once its late video arrives, while it waits for a slot", async () => {
+    const policyMoves = new MoveSlots(1);
+    const fake = await lostDirect({ policyMoves });
+    // Other streams are moving when it could try again.
+    expect(policyMoves.tryTake()).toBe(true);
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    await fake.instance.tick();
+    expect(fake.instance.view().message).toBe("path direct is off; other streams move first");
+
+    fake.sources.add(`${replacement.baseUrl}/play`);
+    fake.clock.now += 10_000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().engine?.name).toBe(replacement.name);
+    expect(fake.removed).toEqual([engine.containerId]);
+    expect(fake.handovers).toEqual([`${replacement.baseUrl}/play`]);
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+  });
+
+  test("trying the kept engine again doesn't open a second reader the transcoder would start", async () => {
+    const arrives = new Map<string, number>();
+    const fake = await lostDirect({ arrives });
+    // One on each engine.
+    expect(fake.sessions()).toBe(2);
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    // Its video comes while the next move waits for it.
+    arrives.set(`${replacement.baseUrl}/play`, fake.clock.now + 30_000);
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.revived).toEqual([replacement.containerId]);
+    // The transcoder already read the kept session, so the move only waited for it.
+    expect(fake.handovers).toEqual([`${replacement.baseUrl}/play`]);
+    expect(fake.sessions()).toBe(2);
+    expect(fake.removed).toEqual([engine.containerId]);
   });
 
   test("waits for a free slot before moving, so few streams move at once", async () => {

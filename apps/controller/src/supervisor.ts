@@ -192,15 +192,16 @@ export class StreamSupervisor {
         return;
       }
     }
+    await this.poll();
+    // Before any move: the engine a move kept may be what the transcoder already plays from.
+    if (await this.engines.finishLateMove(this.engine, this.session, this.pipeline)) {
+      return;
+    }
     if (this.stream.path !== null && !this.paths.allowed(this.stream.path)) {
       await this.leaveDisallowedPath(this.engine);
       return;
     }
     if (await this.moveToWantedEngine(this.engine)) {
-      return;
-    }
-    await this.poll();
-    if (await this.engines.finishLateMove(this.engine, this.session, this.pipeline)) {
       return;
     }
     const health = evaluateHealth({

@@ -142,7 +142,9 @@ export class StreamEngines {
         await this.deps.engines.remove(engine);
       }
     }
-    if (spare?.session !== undefined && spare.engine.containerId === kept?.containerId) {
+    if (spare !== undefined && spare.engine.containerId !== kept?.containerId) {
+      await this.gateway.drop(spare.engine.ip);
+    } else if (spare?.session !== undefined) {
       // The stream starts a session of its own on it.
       await this.deps.ace.stopSession(spare.session.commandUrl).catch(() => undefined);
     }
@@ -282,8 +284,10 @@ export class StreamEngines {
    * A move to a new engine of the stream's own that fails once the engine answers keeps that engine
    * as a spare, with the session the move opened: on a slow swarm a new engine can take minutes to
    * find its peers, so the next move to the same path tries it again rather than a new engine that
-   * starts from none. It goes after `maxFailures` failed moves, once it stops answering, or when the
-   * stream no longer needs it (see `played`, `expireSpare`).
+   * starts from none. It goes after `SPARE_MAX_FAILURES` failed moves, once it stops answering, or
+   * when the stream no longer needs it (see `played`, `expireSpare`). A kept session the transcoder
+   * still reads (the old ffmpeg had exited, so there was no picture to keep) gets no second
+   * reader: the move waits for it.
    */
   async move(move: EngineMove): Promise<void> {
     // The engine being started, once it has an address, so a failed move can let go of it.
@@ -294,14 +298,17 @@ export class StreamEngines {
     try {
       const engine = await this.forMove(move.from, move.target, move.shared, starting);
       ready = engine;
-      const session = (await this.spareSession(engine)) ?? (await move.openSession(engine.baseUrl));
+      const reused = await this.spareSession(engine);
+      const session = reused ?? (await move.openSession(engine.baseUrl));
       opened = session;
       const source = { source: session.playbackUrl };
       let pipeline: PipelineStatus | undefined;
       if (move.handover === undefined) {
         pipeline = await this.deps.transcoder.start(this.streamId, source);
       } else {
-        await this.deps.transcoder.start(this.streamId, source, true);
+        if (reused === undefined || !(await this.transcoderReads(session))) {
+          await this.deps.transcoder.start(this.streamId, source, true);
+        }
         pipeline = await waitForHandover(this.deps.transcoder, this.streamId, session.playbackUrl, move.handover);
       }
       // The move is done: a later failure must not remove the engine the stream now plays from.
@@ -319,7 +326,7 @@ export class StreamEngines {
   }
 
   /**
-   * The transcoder plays from the spare: a move to it failed while there was no picture to keep, so
+   * The transcoder plays from the spare: a move to it failed after the old ffmpeg had exited, so
    * the new source became the transcoder's only one and it went on reading it, and video arrived
    * after the move gave up. Finishes that move, leaving `from` and its `session`. Returns true then.
    */
@@ -342,6 +349,12 @@ export class StreamEngines {
     this.clearSpare();
     await this.finish({ from, session, commit: spare.commit }, { engine: spare.engine, session: kept, pipeline });
     return true;
+  }
+
+  /** Whether the transcoder's current ffmpeg still reads the session (an engine allows one reader). */
+  private async transcoderReads(session: EngineSession): Promise<boolean> {
+    const status = await this.deps.transcoder.status(this.streamId).catch(() => undefined);
+    return status?.source === session.playbackUrl && status.state !== "exited";
   }
 
   /** The stream plays from the engine it moved to: commits the move and lets go of `from`. */
@@ -512,8 +525,8 @@ export class StreamEngines {
 
   /**
    * An engine on `path` for a move away from `current`: the path's shared engine with `shared`,
-   * otherwise a new engine of the stream's own. `starting` holds it as soon as it has an address,
-   * so a failed move can let go of it.
+   * otherwise the engine an earlier move to `path` kept, or else a new engine of the stream's own.
+   * `starting` holds it as soon as it has an address, so a failed move can let go of it.
    */
   private async forMove(
     current: EngineHandle,
