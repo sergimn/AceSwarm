@@ -22,8 +22,12 @@ export interface StreamEnginesDeps {
   transcoder: TranscoderClient;
   netgw: NetgwClient;
   metrics: ControllerMetrics;
+  /** The engines that streams on the same path share, used while sharing is on. */
   shared?: SharedEngines | undefined;
-  /** Limits how many streams start an engine of their own at once (shared by every stream). */
+  /**
+   * Limits how many streams start an engine of their own at once (shared by every stream), to move
+   * off a path the policy turned off or off a shared engine once sharing is off.
+   */
   policyMoves?: MoveSlots | undefined;
   /**
    * Limits how many spares there are at once (shared by every stream): each is an engine more. A
@@ -46,6 +50,8 @@ interface Spare {
   engine: EngineHandle;
   path: string;
   session: EngineSession | undefined;
+  /** The failed move's commit, for when its video arrives late (see `finishLateMove`). */
+  commit: EngineMove["commit"];
   /** Moves to it that failed. */
   failures: number;
   /** When the last one failed. */
@@ -303,20 +309,52 @@ export class StreamEngines {
       if (this.spare?.engine.containerId === engine.containerId) {
         this.clearSpare();
       }
-      await move.commit({ engine, session, pipeline });
-      await this.remember(engine);
-      if (move.session !== undefined) {
-        await this.deps.ace.stopSession(move.session.commandUrl).catch(() => undefined);
-      }
-      // A move can end on the shared engine the stream came from (it was current again).
-      if (engine.containerId !== move.from.containerId) {
-        await this.release(move.from);
-      }
+      await this.finish(move, { engine, session, pipeline });
     } catch (error) {
       if (starting.engine !== undefined) {
         await this.abandon(ready ?? starting.engine, ready !== undefined, opened, move);
       }
       throw error;
+    }
+  }
+
+  /**
+   * The transcoder plays from the spare: a move to it failed while there was no picture to keep, so
+   * the new source became the transcoder's only one and it went on reading it, and video arrived
+   * after the move gave up. Finishes that move, leaving `from` and its `session`. Returns true then.
+   */
+  async finishLateMove(
+    from: EngineHandle,
+    session: EngineSession | undefined,
+    pipeline: PipelineStatus | undefined,
+  ): Promise<boolean> {
+    const spare = this.spare;
+    const kept = spare?.session;
+    if (
+      spare === undefined ||
+      kept === undefined ||
+      pipeline?.source !== kept.playbackUrl ||
+      pipeline.lastFrameAt === null
+    ) {
+      return false;
+    }
+    this.logger.info({ engine: spare.engine.name }, "video arrived late from the kept engine; moving to it");
+    this.clearSpare();
+    await this.finish({ from, session, commit: spare.commit }, { engine: spare.engine, session: kept, pipeline });
+    return true;
+  }
+
+  /** The stream plays from the engine it moved to: commits the move and lets go of `from`. */
+  private async finish(move: Pick<EngineMove, "from" | "session" | "commit">, moved: MovedStream): Promise<void> {
+    // First, so that a restarted controller takes over the engine the transcoder already plays from.
+    await this.remember(moved.engine);
+    await move.commit(moved);
+    if (move.session !== undefined) {
+      await this.deps.ace.stopSession(move.session.commandUrl).catch(() => undefined);
+    }
+    // A move can end on the shared engine the stream came from (it was current again).
+    if (moved.engine.containerId !== move.from.containerId) {
+      await this.release(move.from);
     }
   }
 
@@ -353,7 +391,7 @@ export class StreamEngines {
       failures < SPARE_MAX_FAILURES &&
       (spare !== undefined || this.deps.spareSlots?.tryTake() !== false)
     ) {
-      this.spare = { engine, path: move.target, session, failures, failedAt: this.now() };
+      this.spare = { engine, path: move.target, session, commit: move.commit, failures, failedAt: this.now() };
       this.logger.info({ engine: engine.name, failures }, "keeping the new engine to try again on it");
       return;
     }
@@ -366,7 +404,10 @@ export class StreamEngines {
     await this.release(engine).catch(() => undefined);
   }
 
-  /** The spare's session, for a move to the spare, while the engine still knows it. */
+  /**
+   * The spare's session, for a move to the spare, while the engine still knows it. One opened on an
+   * address the engine no longer has is gone with that address.
+   */
   private async spareSession(engine: EngineHandle): Promise<EngineSession | undefined> {
     const spare = this.spare;
     if (spare?.engine.containerId !== engine.containerId || spare.session === undefined) {
@@ -374,6 +415,9 @@ export class StreamEngines {
     }
     const session = spare.session;
     spare.session = undefined;
+    if (new URL(session.statUrl).hostname !== new URL(engine.baseUrl).hostname) {
+      return undefined;
+    }
     try {
       await this.deps.ace.stats(session.statUrl);
       return session;

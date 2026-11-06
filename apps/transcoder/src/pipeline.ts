@@ -117,9 +117,10 @@ export class Pipeline {
   }
 
   /**
-   * Points the pipeline at a (new) source. With `handover`, ffmpeg waits for the source's first data
-   * as long as the controller waits for the handover, even when there is no picture left to keep:
-   * a new engine on a slow swarm can take longer than the usual input timeout to deliver.
+   * Points the pipeline at a (new) source. With `handover`, ffmpeg's input timeout (how long any
+   * read may wait, for the whole run) is at least the handover timeout, even when there is no
+   * picture left to keep: a new engine on a slow swarm can take longer than the usual input timeout
+   * to deliver its first data, and the controller waits the whole handover for it.
    */
   async start(source: string, handover: boolean): Promise<void> {
     const inputTimeoutSeconds = handover ? this.handoverInputTimeoutSeconds() : this.settings.plan.inputTimeoutSeconds;

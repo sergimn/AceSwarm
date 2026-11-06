@@ -73,17 +73,18 @@ A path that is down, or whose WireGuard profile was removed, is left right away.
 Moves are make-before-break, so the picture doesn't go blank:
 
 1. A second engine starts on the new path.
-2. The transcoder swaps sources only once the new engine delivers video. It waits up to `HANDOVER_TIMEOUT_SECONDS` (120) for that, and ffmpeg waits that long for the new engine's first data too, rather than the usual `INPUT_TIMEOUT_SECONDS` (60): on a slow swarm a new engine can take over a minute to deliver.
+2. The transcoder swaps sources only once the new engine delivers video. It waits up to `HANDOVER_TIMEOUT_SECONDS` (120) for that. ffmpeg's input timeout for the new engine is that long too, rather than the usual `INPUT_TIMEOUT_SECONDS` (60), because on a slow swarm a new engine can take over a minute to deliver. The timeout applies to every read for the whole ffmpeg run, but that doesn't delay stall detection, which watches for new frames (`STALL_SECONDS`).
 3. The old engine is removed.
 
 #### Kept engines
 
-A new engine that doesn't deliver in time may still be about to: it has found some peers, and a new one would start from none. So when a move to a new engine of the stream's own fails once the engine answers, the stream keeps that engine and tries again on it:
+A new engine that doesn't deliver in time may still be about to: it may have found some peers, and a new one would start from none. So when a move to a new engine of the stream's own fails once the engine answers, the stream keeps that engine and tries again on it:
 
 - **It stays ready.** It keeps its gateway path, and the session the move opened stays open, so it keeps its peers. The next try reuses that session while the engine still knows it, and opens a new one otherwise.
 - **The next move to the same path uses it**: a recovery path switch, a move off the direct path once WireGuard only is on, or a move to an engine of its own once sharing is off. Each try waits as usual: recovery's ladder delays, or the wait after a failed move.
+- **Late video still counts.** When there was no picture to keep (the old engine had stopped delivering), the new engine became the transcoder's only source, and it goes on reading it after the move gave up. Once video arrives from it, the move finishes as if it had been in time.
 - **It goes** after its third failed move, when it stops answering, when the stream moves to another path or to a shared engine instead, when the stream plays again without it (unless it plays from a shared engine while sharing is off, so it still wants an engine of its own), or when no move tried it again for twice `RECOVERY_MAX_DELAY_SECONDS`. The next try then starts a new engine.
-- **At most two at once.** Each kept engine is an engine more, so only two streams keep one at a time. A failed move with none free removes its engine, as before.
+- **At most `MAX_KEPT_ENGINES` (2) at once.** Each kept engine is an engine more, and it keeps downloading, so only that many streams keep one at a time. A failed move with none free removes its engine, as before. 0 turns kept engines off.
 - Moves to a [shared engine](#shared-engines) don't need this: a path's engine already stays two minutes after its last stream left.
 
 ### WireGuard only

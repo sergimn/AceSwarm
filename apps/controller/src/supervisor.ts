@@ -14,9 +14,8 @@ import type { EngineHandle } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
 import { sleep, startSessionOfAnyKind } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
-import type { SharedEngines } from "./shared-engines.ts";
 import { StreamEngines, type StreamEnginesDeps } from "./stream-engines.ts";
-import { StreamPaths, type MoveSlots } from "./stream-paths.ts";
+import { StreamPaths } from "./stream-paths.ts";
 import { streamView } from "./stream-view.ts";
 import type { StreamConfig } from "./stream-store.ts";
 
@@ -38,12 +37,8 @@ export interface SupervisorDeps extends StreamEnginesDeps {
   paths: () => PathStatus[];
   /** Whether the network policy lets engines use a path (the direct path is off with WireGuard only). */
   pathAllowed?: (path: string) => boolean;
-  /** Shared by every stream: limits how many move off a path the policy turned off at once. */
-  policyMoves?: MoveSlots;
   /** Number of running streams per path. */
   pathLoad: () => ReadonlyMap<string, number>;
-  /** The engines that streams on the same path share, used while `sharedEngines()` is on. */
-  shared?: SharedEngines;
   /** Whether streams share one engine per path (the setting can change at any time). */
   sharedEngines?: () => boolean;
   /** Number of players showing this stream full screen. */
@@ -205,6 +200,9 @@ export class StreamSupervisor {
       return;
     }
     await this.poll();
+    if (await this.engines.finishLateMove(this.engine, this.session, this.pipeline)) {
+      return;
+    }
     const health = evaluateHealth({
       now: this.now(),
       attemptStartedAt: this.attemptStartedAt,
