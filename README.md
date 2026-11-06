@@ -55,7 +55,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
 - The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`.
 - Turn on **One engine per path** (under **Streams**) when you run several streams: they then share one engine instead of each starting its own.
-- Set `ENGINE_MEMORY_CACHE_MB=256` and `ENGINE_MEMORY_MB=768` when you run several streams on an 8 GB Pi with their own engines. With the x86 engine, each engine then levelled off at about 400 MB in testing. The dashboard shows how much each engine really uses.
+- Set `ENGINE_MEMORY_CACHE_MB=256` and `ENGINE_MEMORY_MB=768` when you run several streams on an 8 GB Pi with their own engines. Each engine then levelled off at about 400 MB in testing, with the x86 engine and with the Pi's arm64 engine. The dashboard shows how much each engine really uses.
 
 ### Podman
 
