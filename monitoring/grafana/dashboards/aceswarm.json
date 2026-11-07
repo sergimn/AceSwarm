@@ -905,7 +905,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Peers each engine sent stream data to between two gateway samples (at least one 16 KiB block on top of 1/8 of what the peer sent us, which covers the acknowledgements and requests a download sends back), from the gateway's connection table. Only peers the engine connected to itself count: the gateway forwards no inbound ports. Every stream on a shared engine shows the same peers.",
+      "description": "Peers each engine sent stream data to between two gateway samples (at least one 16 KiB block on top of 1/8 of what the peer sent us, which covers the acknowledgements and requests a download sends back), from the gateway's connection table. A stream shows 0 while its engine reports no upload speed, since what it sends its peers then isn't stream data. Only peers the engine connected to itself count: the gateway forwards no inbound ports. Every stream on a shared engine that uploads shows the same peers.",
       "gridPos": {
         "h": 8,
         "w": 12,

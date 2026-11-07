@@ -50,6 +50,16 @@ function stopped(stream: StreamConfig): LiveFields {
   };
 }
 
+/**
+ * Peers the gateway saw the engine send stream data to. The engine's own upload speed counts only
+ * stream data, so while it is 0 whatever the gateway saw is the engine's other traffic to its peers,
+ * and none of them counts.
+ */
+function uploadingPeers(stats: EngineStats | undefined, peers: PeerStats | undefined): number | null {
+  const uploading = peers?.uploading ?? null;
+  return uploading !== null && stats?.speedUp === 0 ? 0 : uploading;
+}
+
 function running(live: LiveStream): LiveFields {
   const { stats, peers, engine } = live;
   return {
@@ -60,7 +70,7 @@ function running(live: LiveStream): LiveFields {
     peers: {
       connected: stats?.peers ?? peers?.connected ?? null,
       active: peers?.active ?? null,
-      uploading: peers?.uploading ?? null,
+      uploading: uploadingPeers(stats, peers),
       countries: peers?.countries.slice(0, 3) ?? [],
     },
     downloadKBps: stats?.speedDown ?? null,
