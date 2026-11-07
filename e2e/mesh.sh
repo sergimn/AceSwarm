@@ -82,13 +82,15 @@ install_wireguard_tools() {
   local try
   for try in $(seq 1 "$MESH_TRIES"); do
     if sudo timeout -k 5 "$MESH_APT_SECONDS" env DEBIAN_FRONTEND=noninteractive sh -c \
-      'apt-get -qq -o DPkg::Lock::Timeout=20 update &&
-       apt-get -qq -o DPkg::Lock::Timeout=20 install -y wireguard-tools >/dev/null'; then
+      'apt-get -qq -o DPkg::Lock::Timeout=20 -o Acquire::http::Timeout=15 update &&
+       apt-get -qq -o DPkg::Lock::Timeout=20 -o Acquire::http::Timeout=15 install -y wireguard-tools >/dev/null'; then
       return 0
     fi
     log "installing wireguard-tools failed or took over $MESH_APT_SECONDS s (try $try of $MESH_TRIES)"
     # A try stopped while dpkg was unpacking leaves it half done, which would fail the next one.
-    sudo timeout 60 dpkg --configure -a || true
+    sudo timeout -k 5 60 dpkg --configure -a || true
+    # A try stopped after wg was unpacked (in a slow trigger, say) still did the job.
+    command -v wg >/dev/null && return 0
     sleep 2
   done
   log "could not install wireguard-tools"

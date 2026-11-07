@@ -13,8 +13,8 @@
 #
 # Re-run all jobs, never only the failed one: the runners only work together.
 #
-# Every step has a time limit of a few times its usual length, so a step that hangs fails within
-# minutes rather than at the job's limit, and mesh.sh stops waiting for a runner whose job ended.
+# Every setup and test step has a time limit of a few times its usual length, so a step that hangs
+# fails within minutes rather than at the job's limit, and mesh.sh stops waiting for a runner whose job ended.
 name: E2E
 
 on:
@@ -38,10 +38,11 @@ env:
 
 jobs:
   wg:
+    # mesh.sh (job_name) looks for this job by name.
     name: WireGuard server
     runs-on: ubuntu-24.04
-    # Serves until both stack jobs are done, so it outlasts their limit.
-    timeout-minutes: 55
+    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -88,10 +89,11 @@ jobs:
           e2e/vpn.sh logs
 
   source:
+    # mesh.sh (job_name) looks for this job by name.
     name: Dummy Acestream broadcast
     runs-on: ubuntu-24.04
-    # Serves until both stack jobs are done, so it outlasts their limit.
-    timeout-minutes: 55
+    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -135,6 +137,7 @@ jobs:
           e2e/broadcast.sh logs
 
   stack:
+    # mesh.sh (job_name) looks for these jobs by name.
     name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
