@@ -170,6 +170,7 @@ jobs:
         run: |
           e2e/mesh.sh wait-file wg "client-$MESH_ROLE.conf" >/dev/null
           e2e/mesh.sh wait-file source broadcasts.json
+          e2e/stack.sh check
       - name: Run the tests
         run: npm run e2e
       - name: Tell the other runners the tests are done
