@@ -145,7 +145,7 @@ flowchart TB
 
 - **Sharing files.** Each runner serves `$RUNNER_TEMP/mesh/share` on its mesh address, port 18999. `mesh.sh share` publishes a file, and `mesh.sh wait-file` polls a peer for one.
 - **Finishing.** Each stack job shares `done` even when it fails. The WireGuard and broadcast jobs wait for it from every stack runner that joined (`mesh.sh wait-all`), so one stack finishing early never takes the VPN or the broadcasts away from the other. A stack job keeps serving `done` until both have fetched it (`mesh.sh wait-fetched`, at most two minutes), because its file server stops with the job. If a stack runner disappears (cancelled or crashed), they stop waiting for it after it hasn't answered pings for about five minutes.
-- **A stack runner that never shows up** is left out: the WireGuard and broadcast jobs join the stacks as optional peers (`stack?` in `mesh.sh join`), after waiting up to ten minutes for each one's artifact.
+- **A stack runner that is late or never shows up** holds nobody up: the WireGuard and broadcast jobs join the stacks as optional peers (`stack?` in `mesh.sh join`) and add each one as soon as its artifact appears, while the other stack's handshakes already get answers. A stack that hasn't appeared after ten minutes is left out, and until then the shared runners don't start their servers, so its absence delays the other stack by up to ten minutes but doesn't fail it.
 - **Re-runs.** Use "Re-run all jobs". Re-running a single job can't work, because it would wait for runners that are gone.
 
 ## The broadcasts

@@ -11,8 +11,9 @@
 #   mesh.sh prepare ROLE           keys, mesh address, STUN; writes $MESH_DIR/publish/ROLE.json
 #                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE)
 #   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer. A
-#                                  PEER written as NAME? is optional: if it never shows up or never
-#                                  answers, the mesh forms without it.
+#                                  PEER written as NAME? is optional: it is added as soon as its
+#                                  artifact shows up (for up to 10 minutes), and left out if it
+#                                  never does or never answers.
 #   mesh.sh ip ROLE                prints a role's mesh address
 #   mesh.sh share FILE [NAME]      serves FILE to the other runners at http://<mesh ip>:18999/NAME
 #   mesh.sh wait-file ROLE NAME    waits until ROLE serves NAME (or stops answering) and prints it
@@ -101,34 +102,79 @@ prepare() {
     >"$MESH_DIR/publish/$role.json"
 }
 
-# Waits until the workflow run has the peer's artifact and downloads it. Returns 1 if it never
-# shows up.
+has_artifact() {
+  gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+    --jq '.artifacts[].name' 2>/dev/null | grep -x "${MESH_ARTIFACT_PREFIX}$1" >/dev/null
+}
+
+# Downloads a peer's artifact (it must exist) to $MESH_DIR/peers/PEER.json.
+download_peer() {
+  local peer="$1"
+  rm -rf "$MESH_DIR/download-$peer"
+  gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "${MESH_ARTIFACT_PREFIX}$peer" \
+    -D "$MESH_DIR/download-$peer" >/dev/null || return 1
+  cp "$MESH_DIR/download-$peer/$peer.json" "$MESH_DIR/peers/$peer.json" || return 1
+  log "$peer: $(jq -c '{meshIp, endpoint}' "$MESH_DIR/peers/$peer.json")"
+}
+
+# Waits until the workflow run has the peer's artifact and downloads it.
 fetch_peer() {
-  local peer="$1" name="${MESH_ARTIFACT_PREFIX}$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
-  until gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-    --jq '.artifacts[].name' 2>/dev/null | grep -x "$name" >/dev/null; do
+  local peer="$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
+  until has_artifact "$peer"; do
     if ((SECONDS > deadline)); then
-      log "timed out waiting for the $peer runner (artifact $name)"
-      return 1
+      log "timed out waiting for the $peer runner (artifact ${MESH_ARTIFACT_PREFIX}$peer)"
+      exit 1
     fi
     sleep 3
   done
-  rm -rf "$MESH_DIR/download-$peer"
-  gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$name" -D "$MESH_DIR/download-$peer" >/dev/null
-  cp "$MESH_DIR/download-$peer/$peer.json" "$MESH_DIR/peers/$peer.json"
-  log "$peer: $(jq -c '{meshIp, endpoint}' "$MESH_DIR/peers/$peer.json")"
+  download_peer "$peer" || exit 1
+}
+
+add_peer() {
+  local file="$MESH_DIR/peers/$1.json"
+  sudo wg set "$MESH_IFACE" peer "$(jq -r .publicKey "$file")" \
+    endpoint "$(jq -r .endpoint "$file")" \
+    allowed-ips "$(jq -r .meshIp "$file")/32" \
+    persistent-keepalive 5
+}
+
+# Waits until the peer answers pings through the mesh; returns 1 if it never does.
+await_peer() {
+  local peer="$1" ip start=$SECONDS
+  ip="$(mesh_ip "$peer")"
+  until ping -c 1 -W 1 "$ip" >/dev/null 2>&1; do
+    if ((SECONDS - start > ${MESH_HANDSHAKE_SECONDS:-180})); then
+      sudo wg show "$MESH_IFACE" >&2
+      log "no connectivity to $peer ($ip)"
+      return 1
+    fi
+  done
+  log "$peer answers at $ip after $((SECONDS - start)) s"
+  echo "$peer" >>"$MESH_DIR/joined"
+}
+
+# Adds each optional peer whose artifact exists now and prints the ones still missing.
+add_ready() {
+  local peer
+  for peer in "$@"; do
+    if has_artifact "$peer" && download_peer "$peer"; then
+      add_peer "$peer"
+      echo "+$peer"
+    else
+      echo "$peer"
+    fi
+  done
 }
 
 join() {
   local role="$1"
   shift
-  local peer peers=()
+  local peer required=() optional=()
   for peer in "$@"; do
-    if fetch_peer "${peer%\?}"; then
-      peers+=("${peer%\?}")
-    elif [[ "$peer" != *\? ]]; then
-      exit 1
-    fi
+    if [[ "$peer" == *\? ]]; then optional+=("${peer%\?}"); else required+=("$peer"); fi
+  done
+  for peer in "${required[@]}"; do
+    fetch_peer "$peer"
   done
   # The NAT keeps an idle mapping for well over the second this takes.
   local stun_pid
@@ -139,29 +185,35 @@ join() {
     sleep 0.1
   done
   sudo wg set "$MESH_IFACE" listen-port "$MESH_PORT"
-  for peer in "${peers[@]}"; do
-    local file="$MESH_DIR/peers/$peer.json"
-    sudo wg set "$MESH_IFACE" peer "$(jq -r .publicKey "$file")" \
-      endpoint "$(jq -r .endpoint "$file")" \
-      allowed-ips "$(jq -r .meshIp "$file")/32" \
-      persistent-keepalive 5
-  done
-  local start=$SECONDS
   : >"$MESH_DIR/joined"
-  for peer in "${peers[@]}"; do
-    local ip optional=false
-    ip="$(mesh_ip "$peer")"
-    [[ " $* " == *" $peer? "* ]] && optional=true
-    until ping -c 1 -W 1 "$ip" >/dev/null 2>&1; do
-      if ((SECONDS - start > ${MESH_HANDSHAKE_SECONDS:-180})); then
-        sudo wg show "$MESH_IFACE" >&2
-        log "no connectivity to $peer ($ip)"
-        [[ "$optional" == true ]] && continue 2
-        exit 1
-      fi
+  for peer in "${required[@]}"; do
+    add_peer "$peer"
+  done
+
+  # Optional peers go in as soon as their artifact shows up, so one that is late or never comes
+  # holds nobody up: a peer that is already waiting for this runner gets its handshakes answered.
+  local pending=() added=() line deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
+  while read -r line; do
+    if [[ "$line" == +* ]]; then added+=("${line#+}"); else pending+=("$line"); fi
+  done < <(add_ready "${optional[@]}")
+  for peer in "${required[@]}"; do
+    await_peer "$peer" || exit 1
+  done
+  while ((${#added[@]} > 0 || (${#pending[@]} > 0 && SECONDS < deadline))); do
+    for peer in "${added[@]}"; do
+      await_peer "$peer" || log "leaving out $peer"
     done
-    log "$peer answers at $ip after $((SECONDS - start)) s"
-    echo "$peer" >>"$MESH_DIR/joined"
+    added=()
+    ((${#pending[@]} > 0)) || break
+    sleep 3
+    local still=()
+    while read -r line; do
+      if [[ "$line" == +* ]]; then added+=("${line#+}"); else still+=("$line"); fi
+    done < <(add_ready "${pending[@]}")
+    pending=("${still[@]}")
+  done
+  for peer in "${pending[@]}"; do
+    log "$peer never showed up; leaving it out"
   done
   sudo wg show "$MESH_IFACE"
 }
@@ -261,7 +313,7 @@ case "${1:-}" in
   wait-all) wait_all "${@:2}" ;;
   wait-fetched) wait_fetched "${@:2}" ;;
   *)
-    sed -n '2,26p' "$0" >&2
+    sed -n '2,27p' "$0" >&2
     exit 2
     ;;
 esac

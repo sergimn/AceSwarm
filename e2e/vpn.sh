@@ -60,7 +60,7 @@ case "${1:-}" in
   profile) profile "$2" ;;
   logs) logs ;;
   *)
-    sed -n '2,10p' "$0" >&2
+    sed -n '2,12p' "$0" >&2
     exit 2
     ;;
 esac
