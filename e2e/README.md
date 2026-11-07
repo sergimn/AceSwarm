@@ -279,6 +279,7 @@ sequenceDiagram
   T->>AS: two broadcasts play, one engine each
   T->>AS: turn "One engine per path" on in the Streams dialog
   AS->>AS: shared engine for the direct path, both streams move make-before-break
+  T->>AS: the engines metric counts 1 shared engine and no own ones
   T->>FW: DROP the first broadcast's P2P port
   AS->>AS: nobody watches it: session restarts only, the shared engine stays
   T->>FW: remove the DROP rule, it plays again
@@ -304,6 +305,7 @@ sequenceDiagram
   T->>AS: the stream plays on the direct path, no standby (one path)
   T->>AS: upload the WireGuard profile
   AS->>WG: a standby engine on the VPN, the transcoder reads it: "hot"
+  T->>AS: the engines metric counts 2 own engines, the standby too
   T->>AS: pause the engine the stream plays from (it hangs)
   AS->>AS: no video for 8 s: fail over to the VPN standby (one recovery, no "recovering")
   T->>AS: unpause it

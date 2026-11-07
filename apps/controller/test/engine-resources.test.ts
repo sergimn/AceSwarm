@@ -1,5 +1,5 @@
 import { createLogger } from "@aceswarm/shared/logger";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ContainerDetails, ContainerSummary, DockerClient, MemoryUsage } from "../src/docker.ts";
 import { EngineResourceMonitor } from "../src/engine-resources.ts";
 
@@ -139,5 +139,23 @@ describe("EngineResourceMonitor", () => {
     engines.splice(0, 3);
     await monitor.sample();
     expect(monitor.running()).toEqual({ own: 0, shared: 0 });
+  });
+
+  it("drops the count when it can't list the engines, rather than keep an old one", async () => {
+    const docker = fakeDocker([engine("a", "s1", 300)]);
+    const monitor = new EngineResourceMonitor(
+      docker,
+      { stack: "test", onOomKill: () => undefined },
+      createLogger("test", "silent"),
+    );
+    await monitor.sample();
+    expect(monitor.running()).toEqual({ own: 1, shared: 0 });
+
+    vi.spyOn(docker, "listContainers").mockRejectedValueOnce(new Error("socket proxy down"));
+    await expect(monitor.sample()).rejects.toThrow("socket proxy down");
+    expect(monitor.running()).toBeUndefined();
+
+    await monitor.sample();
+    expect(monitor.running()).toEqual({ own: 1, shared: 0 });
   });
 });

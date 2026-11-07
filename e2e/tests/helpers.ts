@@ -202,7 +202,7 @@ export async function reportedEngines(
   const response = await request.get("/metrics");
   expect(response.ok()).toBe(true);
   const text = await response.text();
-  // Each service adds labels of its own, such as service.
+  // The registry adds a default service label.
   const value = (kind: string): number | undefined => {
     const match = new RegExp(String.raw`^aceswarm_engines\{kind="${kind}"[^}]*\} (\S+)$`, "m").exec(text);
     return match === null ? undefined : Number(match[1]);

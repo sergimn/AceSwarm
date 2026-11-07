@@ -61,16 +61,23 @@ export class EngineResourceMonitor {
     return this.memory;
   }
 
-  /** The engines running at the last sample; undefined before the first. */
+  /** The engines running at the last sample; undefined before the first, or when it could not list them. */
   running(): EngineCount | undefined {
     return this.count;
   }
 
   async sample(): Promise<void> {
-    const containers = await this.docker.listContainers({
-      "aceswarm.stack": this.options.stack,
-      "aceswarm.role": "engine",
-    });
+    let containers: ContainerSummary[];
+    try {
+      containers = await this.docker.listContainers({
+        "aceswarm.stack": this.options.stack,
+        "aceswarm.role": "engine",
+      });
+    } catch (error) {
+      // An old count would pass for the engines running now.
+      this.count = undefined;
+      throw error;
+    }
     this.count = countRunning(containers);
     const memory: EngineMemory[] = [];
     const seen = new Set<string>();

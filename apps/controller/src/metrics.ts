@@ -7,7 +7,7 @@ import type { SharedEngineView } from "./shared-engines.ts";
 export interface MetricSources {
   viewers?: () => ViewerView[];
   sharedEngines?: () => SharedEngineView[];
-  /** Engines running at the last sample; undefined before the first. */
+  /** Engines running at the last sample; undefined before the first, or when it could not list them. */
   engines?: () => EngineCount | undefined;
 }
 
@@ -241,7 +241,7 @@ export class ControllerMetrics {
     });
     const engines = new Gauge({
       name: "aceswarm_engines",
-      help: "Engine containers running, by kind: own (a stream's: the one it plays from, a standby, or one kept to retry a move) and shared (a network path's)",
+      help: "Engine containers running at the last sample (every ENGINE_STATS_SECONDS), by kind: own (a stream's: the one it plays from, a standby, or one kept to retry a move) and shared (a network path's)",
       labelNames: ["kind"],
       registers,
     });
