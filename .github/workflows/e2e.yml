@@ -196,4 +196,8 @@ jobs:
           retention-days: 14
       - name: Stop AceSwarm
         if: always()
+        # On Ubuntu 26.04, Podman can't stop pasta when the last container leaves its network
+        # ("rootless netns: kill network process: permission denied"): pasta's AppArmor profile
+        # doesn't let it receive signals. The runner is thrown away anyway.
+        continue-on-error: ${{ matrix.runtime == 'podman' }}
         run: e2e/stack.sh down

@@ -44,6 +44,16 @@ setup() {
   if ! grep -q "^${user}:" /etc/subuid || ! grep -q "^${user}:" /etc/subgid; then
     sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$user"
   fi
+  # Rootless Podman's network (pasta) sends the gateway's ping probes out through unprivileged ICMP
+  # sockets, which the host only allows for the groups in ping_group_range. Without them every
+  # path stays down and the gateway gives engines no way out.
+  local low high
+  read -r low high </proc/sys/net/ipv4/ping_group_range
+  log "net.ipv4.ping_group_range: $low $high"
+  if (($(id -g) < low || $(id -g) > high)); then
+    sudo sysctl -q -w net.ipv4.ping_group_range="0 2147483647"
+    log "net.ipv4.ping_group_range: now 0 2147483647"
+  fi
   # The specs' iptables rules in Podman's network namespace can't load kernel modules from there.
   sudo modprobe -a nft_compat xt_comment xt_tcpudp 2>/dev/null || true
 
