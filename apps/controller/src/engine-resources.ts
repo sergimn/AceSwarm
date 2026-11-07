@@ -45,7 +45,7 @@ export class EngineResourceMonitor {
   private readonly docker: DockerClient;
   private readonly options: EngineResourceOptions;
   private readonly logger: Logger;
-  /** Undefined until the first sample. */
+  /** Undefined before the first sample, or when the last one could not list the engines. */
   private count: EngineCount | undefined;
   private memory: EngineMemory[] = [];
   /** Last exit time seen per container id. */

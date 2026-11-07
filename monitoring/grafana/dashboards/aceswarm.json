@@ -170,7 +170,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Engine containers running now. Each enabled stream has an engine of its own, plus its hot standbys on other paths. With \"One engine per path\" on, each path has one shared engine instead, for all its streams and their standbys; while a replaced shared engine's streams move, both count. Engines kept to retry a move, and shared engines that stay a while after their last stream left, count too. From the container runtime, every ENGINE_STATS_SECONDS (15 s).",
+      "description": "Engine containers running now. Each enabled stream has an engine of its own, plus its hot standbys on other paths. With \"One engine per path\" on, each path has one shared engine instead, for all its streams and their standbys. Engines kept to retry a move, and shared engines that stay a while after their last stream left, count too, and so do both engines while streams move to a new one. From the container runtime, every ENGINE_STATS_SECONDS (15 s).",
       "gridPos": {
         "h": 4,
         "w": 4,

@@ -194,7 +194,7 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
 
 /**
  * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
- * "Engines running" adds up); undefined before its first sample.
+ * "Engines running" adds up); undefined before its first sample, or when it could not list them.
  */
 export async function reportedEngines(
   request: APIRequestContext,
