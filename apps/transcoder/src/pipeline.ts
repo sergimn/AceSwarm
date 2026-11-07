@@ -273,7 +273,8 @@ export class Pipeline {
         this.reopen(pending);
       }
     } else if (pending.state === "exited" || this.now() - pending.startedAt > this.settings.handoverTimeoutMs) {
-      this.logger.warn({ generation: pending.number, error: pending.error }, "handover failed");
+      const stderr = pending.stderrTail.slice(-5);
+      this.logger.warn({ generation: pending.number, error: pending.error, stderr }, "handover failed");
       this.retire(pending);
       this.pending = undefined;
       this.events.handover(this.id, "failed");
@@ -294,7 +295,7 @@ export class Pipeline {
     }
     this.retire(generation);
     this.logger.info(
-      { generation: generation.number, error: generation.error, reopensLeft: next.reopens },
+      { generation: generation.number, stderr: generation.stderrTail.slice(-5), reopensLeft: next.reopens },
       "ffmpeg failed before any video; opening the source again",
     );
     void this.run(next, "reopen").catch((error: unknown) => {
