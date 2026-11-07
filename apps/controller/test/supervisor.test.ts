@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { Registry } from "@prometheus-io/client";
 import type { PathAssignment, PathStatus, PipelineStatus } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
@@ -7,6 +8,7 @@ import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { FailureReport, SharedEngines } from "../src/shared-engines.ts";
+import { DEFAULT_STANDBY_SETTINGS, type StandbySettings } from "../src/standby.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
 import { MoveSlots } from "../src/stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
@@ -121,6 +123,15 @@ interface Fakes {
   arrives?: Map<string, number>;
   /** Playback URLs whose current ffmpeg exits at a time on the fake clock; a new start clears it. */
   exits?: Map<string, number>;
+  /** While on, the stream keeps hot standbys on the other paths (off by default). */
+  hotStandby?: { on: boolean };
+  standby?: Partial<StandbySettings>;
+  /** Slots shared by every stream's starting standbys. */
+  standbyStarts?: MoveSlots;
+  /** The playback URLs whose standby readers get data (`sources` by default). */
+  standbyData?: Set<string>;
+  /** While on, the transcoder can't be reached. */
+  transcoderDown?: { on: boolean };
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -134,6 +145,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const removed: string[] = [];
   const restarted: string[] = [];
   const revived: string[] = [];
+  let creates = 0;
   const engines = {
     find: () => Promise.resolve(fakes.found ?? []),
     revive: async (handle: EngineHandle, onAddress?: OnEngineAddress) => {
@@ -159,11 +171,13 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       return fakes.failRemove === true ? Promise.reject(new Error("docker said no")) : Promise.resolve();
     },
     create: async (_streamId: string, _generation: number, onAddress?: OnEngineAddress) => {
+      creates += 1;
       const handle = (created.length > 1 ? created.shift() : created[0]) ?? engine;
       await onAddress?.(handle);
       assignedWhenReady.push([...assigned]);
       return handle;
     },
+    ownName: (streamId: string, generation: number) => `aceswarm-engine-${streamId}-${String(generation)}`,
   } as unknown as EngineManager;
   let sessions = 0;
   const stopped: string[] = [];
@@ -194,7 +208,8 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     since: 0,
     lastFrameAt: null as string | null,
   };
-  const realStatus = (): PipelineStatus | undefined => {
+  /** The playback URLs that deliver now. */
+  const delivering = (): Set<string> => {
     const sources = fakes.sources ?? new Set();
     const arrivals = fakes.arrives ?? new Map<string, number>();
     for (const [url, at] of arrivals) {
@@ -202,6 +217,12 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
         sources.add(url);
       }
     }
+    return sources;
+  };
+  // The sources the standby readers were told to read, on each check.
+  const readers: string[][] = [];
+  const realStatus = (): PipelineStatus | undefined => {
+    const sources = delivering();
     if (real.pending !== undefined && sources.has(real.pending)) {
       real.active = real.pending;
       real.pending = undefined;
@@ -244,6 +265,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       return Promise.resolve(pipeline);
     },
     status: () => {
+      if (fakes.transcoderDown?.on === true) {
+        return Promise.reject(new Error("transcoder unreachable"));
+      }
       if (fakes.sources !== undefined) {
         return Promise.resolve(realStatus());
       }
@@ -259,6 +283,25 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       );
     },
     stop: () => Promise.resolve(),
+    setStandbys: (_id: string, sources: string[]) => {
+      if (fakes.transcoderDown?.on === true) {
+        return Promise.reject(new Error("transcoder unreachable"));
+      }
+      readers.push(sources);
+      if (fakes.sources === undefined || real.active === undefined) {
+        return Promise.resolve(undefined);
+      }
+      const data = fakes.standbyData ?? delivering();
+      return Promise.resolve(
+        sources.map((source) => ({
+          source,
+          state: data.has(source) ? "receiving" : "connecting",
+          bytes: 0,
+          lastDataAt: data.has(source) ? new Date(clock.now).toISOString() : null,
+          error: null,
+        })),
+      );
+    },
   } as unknown as TranscoderClient;
   const netgw = {
     assign: (assignment: PathAssignment) => {
@@ -296,7 +339,10 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     ...(fakes.policyMoves !== undefined && { policyMoves: fakes.policyMoves }),
     ...(fakes.spareSlots !== undefined && { spareSlots: fakes.spareSlots }),
     ...(fakes.shared !== undefined && { shared: fakes.shared }),
+    ...(fakes.standbyStarts !== undefined && { standbyStarts: fakes.standbyStarts }),
     sharedEngines: () => fakes.sharing?.on === true,
+    hotStandby: () => fakes.hotStandby?.on === true,
+    standby: { ...DEFAULT_STANDBY_SETTINGS, ...fakes.standby },
     viewers: () => fakes.viewers ?? 0,
     pathLoad: () => new Map(),
     now: () => clock.now,
@@ -317,6 +363,8 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     stopped,
     handovers,
     sessions: () => sessions,
+    creates: () => creates,
+    readers,
     updates,
     real,
   };
@@ -1175,5 +1223,439 @@ describe("sharing one engine per path", () => {
     await fake.instance.tick();
     expect(pool.restarts).toEqual([sharedEngine.containerId]);
     expect(fake.restarted).toEqual([]);
+  });
+});
+
+/** The stream's own engine of this generation. */
+function own(generation: number): EngineHandle {
+  const ip = `172.31.250.${String(9 + generation)}`;
+  const name = `aceswarm-engine-s1-${String(generation)}`;
+  return { ...engine, containerId: `c${String(generation)}`, name, generation, ip, baseUrl: `http://${ip}:6878` };
+}
+const main = own(1);
+const standbyEngine = own(2);
+const play = (handle: EngineHandle): string => `${handle.baseUrl}/play`;
+
+/** Lets the standbys' background work finish. */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) {
+    await setImmediate();
+  }
+}
+
+/** The engine shared by the streams on `path`. */
+function sharedOn(path: string, id: number): EngineHandle {
+  const ip = `172.31.250.${String(id)}`;
+  const name = `aceswarm-engine-shared-${path}-1`;
+  return {
+    ...engine,
+    containerId: `shared-${path}`,
+    name,
+    streamId: "",
+    ip,
+    baseUrl: `http://${ip}:6878`,
+    sharedPath: path,
+  };
+}
+
+describe("hot standby on the other paths", () => {
+  const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+  const vpnB: PathStatus = { ...direct, id: "wg:b", kind: "wireguard", label: "VPN B", score: 0.4 };
+
+  /** A stream playing on the direct path, with a standby on the VPN whose reader got data (unless `standbyData` says otherwise). */
+  async function withStandby(fakes: Fakes = {}, paths: PathStatus[] = [direct, vpn]) {
+    const sources = new Set([play(main), play(standbyEngine)]);
+    const fake = supervisor(paths, {
+      created: [main, standbyEngine, own(3), own(4)],
+      sources,
+      hotStandby: { on: true },
+      ...fakes,
+    });
+    // Starts the engine and the stream. Standbys only start once it got video, on the next check.
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toEqual([]);
+    await fake.instance.tick();
+    await settle();
+    await fake.instance.tick();
+    return { ...fake, paths, sources };
+  }
+
+  test("keeps a hot standby on the other path once the stream plays", async () => {
+    const fake = await withStandby();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(fake.instance.view().standbys).toEqual([
+      { path: "wg:a", state: "hot", engine: { name: standbyEngine.name, shared: false } },
+    ]);
+    expect(fake.instance.assignments()).toEqual([
+      { ip: main.ip, path: "direct" },
+      { ip: standbyEngine.ip, path: "wg:a" },
+    ]);
+    // The transcoder reads the standby session, so the engine keeps pulling the stream.
+    expect(fake.readers.at(-1)).toEqual([play(standbyEngine)]);
+  });
+
+  test("fails over to the hot standby soon after video stops, without starting an engine", async () => {
+    const fake = await withStandby();
+    fake.sources.delete(play(main));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view()).toMatchObject({ engine: { name: standbyEngine.name, shared: false }, recoveries: 1 });
+    expect(fake.real.active).toBe(play(standbyEngine));
+    expect(fake.creates()).toBe(2);
+    expect(fake.removed).toEqual([]);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.stopped).toEqual([`${main.baseUrl}/cmd`]);
+    // The engine it left becomes the standby on its path.
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "direct", engine: { name: main.name } }]);
+    expect(fake.instance.assignments()).toEqual([
+      { ip: standbyEngine.ip, path: "wg:a" },
+      { ip: main.ip, path: "direct" },
+    ]);
+
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.view().state).toBe("playing");
+    // It opened a new session there, which the transcoder reads.
+    await fake.instance.tick();
+    expect(fake.readers.at(-1)).toEqual([play(main)]);
+  });
+
+  test("fails over to the hot standby before any other recovery step", async () => {
+    const fake = await withStandby({ standby: { failoverAfterMs: 3_600_000 } });
+    fake.sources.delete(play(main));
+    fake.clock.now += settings.stallAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().recoveries).toBe(1);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
+  });
+
+  test("a failover that brings no video leaves the stream where it was, and the ladder goes on", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    const fake = await withStandby({ standbyData, standby: { policy } });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", engine: { name: main.name } });
+    expect(fake.instance.view().message).toMatch(/^failing over to wg:a failed/);
+    // The standby stays, but no failover tries it again for a while.
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a" }]);
+    fake.clock.now += settings.startupGraceMs;
+    await fake.instance.tick();
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
+    expect(fake.instance.view()).toMatchObject({ state: "recovering", path: "direct" });
+    expect(fake.real.active).toBe(play(main));
+  });
+
+  test("a path switch moves to the standby on the new path, even before it is hot", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+    fake.sources.delete(play(main));
+    fake.paths[0] = { ...direct, up: false };
+    fake.clock.now += settings.stallAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.creates()).toBe(2);
+    expect(fake.instance.view().engine?.name).toBe(standbyEngine.name);
+
+    // The engine it left stays as the standby on its path for a while, in case the path comes back.
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "direct", engine: { name: main.name } }]);
+    expect(fake.removed).toEqual([]);
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.downGraceMs + 1000;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.removed).toEqual([main.containerId]);
+    expect(fake.instance.view().standbys).toEqual([]);
+  });
+
+  test("starts a standby that brings no data again, and removes it after its third try", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.restarted).toEqual([standbyEngine.containerId, standbyEngine.containerId]);
+    expect(fake.removed).toEqual([standbyEngine.containerId]);
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("doesn't fail over while the transcoder can't be reached", async () => {
+    const transcoderDown = { on: false };
+    const fake = await withStandby({ transcoderDown });
+    transcoderDown.on = true;
+    for (let second = 0; second < 18; second += 2) {
+      fake.clock.now += 2000;
+      await fake.instance.tick();
+    }
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+  });
+
+  test("doesn't fail over when the broadcast pauses on every path", async () => {
+    const fake = await withStandby();
+    fake.sources.clear();
+    for (let second = 0; second < 18; second += 2) {
+      fake.clock.now += 2000;
+      await fake.instance.tick();
+    }
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+  });
+
+  test("finishes a failover whose video arrives after it gave up", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    const arrives = new Map<string, number>();
+    const fake = await withStandby({ standbyData, arrives, standby: { policy } });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    // The transcoder kept reading the standby, and its video comes now.
+    arrives.set(play(standbyEngine), fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().engine?.name).toBe(standbyEngine.name);
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
+    expect(fake.creates()).toBe(2);
+  });
+
+  test("leaves a standby alone while the transcoder still waits for its video", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    // A standby that brings no data starts again at once.
+    const fake = await withStandby({ standbyData, standby: { policy, warmupMs: 0 } });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    // The transcoder took over the standby's session from its reader, so no data comes from it
+    // while the transcoder reads it. Starting it again would cut the video the transcoder waits for.
+    standbyData.clear();
+    await fake.instance.tick();
+    await settle();
+    expect(fake.restarted).toEqual([]);
+    expect(fake.removed).toEqual([]);
+  });
+
+  test("starting a standby engine again waits for a start slot", async () => {
+    const standbyStarts = new MoveSlots(1);
+    const fake = await withStandby({ standbyData: new Set(), standbyStarts });
+    // Another stream's standby starts meanwhile.
+    expect(standbyStarts.tryTake()).toBe(true);
+    for (let tick = 0; tick < 30; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.restarted).toEqual([]);
+    standbyStarts.release();
+    fake.clock.now += 5000;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.restarted).toEqual([standbyEngine.containerId]);
+  });
+
+  test("gives up on a path that keeps losing its standbys, until the path goes down", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    let removals = 0;
+    for (let tick = 0; tick < 1000; tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+      await settle();
+      removals = fake.removed.length;
+    }
+    // Three rounds of three tries each, then no more.
+    expect(removals).toBe(3);
+    expect(fake.creates()).toBe(4);
+    expect(fake.instance.view().standbys).toEqual([]);
+
+    fake.paths[1] = { ...vpn, up: false };
+    await fake.instance.tick();
+    fake.paths[1] = vpn;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.creates()).toBe(5);
+  });
+
+  test("removes its standbys once the stream hasn't played for a while, and starts none", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    fake.sources.clear();
+    for (let tick = 0; tick < 90; tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+      await settle();
+      if (tick === 80) {
+        expect(fake.instance.view().standbys).toEqual([]);
+        expect(fake.removed).toContain(standbyEngine.containerId);
+      }
+    }
+    // Meanwhile the recovery ladder goes on, but the stream keeps no standby.
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.readers.at(-1)).toEqual([]);
+  });
+
+  test("moves to the standby once WireGuard only is on, and removes the engine it left", async () => {
+    const policy = { wireguardOnly: false };
+    const pathAllowed = (path: string): boolean => !policy.wireguardOnly || path !== "direct";
+    const fake = await withStandby({ pathAllowed });
+    policy.wireguardOnly = true;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view()).toMatchObject({ engine: { name: standbyEngine.name }, recoveries: 0 });
+    expect(fake.creates()).toBe(2);
+    expect(fake.removed).toEqual([main.containerId]);
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.instance.assignments()).toEqual([{ ip: standbyEngine.ip, path: "wg:a" }]);
+  });
+
+  test("removes the standbys once hot standby is turned off", async () => {
+    const hotStandby = { on: true };
+    const fake = await withStandby({ hotStandby });
+    hotStandby.on = false;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.removed).toEqual([standbyEngine.containerId]);
+    expect(fake.unassigned).toEqual([standbyEngine.ip]);
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.instance.assignments()).toEqual([{ ip: main.ip, path: "direct" }]);
+    expect(fake.readers.at(-1)).toEqual([]);
+  });
+
+  test("keeps a standby on every other path, or on the best few", async () => {
+    const all = await withStandby({}, [direct, vpn, vpnB]);
+    // One starts per check.
+    await all.instance.tick();
+    await settle();
+    expect(all.instance.view().standbys.map((standby) => standby.path)).toEqual(["wg:a", "wg:b"]);
+
+    const best = await withStandby({ standby: { maxPaths: 1 } }, [direct, vpn, vpnB]);
+    await best.instance.tick();
+    await settle();
+    expect(best.instance.view().standbys.map((standby) => standby.path)).toEqual(["wg:a"]);
+  });
+
+  test("starts no standby on a path the policy turned off", async () => {
+    const fake = await withStandby({ pathAllowed: (path) => path !== "wg:a" }, [direct, vpn, vpnB]);
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.view().standbys.map((standby) => standby.path)).toEqual(["wg:b"]);
+  });
+
+  test("removes the standbys when the stream stops", async () => {
+    const fake = await withStandby();
+    await fake.instance.stop(true);
+    expect(fake.removed).toContain(standbyEngine.containerId);
+    expect(fake.readers.at(-1)).toEqual([]);
+  });
+
+  describe("with engines shared per path", () => {
+    const onDirect = sharedOn("direct", 20);
+    const onVpn = sharedOn("wg:a", 21);
+
+    function sharedEngines() {
+      const byPath = new Map([
+        ["direct", onDirect],
+        ["wg:a", onVpn],
+      ]);
+      const calls: string[] = [];
+      const shared = {
+        acquire: (path: string, _stream: string, role = "play") => {
+          calls.push(`acquire ${path} as ${role}`);
+          return Promise.resolve(byPath.get(path));
+        },
+        rejoin: (handle: EngineHandle, _stream: string, role = "play") => {
+          calls.push(`rejoin ${handle.sharedPath ?? "?"} as ${role}`);
+          return Promise.resolve(handle);
+        },
+        release: (handle: EngineHandle) => {
+          calls.push(`release ${handle.sharedPath ?? "?"}`);
+          return Promise.resolve();
+        },
+        releaseStandby: (handle: EngineHandle) => {
+          calls.push(`release standby on ${handle.sharedPath ?? "?"}`);
+          return Promise.resolve();
+        },
+        promote: (handle: EngineHandle) => {
+          calls.push(`promote ${handle.sharedPath ?? "?"}`);
+          return true;
+        },
+        isCurrent: () => true,
+        reportFailure: () => false,
+        restart: () => true,
+      } as unknown as SharedEngines;
+      return { shared, calls };
+    }
+
+    test("keeps a standby session on the other path's shared engine, and fails over to it", async () => {
+      const pool = sharedEngines();
+      const sources = new Set([play(onDirect), play(onVpn)]);
+      const fake = await withStandby({ shared: pool.shared, sharing: { on: true }, sources });
+      expect(pool.calls).toEqual(["acquire direct as play", "acquire wg:a as standby"]);
+      expect(fake.instance.view().standbys).toEqual([
+        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true } },
+      ]);
+      // The shared engines manage their gateway paths.
+      expect(fake.instance.assignments()).toEqual([]);
+
+      sources.delete(play(onDirect));
+      fake.clock.now += settings.stallAfterMs + 1000;
+      await fake.instance.tick();
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view().engine).toEqual({ name: onVpn.name, shared: true });
+      expect(fake.creates()).toBe(0);
+      expect(pool.calls.slice(2)).toEqual(["promote wg:a", "release direct"]);
+
+      // The path it left gets a standby session on its shared engine.
+      await fake.instance.tick();
+      await settle();
+      expect(pool.calls.at(-1)).toBe("acquire direct as standby");
+    });
+
+    test("a standby session that brings no data checks its shared engine before it opens again", async () => {
+      const pool = sharedEngines();
+      const sources = new Set([play(onDirect), play(onVpn)]);
+      const fake = await withStandby({ shared: pool.shared, sharing: { on: true }, sources, standbyData: new Set() });
+      for (let tick = 0; tick < 40 && !pool.calls.includes("rejoin wg:a as standby"); tick += 1) {
+        fake.clock.now += 5000;
+        await fake.instance.tick();
+        await settle();
+      }
+      // Maybe no stream plays from that engine, and then nothing else would notice that it stopped.
+      expect(pool.calls).toEqual(["acquire direct as play", "acquire wg:a as standby", "rejoin wg:a as standby"]);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", engine: { name: onVpn.name } }]);
+      expect(fake.creates()).toBe(0);
+    });
+
+    test("replaces the standbys of its own with sessions on shared engines once sharing is on", async () => {
+      const pool = sharedEngines();
+      const sharing = { on: false };
+      const sources = new Set([play(main), play(standbyEngine), play(onDirect), play(onVpn)]);
+      const fake = await withStandby({ shared: pool.shared, sharing, sources });
+      sharing.on = true;
+      for (let tick = 0; tick < 10; tick += 1) {
+        fake.clock.now += 1000;
+        await fake.instance.tick();
+        await settle();
+      }
+      expect(fake.instance.view().engine).toEqual({ name: onDirect.name, shared: true });
+      expect(fake.removed).toEqual(expect.arrayContaining([main.containerId, standbyEngine.containerId]));
+      expect(fake.instance.view().standbys).toEqual([
+        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true } },
+      ]);
+      expect(fake.instance.assignments()).toEqual([]);
+    });
   });
 });

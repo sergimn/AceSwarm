@@ -33,6 +33,8 @@ const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio:
 const COPYABLE_CODECS = new Set(["h264"]);
 const OLD_GENERATION_TTL_MS = 60_000;
 const KILL_GRACE_MS = 3000;
+/** How long after a run that failed before any video ffmpeg opens its source again (see `start`). */
+const REOPEN_DELAY_MS = 1000;
 
 class Generation {
   readonly number: number;
@@ -51,6 +53,12 @@ class Generation {
   exitCode: number | null = null;
   error: string | null = null;
   readonly stderrTail: string[] = [];
+  /** How many more times ffmpeg opens the source again when this run fails before any video. */
+  reopens = 0;
+  /** When the handover this run is for began: the first run's start, for a run that reopened. */
+  handoverSince: number;
+  /** Stopped for good: another generation took its place, or none is needed any more. */
+  retired = false;
 
   constructor(
     number: number,
@@ -66,6 +74,12 @@ class Generation {
     this.mode = mode;
     this.startedAt = startedAt;
     this.inputTimeoutSeconds = inputTimeoutSeconds;
+    this.handoverSince = startedAt;
+  }
+
+  /** Whether ffmpeg failed before any video, and opens the source again. */
+  willReopen(): boolean {
+    return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired;
   }
 }
 
@@ -121,25 +135,44 @@ export class Pipeline {
    * read may wait, for the whole run) is at least the handover timeout, even when there is no
    * picture left to keep: a new engine on a slow swarm can take longer than the usual input timeout
    * to deliver its first data, and the controller waits the whole handover for it.
+   *
+   * With `reopens`, ffmpeg opens the source again up to that many times when it fails before any
+   * video: an engine that has just lost another reader of the session may refuse a new one for a
+   * moment (it allows one reader per session).
    */
-  async start(source: string, handover: boolean): Promise<void> {
-    const inputTimeoutSeconds = handover ? this.handoverInputTimeoutSeconds() : this.settings.plan.inputTimeoutSeconds;
-    const canHandOver = handover && this.active !== undefined && this.active.state !== "exited";
-    if (canHandOver) {
-      if (this.pending !== undefined) {
-        this.retire(this.pending);
-      }
-      this.pending = await this.launch(source, "handover", inputTimeoutSeconds);
+  async start(source: string, handover: boolean, reopens = 0): Promise<void> {
+    if (this.stopped) {
       return;
     }
+    const inputTimeoutSeconds = handover ? this.handoverInputTimeoutSeconds() : this.settings.plan.inputTimeoutSeconds;
+    const canHandOver = handover && this.active !== undefined && this.active.state !== "exited";
     if (this.pending !== undefined) {
       this.retire(this.pending);
       this.pending = undefined;
     }
+    if (canHandOver) {
+      const launched = await this.launch(source, "handover", inputTimeoutSeconds, reopens);
+      this.replace("pending", launched);
+      return;
+    }
     const previous = this.active;
-    this.active = await this.launch(source, previous === undefined ? "start" : "restart", inputTimeoutSeconds);
+    const reason = previous === undefined ? "start" : "restart";
+    const launched = await this.launch(source, reason, inputTimeoutSeconds, reopens);
     if (previous !== undefined) {
       this.retire(previous);
+    }
+    this.replace("active", launched);
+  }
+
+  /**
+   * Puts a generation that `start` launched in its place, retiring the one there: a sync may have
+   * opened the old source again meanwhile (see `reopen`).
+   */
+  private replace(slot: "active" | "pending", generation: Generation): void {
+    const displaced = this[slot];
+    this[slot] = generation;
+    if (displaced !== undefined && displaced !== generation) {
+      this.retire(displaced);
     }
   }
 
@@ -164,7 +197,8 @@ export class Pipeline {
     }
     return {
       id: this.id,
-      state: generation.state,
+      // A run that failed before any video and opens its source again is still starting.
+      state: generation.willReopen() ? "starting" : generation.state,
       source: generation.source,
       startedAt: new Date(generation.startedAt).toISOString(),
       lastFrameAt: generation.lastFrameAt === undefined ? null : new Date(generation.lastFrameAt).toISOString(),
@@ -217,19 +251,13 @@ export class Pipeline {
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */
   async sync(): Promise<void> {
-    const pending = this.pending;
-    if (pending !== undefined) {
-      if (await this.hasSegment(pending)) {
-        this.promote(pending);
-      } else if (pending.state === "exited" || this.now() - pending.startedAt > this.settings.handoverTimeoutMs) {
-        this.logger.warn({ generation: pending.number, error: pending.error }, "handover failed");
-        this.retire(pending);
-        this.pending = undefined;
-        this.events.handover(this.id, "failed");
-      }
-    }
+    await this.syncPending();
     const active = this.active;
     if (active === undefined) {
+      return;
+    }
+    if (this.mayReopenNow(active)) {
+      this.reopen(active);
       return;
     }
     for (const variant of VARIANTS) {
@@ -239,6 +267,57 @@ export class Pipeline {
         this.playlists[variant].append(active.number, parsed.segments, `../g${String(active.number)}/${variant}/`);
       }
     }
+  }
+
+  /** Promotes the pending generation once it has a segment, or gives up on it. */
+  private async syncPending(): Promise<void> {
+    const pending = this.pending;
+    if (pending === undefined) {
+      return;
+    }
+    const ready = await this.hasSegment(pending);
+    if (pending !== this.pending) {
+      // Another sync (for a player's playlist request) dealt with it meanwhile.
+      return;
+    }
+    const timedOut = this.now() - pending.handoverSince > this.settings.handoverTimeoutMs;
+    if (ready) {
+      this.promote(pending);
+    } else if (pending.willReopen() && !timedOut) {
+      if (this.mayReopenNow(pending)) {
+        this.reopen(pending);
+      }
+    } else if (pending.state === "exited" || timedOut) {
+      const stderr = pending.stderrTail.slice(-5);
+      this.logger.warn({ generation: pending.number, error: pending.error, stderr }, "handover failed");
+      this.retire(pending);
+      this.pending = undefined;
+      this.events.handover(this.id, "failed");
+    }
+  }
+
+  private mayReopenNow(generation: Generation): boolean {
+    return generation.willReopen() && this.now() - generation.startedAt >= REOPEN_DELAY_MS;
+  }
+
+  /** Starts ffmpeg again on the source of a run that failed before any video (see `start`). */
+  private reopen(generation: Generation): void {
+    const next = this.prepare(generation.source, generation.inputTimeoutSeconds, generation.reopens - 1);
+    next.handoverSince = generation.handoverSince;
+    if (generation === this.pending) {
+      this.pending = next;
+    } else {
+      this.active = next;
+    }
+    this.retire(generation);
+    this.logger.info(
+      { generation: generation.number, stderr: generation.stderrTail.slice(-5), reopensLeft: next.reopens },
+      "ffmpeg failed before any video; opening the source again",
+    );
+    void this.run(next, "reopen").catch((error: unknown) => {
+      next.state = "exited";
+      next.error = error instanceof Error ? error.message : String(error);
+    });
   }
 
   private promote(pending: Generation): void {
@@ -262,20 +341,32 @@ export class Pipeline {
     return Math.max(this.settings.plan.inputTimeoutSeconds, Math.ceil(this.settings.handoverTimeoutMs / 1000));
   }
 
-  private async launch(source: string, reason: string, inputTimeoutSeconds: number): Promise<Generation> {
+  private async launch(source: string, reason: string, inputTimeoutSeconds: number, reopens = 0): Promise<Generation> {
+    const generation = this.prepare(source, inputTimeoutSeconds, reopens);
+    await this.run(generation, reason);
+    return generation;
+  }
+
+  /** A new generation for the source, not running yet. */
+  private prepare(source: string, inputTimeoutSeconds: number, reopens: number): Generation {
     const number = this.nextNumber;
     this.nextNumber += 1;
     const directory = join(this.root, `g${String(number)}`);
+    const mode = this.forceTranscode ? "transcode" : "copy";
+    const generation = new Generation(number, source, directory, mode, this.now(), inputTimeoutSeconds);
+    generation.reopens = reopens;
+    return generation;
+  }
+
+  /** Starts the generation's ffmpeg, unless it was retired or the pipeline stopped meanwhile. */
+  private async run(generation: Generation, reason: string): Promise<void> {
+    const { number, source, directory, inputTimeoutSeconds } = generation;
     await mkdir(join(directory, "full"), { recursive: true });
     await mkdir(join(directory, "preview"), { recursive: true });
-    const generation = new Generation(
-      number,
-      source,
-      directory,
-      this.forceTranscode ? "transcode" : "copy",
-      this.now(),
-      inputTimeoutSeconds,
-    );
+    if (generation.retired || this.stopped) {
+      generation.state = "exited";
+      return;
+    }
     const args = buildFfmpegArgs({
       ...this.settings.plan,
       source,
@@ -316,7 +407,6 @@ export class Pipeline {
       generation.error ??= signal === null ? lastErrorLine(generation.stderrTail, code) : `killed by ${signal}`;
       this.logger.info({ generation: generation.number, code, signal, error: generation.error }, "ffmpeg exited");
     });
-    return generation;
   }
 
   private onStderrLine(generation: Generation, line: string): void {
@@ -353,6 +443,7 @@ export class Pipeline {
 
   /** Stops a generation and removes its files once players can no longer reference them. */
   private retire(generation: Generation): void {
+    generation.retired = true;
     killProcess(generation.process);
     const timer = setTimeout(() => {
       void rm(generation.directory, { recursive: true, force: true });

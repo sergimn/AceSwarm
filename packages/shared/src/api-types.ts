@@ -60,6 +60,8 @@ export interface StreamView {
   recoveries: number;
   /** The engine the stream plays from; shared engines serve every stream on their path. */
   engine: { name: string; shared: boolean } | null;
+  /** Engines on other paths that already pull the stream, ready to take over (hot standby). */
+  standbys: StandbyView[];
   /** Players showing the stream full screen right now. */
   viewers: number;
   hls: {
@@ -67,6 +69,20 @@ export interface StreamView {
     full: string;
     thumbnail: string;
   };
+}
+
+/**
+ * How far a standby is: its engine or session is starting, it is opening its session and waiting
+ * for data, data arrives (it can take over at once), or it failed and tries again later.
+ */
+export type StandbyState = "starting" | "warming" | "hot" | "failed";
+
+export interface StandbyView {
+  /** The network path it pulls the stream through. */
+  path: string;
+  state: StandbyState;
+  /** Its engine, once it answers; a shared engine also plays other streams. */
+  engine: { name: string; shared: boolean } | null;
 }
 
 export type PathKind = "direct" | "wireguard";
@@ -101,6 +117,7 @@ export interface Snapshot {
   /** Streams only use WireGuard paths; the direct path is off. */
   wireguardOnly: boolean;
   sharedEngines: SharedEnginesView;
+  hotStandby: HotStandbyView;
   /** How often players report the stream they show full screen. */
   viewerPingSeconds: number;
 }
@@ -109,6 +126,16 @@ export interface Snapshot {
 export interface Settings {
   /** Streams on the same network path share one engine instead of each having its own. */
   sharedEngines: boolean;
+  /** Every stream also pulls its broadcast on the other paths, ready to take over at once. */
+  hotStandby: boolean;
+}
+
+export interface HotStandbyView {
+  enabled: boolean;
+  /** How many other paths each stream keeps a standby on, best first; 0 means all of them. */
+  maxPaths: number;
+  /** With a hot standby, a stream fails over after this long without new video. */
+  failoverSeconds: number;
 }
 
 export interface SharedEnginesView {
@@ -153,6 +180,16 @@ export interface PipelineStatus {
   error: string | null;
   /** Source waiting to take over (make-before-break handover), if any. */
   pendingSource: string | null;
+}
+
+/** One standby session the transcoder reads to keep it pulling the stream (`PUT /standbys/:id`). */
+export interface StandbyReaderStatus {
+  source: string;
+  /** Data arrives, it is connecting, or it waits to connect again after the connection ended. */
+  state: "connecting" | "receiving" | "waiting";
+  bytes: number;
+  lastDataAt: string | null;
+  error: string | null;
 }
 
 // ---- Network gateway API --------------------------------------------------------------------

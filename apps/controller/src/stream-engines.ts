@@ -1,13 +1,21 @@
-import type { PeerStats, PipelineStatus } from "@aceswarm/shared/api-types";
+import type { PathAssignment, PeerStats, PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
-import { exitedPipeline, SourceExitedError, waitForHandover, type HandoverTiming } from "./playback.ts";
+import {
+  failOverTo,
+  finishLateFailover,
+  type EngineFailover,
+  type FailoverHost,
+  type LateFailover,
+} from "./failover.ts";
+import { exitedPipeline, handOverTo, type HandoverTiming } from "./playback.ts";
 import { nextRecovery, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import type { FailureReport, SharedEngines } from "./shared-engines.ts";
+import { DEFAULT_STANDBY_SETTINGS, StreamStandbys, type StandbySettings } from "./standby.ts";
 import type { MoveSlots } from "./stream-paths.ts";
 import type { StreamStore } from "./stream-store.ts";
 
@@ -34,6 +42,10 @@ export interface StreamEnginesDeps {
    * failed move without a free slot removes its engine. No limit without it.
    */
   spareSlots?: MoveSlots | undefined;
+  /** Hot standbys on the other paths (see `StreamStandbys`). */
+  standby?: StandbySettings | undefined;
+  /** Limits how many standbys start at once (shared by every stream). */
+  standbyStarts?: MoveSlots | undefined;
   now?: (() => number) | undefined;
 }
 
@@ -112,6 +124,10 @@ export class StreamEngines {
   /** The engine the stream last played from (container id). */
   private playedOn: string | undefined;
   private startTried = false;
+  /** The highest generation of the stream's own engines so far, so a new one never reuses a name. */
+  private generation = 0;
+  /** Engines on the other paths that already pull the stream. */
+  readonly standbys: StreamStandbys;
 
   constructor(streamId: string, deps: StreamEnginesDeps) {
     this.streamId = streamId;
@@ -119,6 +135,39 @@ export class StreamEngines {
     this.logger = deps.logger.child({ stream: streamId });
     this.now = deps.now ?? Date.now;
     this.gateway = new EnginePaths(deps.netgw);
+    this.standbys = new StreamStandbys({
+      streamId,
+      engines: deps.engines,
+      ace: deps.ace,
+      transcoder: deps.transcoder,
+      netgw: deps.netgw,
+      metrics: deps.metrics,
+      logger: deps.logger,
+      settings: deps.standby ?? DEFAULT_STANDBY_SETTINGS,
+      shared: deps.shared,
+      startSlots: deps.standbyStarts,
+      nextGeneration: () => this.nextGeneration(),
+      now: this.now,
+    });
+  }
+
+  /** What every engine of the stream should use at the gateway: its own, and its standbys'. */
+  assignments(): PathAssignment[] {
+    return [...this.gateway.list(), ...this.standbys.assignments()];
+  }
+
+  /** The path of the engine kept from a failed move, if there is one. */
+  get sparePath(): string | undefined {
+    return this.spare?.path;
+  }
+
+  private nextGeneration(): number {
+    this.generation += 1;
+    return this.generation;
+  }
+
+  private sawGeneration(generation: number): void {
+    this.generation = Math.max(this.generation, generation);
   }
 
   /**
@@ -133,7 +182,12 @@ export class StreamEngines {
     if (current !== undefined && current.sharedPath !== null) {
       await this.release(current);
     }
-    const found = await this.deps.engines.find(this.streamId);
+    const all = await this.deps.engines.find(this.streamId);
+    for (const engine of all) {
+      this.sawGeneration(engine.generation);
+    }
+    // The standbys' engines stay: they pull the stream on the other paths.
+    const found = all.filter((engine) => !this.standbys.owns(engine));
     const spare = this.clearSpare();
     const wanted = current?.sharedPath === null ? current.name : this.deps.store.get(this.streamId)?.ownEngine;
     const kept = found.find((engine) => engine.name === wanted) ?? found[0];
@@ -155,7 +209,7 @@ export class StreamEngines {
     if (kept !== undefined) {
       return this.remember(await this.deps.engines.revive(kept, assign));
     }
-    const engine = await this.deps.engines.create(this.streamId, 1, assign);
+    const engine = await this.deps.engines.create(this.streamId, this.nextGeneration(), assign);
     this.deps.metrics.engineStarts.inc({ stream: this.streamId });
     return this.remember(engine);
   }
@@ -185,6 +239,7 @@ export class StreamEngines {
     }
     this.clearSpare();
     await this.gateway.dropAll();
+    await this.standbys.dropOwn("streams share engines now");
     await this.deps.engines.removeAllFor(this.streamId);
     return this.remember(await shared.acquire(path, this.streamId));
   }
@@ -304,7 +359,7 @@ export class StreamEngines {
       const pipeline =
         move.handover === undefined
           ? await this.deps.transcoder.start(this.streamId, { source: session.playbackUrl })
-          : await this.handOver(session, reused !== undefined, move.handover);
+          : await handOverTo(this.deps.transcoder, this.streamId, session, reused !== undefined, move.handover);
       // The move is done: a later failure must not remove the engine the stream now plays from.
       starting.engine = undefined;
       if (this.spare?.engine.containerId === engine.containerId) {
@@ -317,6 +372,30 @@ export class StreamEngines {
       }
       throw error;
     }
+  }
+
+  /** Moves the stream to a standby (see `failOverTo`). */
+  async failover(failover: EngineFailover): Promise<void> {
+    await failOverTo(this.failoverHost(), failover);
+  }
+
+  /** Finishes a failover whose video arrived late (see `finishLateFailover`). */
+  async finishLateFailover(late: LateFailover): Promise<boolean> {
+    return finishLateFailover(this.failoverHost(), late);
+  }
+
+  private failoverHost(): FailoverHost {
+    return {
+      streamId: this.streamId,
+      logger: this.logger,
+      gateway: this.gateway,
+      standbys: this.standbys,
+      transcoder: this.deps.transcoder,
+      ace: this.deps.ace,
+      shared: this.deps.shared,
+      remember: async (engine) => this.remember(engine),
+      release: async (engine) => this.release(engine),
+    };
   }
 
   /**
@@ -343,31 +422,6 @@ export class StreamEngines {
     this.clearSpare();
     await this.finish({ from, session, commit: spare.commit }, { engine: spare.engine, session: kept, pipeline });
     return true;
-  }
-
-  /**
-   * Starts the transcoder's handover to `session` and waits for its video. A kept session the
-   * transcoder still reads gets no second reader, unless that one gives up first (its input timeout).
-   */
-  private async handOver(session: EngineSession, reused: boolean, timing: HandoverTiming): Promise<PipelineStatus> {
-    const source = session.playbackUrl;
-    if (reused && (await this.transcoderReads(session))) {
-      try {
-        return await waitForHandover(this.deps.transcoder, this.streamId, source, timing);
-      } catch (error) {
-        if (!(error instanceof SourceExitedError)) {
-          throw error;
-        }
-      }
-    }
-    await this.deps.transcoder.start(this.streamId, { source }, true);
-    return waitForHandover(this.deps.transcoder, this.streamId, source, timing);
-  }
-
-  /** Whether the transcoder's current ffmpeg still reads the session (an engine allows one reader). */
-  private async transcoderReads(session: EngineSession): Promise<boolean> {
-    const status = await this.deps.transcoder.status(this.streamId).catch(() => undefined);
-    return status?.source === session.playbackUrl && status.state !== "exited";
   }
 
   /** The stream plays from the engine it moved to: commits the move and lets go of `from`. */
@@ -563,9 +617,10 @@ export class StreamEngines {
     if (spare !== undefined) {
       return spare;
     }
-    // A stream coming from a shared engine has no engine of its own: it starts at generation 1.
-    const generation = current.sharedPath === null ? current.generation + 1 : 1;
-    const next = await this.deps.engines.create(this.streamId, generation, async (handle) => {
+    if (current.sharedPath === null) {
+      this.sawGeneration(current.generation);
+    }
+    const next = await this.deps.engines.create(this.streamId, this.nextGeneration(), async (handle) => {
       if (starting.engine !== undefined && starting.engine.ip !== handle.ip) {
         // It restarted on a new address while starting: its old one may go to another engine.
         await this.gateway.drop(starting.engine.ip);
@@ -587,11 +642,12 @@ export class StreamEngines {
     await this.deps.engines.remove(engine);
   }
 
-  /** Lets go of every engine of the stream: its place on a shared engine, and its own engines. */
+  /** Lets go of every engine of the stream: its place on a shared engine, its standbys and its own engines. */
   async releaseAll(engine: EngineHandle | undefined): Promise<void> {
     if (engine !== undefined && engine.sharedPath !== null) {
       await this.deps.shared?.release(engine, this.streamId, this.playedOn === engine.containerId);
     }
+    await this.standbys.teardown();
     this.clearSpare();
     await this.gateway.dropAll();
     await this.deps.engines.removeAllFor(this.streamId);

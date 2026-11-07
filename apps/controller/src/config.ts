@@ -87,6 +87,17 @@ const schema = z
      */
     MAX_KEPT_ENGINES: envInt(2),
     /**
+     * Hot standby (a switch in the UI, on by default) keeps an engine on every other path that
+     * already pulls each stream. This limits how many other paths each stream keeps one on, best
+     * first; 0 means all of them.
+     */
+    STANDBY_MAX_PATHS: envInt(0),
+    /**
+     * A stream with a hot standby fails over once no new video came for this long, before the stall
+     * that STALL_SECONDS waits for.
+     */
+    STANDBY_FAILOVER_SECONDS: z.coerce.number().int().min(1).default(8),
+    /**
      * With engine sharing on, a path's shared engine restarts once more than this many of its streams
      * failed within SHARED_ENGINE_FAILURE_WINDOW_SECONDS (or when the stream someone watches fails).
      */

@@ -12,10 +12,12 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { evaluateHealth } from "./health.ts";
-import { sleep, startSessionOfAnyKind } from "./playback.ts";
+import { sleep } from "./playback.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
-import { StreamEngines, type StreamEnginesDeps } from "./stream-engines.ts";
+import { StreamEngines, type MovedStream, type StreamEnginesDeps } from "./stream-engines.ts";
+import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
+import { StreamRecord } from "./stream-record.ts";
 import { streamView } from "./stream-view.ts";
 import type { StreamConfig } from "./stream-store.ts";
 
@@ -41,6 +43,8 @@ export interface SupervisorDeps extends StreamEnginesDeps {
   pathLoad: () => ReadonlyMap<string, number>;
   /** Whether streams share one engine per path (the setting can change at any time). */
   sharedEngines?: () => boolean;
+  /** Whether streams keep hot standbys on the other paths (the setting can change at any time). */
+  hotStandby?: () => boolean;
   /** Number of players showing this stream full screen. */
   viewers?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -52,7 +56,8 @@ export interface SupervisorDeps extends StreamEnginesDeps {
  * when video stops.
  */
 export class StreamSupervisor {
-  private stream: StreamConfig;
+  /** Its config, with what it learned about the stream saved in the store. */
+  private readonly record: StreamRecord;
   private readonly deps: SupervisorDeps;
   private readonly logger: Logger;
   private readonly now: () => number;
@@ -74,19 +79,21 @@ export class StreamSupervisor {
   private lastSwitchAt = 0;
   private recoveries = 0;
   private forceRestart = false;
-  /** Its own engines (with their gateway paths) or its place on a shared engine. */
+  /** Its own engines (with their gateway paths) or its place on a shared engine, and its standbys. */
   private readonly engines: StreamEngines;
   private bootstrapped = false;
+  /** Its hot standbys on the other paths, and failing over to them. */
+  private readonly failover: StreamFailover;
 
   private timer: NodeJS.Timeout | undefined;
   private running = false;
   private current: Promise<void> = Promise.resolve();
 
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
-    this.stream = stream;
     this.deps = deps;
     this.engines = new StreamEngines(stream.id, deps);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
+    this.record = new StreamRecord(stream, { ...deps, logger: this.logger, gateway: this.engines.gateway });
     this.paths = new StreamPaths({
       paths: deps.paths,
       pathAllowed: deps.pathAllowed,
@@ -98,19 +105,34 @@ export class StreamSupervisor {
     this.sleep = deps.sleep ?? sleep;
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.stateSince = this.now();
+    this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
+      ...deps,
+      logger: this.logger,
+      now: this.now,
+      sleep: this.sleep,
+      enabled: () => deps.hotStandby?.() === true,
+      sharing: () => this.sharing,
+      playing: () => this.playing(),
+      setState: this.setState,
+      countRecovery: () => {
+        this.recoveries += 1;
+      },
+      commit: async (moved, path) => this.commitMove(moved, path, true),
+      openSession: async (baseUrl) => this.record.openSession(baseUrl),
+    });
   }
 
-  get id(): string {
-    return this.stream.id;
+  private get stream(): StreamConfig {
+    return this.record.config;
   }
 
   get path(): string | null {
     return this.stream.path;
   }
 
-  /** What this stream's own engines should use at the gateway (re-sent periodically). */
+  /** What this stream's own engines and standbys should use at the gateway (re-sent periodically). */
   assignments(): PathAssignment[] {
-    return this.engines.gateway.list();
+    return this.engines.assignments();
   }
 
   /** True once the first start attempt finished, so `assignments()` is complete. */
@@ -121,10 +143,6 @@ export class StreamSupervisor {
   /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
   get triedEngine(): boolean {
     return this.engines.tried || !this.running;
-  }
-
-  get isPlaying(): boolean {
-    return this.state === "playing";
   }
 
   start(): void {
@@ -148,7 +166,7 @@ export class StreamSupervisor {
   }
 
   updateConfig(stream: StreamConfig): void {
-    this.stream = stream;
+    this.record.config = stream;
   }
 
   requestRestart(): void {
@@ -157,7 +175,8 @@ export class StreamSupervisor {
 
   view(): StreamView {
     const { state, stateSince, message, pipeline, stats, peers, recoveries, engine } = this;
-    const live = { state, stateSince, message, pipeline, stats, peers, recoveries, engine };
+    const standbys = this.engines.standbys.view();
+    const live = { state, stateSince, message, pipeline, stats, peers, recoveries, engine, standbys };
     return streamView(this.stream, this.deps.viewers?.() ?? 0, live);
   }
 
@@ -193,10 +212,12 @@ export class StreamSupervisor {
       }
     }
     await this.poll();
-    // Before any move: the engine a move kept may be what the transcoder already plays from.
-    if (await this.engines.finishLateMove(this.engine, this.session, this.pipeline)) {
+    // Before any move: the engine a move kept, or a standby, may be what the transcoder already
+    // plays from.
+    if (await this.failover.finishLateMoves()) {
       return;
     }
+    await this.failover.maintain();
     if (this.stream.path !== null && !this.paths.allowed(this.stream.path)) {
       await this.leaveDisallowedPath(this.engine);
       return;
@@ -216,12 +237,7 @@ export class StreamSupervisor {
       this.paths.remember(this.stream.path, health.healthy);
     }
     if (health.healthy) {
-      await this.engines.played(this.engine, this.sharing);
-      if (this.recovery.failures > 0) {
-        this.logger.info({ failures: this.recovery.failures }, "stream recovered");
-      }
-      this.recovery = { failures: 0, lastActionAt: undefined };
-      this.setState("playing", null);
+      await this.onVideo(this.engine);
       return;
     }
     if (health.state === "starting" || health.state === "buffering") {
@@ -229,6 +245,19 @@ export class StreamSupervisor {
       return;
     }
     await this.recover(health.reason);
+  }
+
+  /** Video arrives: the stream plays, unless it has been quiet long enough to fail over to a hot standby. */
+  private async onVideo(engine: EngineHandle): Promise<void> {
+    if (await this.failover.failOverEarly()) {
+      return;
+    }
+    await this.engines.played(engine, this.sharing);
+    if (this.recovery.failures > 0) {
+      this.logger.info({ failures: this.recovery.failures }, "stream recovered");
+    }
+    this.recovery = { failures: 0, lastActionAt: undefined };
+    this.setState("playing", null);
   }
 
   /**
@@ -258,13 +287,18 @@ export class StreamSupervisor {
     }, delayMs);
   }
 
-  private setState(state: StreamState, message: string | null): void {
+  private readonly setState = (state: StreamState, message: string | null): void => {
     if (state !== this.state) {
       this.logger.info({ from: this.state, to: state, reason: message }, "stream state changed");
       this.state = state;
       this.stateSince = this.now();
     }
     this.message = message;
+  };
+
+  private playing(): PlayingStream {
+    const { engine, session, pipeline } = this;
+    return { engine, session, pipeline, path: this.stream.path };
   }
 
   private async bootstrap(): Promise<void> {
@@ -317,7 +351,7 @@ export class StreamSupervisor {
     }
     this.setState("starting", "starting engine");
     this.engine = await this.engines.startShared(path, this.engine);
-    await this.persistPath(path);
+    await this.record.persistPath(path);
     this.setState("starting", "opening stream");
     await this.startPlayback(this.engine);
   }
@@ -387,30 +421,24 @@ export class StreamSupervisor {
   }
 
   private canSwitchPath(): boolean {
-    if (!this.paths.hasAlternative(this.stream.path)) {
-      return false;
-    }
-    const dwellOver = this.now() - this.lastSwitchAt >= this.deps.settings.pathMinDwellMs;
-    return dwellOver || this.paths.isDown(this.stream.path);
+    return this.paths.canSwitch(this.stream.path, this.now() - this.lastSwitchAt, this.deps.settings.pathMinDwellMs);
   }
 
   private async recover(why: string): Promise<void> {
     let reason = why;
+    // A hot standby takes over at once, before the ladder: it already pulls the stream.
+    if (this.failover.hasHot()) {
+      this.reportToSharedEngine({ wantsRestart: false });
+      await this.failover.failOver(`${reason}; failing over to a standby`);
+      return;
+    }
     const decision = nextRecovery(this.recovery, this.policy, this.canSwitchPath());
     const wait = decision.notBefore - this.now();
     if (wait > 0) {
       this.setState("stalled", `${reason}; retrying in ${String(Math.ceil(wait / 1000))}s`);
       return;
     }
-    // On a shared engine, other streams play from the same engine: the shared engines decide
-    // whether it restarts.
-    const report = { watched: (this.deps.viewers?.() ?? 0) > 0, wantsRestart: decision.action === "restart-engine" };
-    // A path that is down says nothing about the engine: the stream leaves the path instead.
-    if (
-      this.engine !== undefined &&
-      !this.paths.isDown(this.stream.path) &&
-      this.engines.reportFailure(this.engine, report)
-    ) {
+    if (this.reportToSharedEngine({ wantsRestart: decision.action === "restart-engine" })) {
       reason += "; replacing the shared engine";
     }
     // A dead path cannot be fixed by restarting things locally: leave it, without waiting for the
@@ -421,6 +449,34 @@ export class StreamSupervisor {
       return;
     }
     await this.runAction(decision.action, reason);
+  }
+
+  /**
+   * On a shared engine, other streams play from the same engine: the shared engines decide whether
+   * it restarts. A path that is down says nothing about the engine: the stream leaves the path
+   * instead. Returns true when the shared engine is being replaced.
+   */
+  private reportToSharedEngine(report: { wantsRestart: boolean }): boolean {
+    return (
+      this.engine !== undefined &&
+      !this.paths.isDown(this.stream.path) &&
+      this.engines.reportFailure(this.engine, { watched: (this.deps.viewers?.() ?? 0) > 0, ...report })
+    );
+  }
+
+  /** The stream plays from the engine it moved to, on `target`. */
+  private async commitMove(moved: MovedStream, target: string, switchingPath: boolean): Promise<void> {
+    const from = this.stream.path ?? "none";
+    this.engine = moved.engine;
+    this.session = moved.session;
+    this.pipeline = moved.pipeline;
+    this.attemptStartedAt = this.now();
+    await this.record.persistPath(target);
+    if (switchingPath) {
+      this.lastSwitchAt = this.now();
+      this.deps.metrics.pathSwitches.inc({ stream: this.stream.id, from, to: target });
+    }
+    this.logger.info({ from, to: target, engine: moved.engine.name }, "stream moved to another engine");
   }
 
   private async runAction(action: RecoveryAction, reason: string): Promise<void> {
@@ -456,6 +512,12 @@ export class StreamSupervisor {
   private async switchPath(engine: EngineHandle): Promise<void> {
     const from = this.stream.path ?? "none";
     const target = this.paths.switchTarget(from);
+    // A standby already pulls the stream there: a hot one anywhere, or else the one on the target.
+    const standby = this.failover.takeForMove(target);
+    if (standby !== undefined) {
+      await this.failover.moveTo(engine, standby, "moving to the standby");
+      return;
+    }
     if (target === undefined && !this.paths.allowed(from)) {
       // Restarting in place would put the engine back on a path it may not use.
       throw new Error("no path it may use is up");
@@ -480,7 +542,6 @@ export class StreamSupervisor {
     target: string,
     options: { switchingPath: boolean; handover: boolean },
   ): Promise<void> {
-    const from = this.stream.path ?? "none";
     const { handoverTimeoutMs: timeoutMs, tickMs: pollMs } = this.deps.settings;
     await this.engines.move({
       from: engine,
@@ -488,18 +549,9 @@ export class StreamSupervisor {
       target,
       shared: this.sharing,
       handover: options.handover ? { timeoutMs, pollMs, now: this.now, sleep: this.sleep } : undefined,
-      openSession: async (baseUrl) => this.openSession(baseUrl),
+      openSession: async (baseUrl) => this.record.openSession(baseUrl),
       commit: async (moved) => {
-        this.engine = moved.engine;
-        this.session = moved.session;
-        this.pipeline = moved.pipeline;
-        this.attemptStartedAt = this.now();
-        await this.persistPath(target);
-        if (options.switchingPath) {
-          this.lastSwitchAt = this.now();
-          this.deps.metrics.pathSwitches.inc({ stream: this.stream.id, from, to: target });
-        }
-        this.logger.info({ from, to: target, engine: moved.engine.name }, "stream moved to another engine");
+        await this.commitMove(moved, target, options.switchingPath);
       },
     });
   }
@@ -519,37 +571,21 @@ export class StreamSupervisor {
         ? this.stream.path
         : (this.paths.forStart(this.stream.path, 0) ?? null);
     const restarted = await this.engines.restartOwn(engine, async (starting) => {
-      await this.applyPath(starting, path);
+      await this.record.applyPath(starting, path);
     });
     this.engine = restarted;
     if (!this.engines.gateway.has(restarted.ip)) {
-      await this.applyPath(restarted, path);
+      await this.record.applyPath(restarted, path);
     }
     await this.startPlayback(restarted);
   }
 
   private async startPlayback(engine: EngineHandle): Promise<void> {
-    const session = await this.openSession(engine.baseUrl);
+    const session = await this.record.openSession(engine.baseUrl);
     this.session = session;
     this.attemptStartedAt = this.now();
     this.stats = undefined;
     this.pipeline = await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl });
-  }
-
-  /** Starts an engine session and remembers which kind of identifier the engine accepted. */
-  private async openSession(baseUrl: string): Promise<EngineSession> {
-    const { session, kind } = await startSessionOfAnyKind(
-      this.deps.ace,
-      baseUrl,
-      this.stream.aceId,
-      this.stream.aceIdKind,
-    );
-    if (this.stream.aceIdKind !== kind) {
-      this.logger.info({ kind }, "engine accepted the stream identifier");
-      this.stream = { ...this.stream, aceIdKind: kind };
-      await this.deps.store.update(this.stream.id, { aceIdKind: kind });
-    }
-    return session;
   }
 
   /** Gives the engine the path for a start attempt, once the gateway's paths are known. */
@@ -557,27 +593,7 @@ export class StreamSupervisor {
     if (!this.paths.known) {
       return;
     }
-    await this.applyPath(engine, this.paths.forStart(this.stream.path, this.recovery.failures) ?? null);
-  }
-
-  private async applyPath(engine: EngineHandle, path: string | null): Promise<void> {
-    if (path === null) {
-      return;
-    }
-    try {
-      await this.engines.gateway.assign(engine.ip, path);
-      await this.persistPath(path);
-    } catch (error) {
-      this.logger.warn({ err: error, path }, "could not assign network path");
-    }
-  }
-
-  private async persistPath(path: string): Promise<void> {
-    if (this.stream.path === path) {
-      return;
-    }
-    this.stream = { ...this.stream, path };
-    await this.deps.store.update(this.stream.id, { path });
+    await this.record.applyPath(engine, this.paths.forStart(this.stream.path, this.recovery.failures) ?? null);
   }
 
   private async stopSessionQuietly(): Promise<void> {

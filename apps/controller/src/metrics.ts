@@ -9,6 +9,14 @@ export interface MetricSources {
   sharedEngines?: () => SharedEngineView[];
 }
 
+function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: StreamView[]): void {
+  for (const stream of streams) {
+    for (const standby of stream.standbys) {
+      gauge.set({ stream: stream.id, path: standby.path, state: standby.state }, 1);
+    }
+  }
+}
+
 /**
  * Prometheus metrics of the controller. Gauges are filled at scrape time from the current
  * snapshot, so they always match what the UI shows.
@@ -69,7 +77,7 @@ export class ControllerMetrics {
       collect: () => {
         const current = snapshot();
         const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
-        for (const gauge of [...gauges, watching, sharedStreams]) {
+        for (const gauge of [...gauges, watching, sharedStreams, sharedStandbys, standbys]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -103,6 +111,7 @@ export class ControllerMetrics {
           }
           viewers.set(labels, stream.viewers);
         }
+        setStandbyGauge(standbys, current.streams);
         const watchers = sources.viewers?.() ?? [];
         for (const viewer of watchers) {
           watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
@@ -113,6 +122,7 @@ export class ControllerMetrics {
             { path: engine.path, engine: engine.engine, retiring: String(engine.retiring) },
             engine.streams,
           );
+          sharedStandbys.set({ path: engine.path, engine: engine.engine }, engine.standbys);
         }
         for (const engine of engineMemory()) {
           const labels = { stream: engine.stream, engine: engine.engine };
@@ -201,6 +211,18 @@ export class ControllerMetrics {
       name: "aceswarm_shared_engine_streams",
       help: "Streams playing from each shared engine",
       labelNames: ["path", "engine", "retiring"],
+      registers,
+    });
+    const sharedStandbys = new Gauge({
+      name: "aceswarm_shared_engine_standbys",
+      help: "Streams of other paths with a standby session on each shared engine",
+      labelNames: ["path", "engine"],
+      registers,
+    });
+    const standbys = new Gauge({
+      name: "aceswarm_stream_standby",
+      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed",
+      labelNames: ["stream", "path", "state"],
       registers,
     });
   }

@@ -170,22 +170,23 @@ The engine only reads HTTP sources (`--source -` for stdin isn't supported). ffm
 
 ## Tests
 
-The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only and engine sharing off).
+The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only, engine sharing and hot standby off, so each stream has one engine).
 
 ```mermaid
 flowchart LR
-  I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> S[streams] --> W[wireguard-only]
+  I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
 ```
 
-| Spec                     | Engines | Checks                                                                                                                                                                                  |
-| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                               |
-| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                           |
-| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal          |
-| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                            |
-| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids |
-| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                       |
-| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                       |
+| Spec                     | Engines | Checks                                                                                                                                                                                              |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                           |
+| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                       |
+| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                      |
+| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                                        |
+| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids             |
+| `standby.spec.ts`        | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off |
+| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                   |
+| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                   |
 
 ### Content IDs and infohashes
 
@@ -289,6 +290,33 @@ sequenceDiagram
   T->>AS: restarts metric says "watched", closing the player leaves 0 viewers
   T->>AS: turn it off: each stream moves to an engine of its own
 ```
+
+### Hot standby
+
+`standby.spec.ts` runs these in order, on one stream, with hot standby on:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Playwright
+  participant AS as AceSwarm (stack runner)
+  participant WG as wg runner
+  T->>AS: the stream plays on the direct path, no standby (one path)
+  T->>AS: upload the WireGuard profile
+  AS->>WG: a standby engine on the VPN, the transcoder reads it: "hot"
+  T->>AS: pause the engine the stream plays from (it hangs)
+  AS->>AS: no video for 8 s: fail over to the VPN standby (one recovery, no "recovering")
+  T->>AS: unpause it
+  AS->>AS: no new engine: the old one becomes the standby on the direct path
+  AS->>AS: the direct standby gets hot, the stream stays on the VPN
+  T->>AS: turn "One engine per path" on
+  AS->>AS: stream and standby become sessions on the two paths' shared engines
+  T->>AS: pause the VPN's shared engine, then unpause it
+  AS->>AS: fail over to the direct path's shared engine
+  T->>AS: turn "Hot standby on other paths" off in the Streams dialog: standbys go
+```
+
+The faults are engines that hang, not paths that lose the broadcast. With a standby running, cutting the direct path off does not stall the stream: its engine keeps getting the broadcast from the standby, over the engines' network.
 
 ### WireGuard only
 

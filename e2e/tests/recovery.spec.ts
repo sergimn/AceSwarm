@@ -17,10 +17,14 @@ test.afterAll(() => {
 });
 
 test("recovers a stream whose swarm stalls", async ({ request }) => {
+  // With the default settings: hot standby is on, but with one path there is nowhere for a standby.
+  const settings = await request.patch("/api/settings", { data: { hotStandby: true } });
+  expect(settings.ok(), await settings.text()).toBe(true);
   // Without a WireGuard profile the direct path is the only one, so cutting the broadcast runner
   // off at this runner's firewall is a swarm that dries up: no path can help.
   const stream = await addStream(request, bc[0]!.infohash, "Flaky");
   const before = await waitForPlaying(request, stream.id);
+  expect(before.standbys).toEqual([]);
   setDirectPathBlocked(true);
   try {
     await expect
@@ -34,6 +38,8 @@ test("recovers a stream whose swarm stalls", async ({ request }) => {
   // Recovery keeps trying, so the stream plays again once the swarm is back.
   const playing = await waitForPlaying(request, stream.id, 240_000);
   expect(playing.path).toBe("direct");
+  expect(playing.standbys).toEqual([]);
+  expect(engineContainers(stream.id)).toHaveLength(1);
 });
 
 test("restarting one engine leaves the other streams alone", async ({ request }) => {

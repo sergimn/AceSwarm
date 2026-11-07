@@ -4,6 +4,7 @@ import type {
   PeerStats,
   PipelineRequest,
   PipelineStatus,
+  StandbyReaderStatus,
 } from "@aceswarm/shared/api-types";
 import { HttpError, requestJson, requestOk } from "@aceswarm/shared/http";
 
@@ -41,6 +42,26 @@ export class TranscoderClient {
 
   async stop(id: string): Promise<void> {
     await requestOk(`${this.baseUrl}/pipelines/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /**
+   * Has the transcoder read exactly these standby sources of the stream, which keeps them pulling
+   * the stream (see `StreamStandbys`). Returns their status, or undefined while the stream has no
+   * pipeline.
+   */
+  async setStandbys(id: string, sources: string[]): Promise<StandbyReaderStatus[] | undefined> {
+    try {
+      return await requestJson<StandbyReaderStatus[]>(`${this.baseUrl}/standbys/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        body: { sources },
+        timeoutMs: 3000,
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 404) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async list(): Promise<PipelineStatus[]> {

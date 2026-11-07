@@ -1,6 +1,6 @@
 # Architecture
 
-Ace Swarm is a small set of Node.js services written in TypeScript and run by Node's built-in type stripping, so there is no build step. The UI is the only part that is bundled (with Vite). Engines are created on demand: one container per stream, or, with [shared engines](#shared-engines), one per network path that every stream on it uses.
+Ace Swarm is a small set of Node.js services written in TypeScript and run by Node's built-in type stripping, so there is no build step. The UI is the only part that is bundled (with Vite). Engines are created on demand: one container per stream, or, with [shared engines](#shared-engines), one per network path that every stream on it uses. With more than one path, each stream also keeps a [hot standby](#hot-standby) on the other paths.
 
 ```mermaid
 flowchart TB
@@ -30,13 +30,13 @@ flowchart TB
 
 ## Services
 
-| Service      | Privileges                                          | Role                                                            |
-| ------------ | --------------------------------------------------- | --------------------------------------------------------------- |
-| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data` |
-| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails     |
-| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats    |
-| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API      |
-| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                            |
+| Service      | Privileges                                          | Role                                                                                                        |
+| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data`                                             |
+| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails; it also reads each [hot standby](#hot-standby) |
+| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats                                                |
+| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API                                                  |
+| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                                                                        |
 
 ## Streams
 
@@ -50,7 +50,7 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 
 ### Recovery ladder
 
-When a stream stalls, recovery climbs a ladder, and the delay between steps grows exponentially:
+When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over to it first. Otherwise recovery climbs a ladder, and the delay between steps grows exponentially:
 
 | Failures | Action                                 |
 | -------- | -------------------------------------- |
@@ -126,6 +126,21 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
 
 - **Leftovers.** The controller removes a path's engine that nobody used for two minutes (see above) once no stream is still moving to it. Once every stream tried to start an engine (a stream waiting for the gateway, or for a WireGuard path it may use, hasn't yet), it also removes the shared engines a previous run left that no stream took over.
 - **Peers.** The engine reports connected peers per session. Connection tracking only sees the engine, so the "sending" peers and their countries are the engine's, the same for each of its streams.
+
+### Hot standby
+
+With **Hot standby on other paths** on (the default; `PATCH /api/settings`, `{ "hotStandby": true }`, stored in `/data/settings.json`), every stream that played since the controller started keeps a standby on each other path it may use: on the best `STANDBY_MAX_PATHS` of them, or on all of them with 0 (the default). A standby is an engine of the stream's own on that path (`<stack>-engine-<stream>-<generation>`, routed through the path like the stream's own engine), or with [shared engines](#shared-engines) on, a session on that path's shared engine, which the shared engines count apart from the streams that play from it.
+
+- **The transcoder keeps it hot.** An engine only keeps downloading a stream that someone reads, so the transcoder reads each standby session and throws the data away (`PUT /standbys/<stream>` with `{ "sources": [...] }`, sent on every check; readers it no longer lists stop). The engine allows one reader per session, so a reader stops when ffmpeg starts on its source: ffmpeg starts half a second after the reader's connection closed, and opens the source again (up to five times, a second apart) when it fails before any video, since the engine may still refuse a new reader for a moment. While the transcoder reads a standby's session itself (after a failover that gave up, it may still take it), the standby isn't started again for bringing no data. A standby is _hot_ while its last data is at most 10 seconds old.
+- **Failing over.** A stream fails over to its best hot standby (by the order of path selection) when no new video came for `STANDBY_FAILOVER_SECONDS` (8), before it counts as stalled, and before any ladder step once it stalled. The move is make-before-break, with a shorter handover (30 seconds at most), and counts as a recovery (`action="failover"`). The stream's own engine on the path it left becomes the standby there, with a new session; on a shared engine, the stream's session goes, and the path gets a new standby session. A failover that brings no video leaves the stream where it was, and that standby isn't tried again for a while (the ladder's delays), so the ladder can go on. A standby only counts for a failover when the transcoder answered on this check and its data is newer than the stream's last video by half the failover delay (at most 4 seconds): when the transcoder restarts, or the broadcast pauses on every path, the standbys stopped with the stream, and moving would not help.
+- **Path moves use standbys.** A recovery path switch, or a move off the direct path once WireGuard only is on, moves to a hot standby first, or to the standby on the target path, hot or not, before it starts a new engine.
+- **Standbys are sticky.** A healthy stream never moves to a standby, and standbys keep their paths when path scores change: one that moves starts again from no peers. A standby goes when its path may no longer be used (WireGuard only, a removed profile), the stream moves onto its path, sharing is turned on or off (the standby of the other kind goes, and one of the right kind starts), its shared engine is replaced, its path is down for two minutes, or there are more than `STANDBY_MAX_PATHS`.
+- **Failing standbys.** A standby whose session brings no data within `STARTUP_GRACE_SECONDS` starts again: its own engine restarts, or on a shared engine only its session does. After three failed tries it goes, and its path gets a new standby later, with the ladder's growing delays. After three such rounds the path gets none until it goes down or the stream moves to another path. Nothing happens to a standby while its path is down.
+- **Only while the stream plays.** A stream that had no video for ten minutes keeps no standbys, so a broadcast that is off for hours doesn't keep engines starting; they come back once it plays.
+- **Background work.** Standbys start, open their sessions, start again and go in the background, so the stream's own checks never wait for them. At most two standby engines start (or start again) at once, across all streams.
+- **Shared engines** count a stream's standby session and its play role on an engine separately, so a failed move to the engine of a path where the stream also has a standby leaves that standby counted.
+- **After a controller restart,** standbys aren't taken over: the stream's own engine is, and the others are removed. New standbys start once the stream plays.
+- **Metrics.** `aceswarm_stream_standby{stream, path, state}` (`starting`, `warming`, `hot`, `failed`) and `aceswarm_shared_engine_standbys{path, engine}`.
 
 ### Viewers
 
