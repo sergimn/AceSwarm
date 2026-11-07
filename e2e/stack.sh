@@ -4,8 +4,7 @@
 #
 #   e2e/stack.sh build|up|down|logs
 #
-# With E2E_RUNTIME=podman (set by e2e/podman.sh setup), the images are built with Podman and the
-# docker CLI talks to Podman's API through DOCKER_HOST.
+# On the Podman leg, `docker` is Podman (podman-docker, see e2e/podman.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,13 +19,10 @@ compose() {
 }
 
 build() {
-  local builder=docker
-  # Podman's API has no BuildKit, so its images are built with Podman itself (same storage).
-  [[ "${E2E_RUNTIME:-docker}" == podman ]] && builder=podman
   for target in controller transcoder netgw; do
-    "$builder" build -q --target "$target" -t "aceswarm-${target}:e2e" . >/dev/null
+    docker build -q --target "$target" -t "aceswarm-${target}:e2e" . >/dev/null
   done
-  "$builder" build -q -f engine/Dockerfile -t aceswarm-engine:e2e . >/dev/null
+  docker build -q -f engine/Dockerfile -t aceswarm-engine:e2e . >/dev/null
 }
 
 down() {

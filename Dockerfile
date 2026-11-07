@@ -81,6 +81,12 @@ EXPOSE 8081
 CMD ["node", "src/main.ts"]
 
 # The gateway needs root (NET_ADMIN) to manage WireGuard interfaces, routes and iptables rules.
+#
+# `wg` moves off /usr/bin/wg. Some hosts (Ubuntu 26.04) ship an AppArmor profile for /usr/bin/wg
+# that only lets it read /etc/wireguard. Rootless containers run without an AppArmor profile of
+# their own, so the host attaches that profile to the container's /usr/bin/wg by path, and
+# `wg setconf` can't read the gateway's configuration ("fopen: Permission denied"). Docker and
+# rootful Podman confine the whole container with their own profile instead, where it never applies.
 FROM runtime AS netgw
 RUN --mount=type=secret,id=build_ca,required=false \
     if [ -f /run/secrets/build_ca ]; then export SSL_CERT_FILE=/run/secrets/build_ca; fi; \
@@ -91,7 +97,8 @@ RUN --mount=type=secret,id=build_ca,required=false \
       iptables-legacy \
       iputils-ping \
       wireguard-go \
-      wireguard-tools-wg
+      wireguard-tools-wg \
+    && mv /usr/bin/wg /usr/local/sbin/wg
 COPY --from=netgw-deps /app/node_modules node_modules
 COPY apps/netgw/package.json apps/netgw/
 COPY apps/netgw/src apps/netgw/src

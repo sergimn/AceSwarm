@@ -2,9 +2,11 @@
 
 The end-to-end tests drive the real AceSwarm services (controller, transcoder, network gateway) through the UI and the REST API with Playwright. Nothing is mocked: real Acestream engines play real broadcasts from another machine, directly or through a real WireGuard server on a third machine.
 
-| Runs in                    | Engines                                      | Machines                | When                                           |
-| -------------------------- | -------------------------------------------- | ----------------------- | ---------------------------------------------- |
-| Workflow "E2E" (`e2e.yml`) | real Acestream engines (`engine/Dockerfile`) | 3 GitHub-hosted runners | every PR and push to `main`, or "Run workflow" |
+| Runs in                    | Engines                                      | Machines                         | When                                           |
+| -------------------------- | -------------------------------------------- | -------------------------------- | ---------------------------------------------- |
+| Workflow "E2E" (`e2e.yml`) | real Acestream engines (`engine/Dockerfile`) | 3 GitHub-hosted runners, per leg | every PR and push to `main`, or "Run workflow" |
+
+- **Two legs: Docker and rootless Podman.** The workflow runs the whole suite twice, side by side, each leg on its own three runners with its own mesh. They share the setup (the same broadcasts, the same throwaway WireGuard server) but no traffic. See [The Podman leg](#the-podman-leg).
 
 - **No single-machine run.** The broadcasts and the WireGuard server need their own hosts, joined to AceSwarm's by the mesh, so the suite runs on the CI runners only. To try a branch, push it and start the workflow with "Run workflow".
 - **It needs Acestream's lookup service.** Engines resolve both content IDs and infohashes through it, so an Acestream outage fails the whole run.
@@ -335,3 +337,10 @@ sequenceDiagram
 | `e2e/stack.sh`, `e2e/compose.e2e.yaml`   | AceSwarm with real engines                                           |
 | `e2e/playwright.config.ts`, `e2e/tests/` | the specs, their helpers (`helpers.ts`) and mesh helpers (`mesh.ts`) |
 | `e2e/test/`                              | unit tests for the STUN client and the tracker (run by `npm test`)   |
+
+## The Podman leg
+
+The Podman leg's stack runner (`ubuntu-26.04`) runs AceSwarm like a host that starts it with `docker compose up` on rootless Podman. `e2e/podman.sh setup` installs Podman and `podman-docker` from the distribution, so `docker` runs Podman and `docker compose` runs `podman compose` with Docker Compose as its provider. It starts a systemd user instance (linger) for Podman's cgroups, healthchecks and API socket, and sets `DOCKER_SOCKET` to that socket and `ACESWARM_ENGINES_INTERNAL=true`, as `.env.example` describes for Podman. The WireGuard server and broadcast runners are the same as in the Docker leg.
+
+- **Faults go into Podman's network namespace.** Rootless containers reach the outside through rootless Podman's own network namespace, not the host's forwarding path, so the host's `DOCKER-USER` chain never sees their traffic. With `E2E_RUNTIME=podman`, the specs add their `DROP` rules to that namespace's `FORWARD` chain instead (`e2e/podman.sh iptables`), which also sees container traffic only.
+- **AppArmor on Ubuntu 26.04.** Its AppArmor ships a profile for `/usr/bin/wg` that only lets `wg` read `/etc/wireguard`. That is why the mesh keeps its private key there. The gateway image installs `wg` as `/usr/local/sbin/wg` for the same reason: rootless containers have no AppArmor profile of their own, so the host's profile would apply to the container's `/usr/bin/wg` (see the netgw stage in `Dockerfile`).

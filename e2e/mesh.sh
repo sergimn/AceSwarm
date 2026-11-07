@@ -25,6 +25,7 @@ MESH_DIR="${MESH_DIR:-${RUNNER_TEMP:-/tmp}/mesh}"
 MESH_PORT="${MESH_PORT:-51000}"
 MESH_ARTIFACT_PREFIX="${MESH_ARTIFACT_PREFIX:-mesh-}"
 MESH_IFACE=wg-mesh
+MESH_KEY=/etc/wireguard/wg-mesh.key
 # Leaves room for a WireGuard tunnel inside the mesh: each layer adds up to 80 bytes.
 MESH_MTU=1380
 SHARE_PORT=18999
@@ -51,8 +52,13 @@ prepare() {
   mkdir -p "$MESH_DIR/publish" "$MESH_DIR/peers" "$MESH_DIR/share"
   command -v wg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools >/dev/null; }
   sudo modprobe wireguard
-  (umask 077 && wg genkey >"$MESH_DIR/private.key")
-  wg pubkey <"$MESH_DIR/private.key" >"$MESH_DIR/public.key"
+  # The private key lives in /etc/wireguard: on Ubuntu 26.04, AppArmor's profile for wg lets it
+  # read files there only. Otherwise wg only gets pipes here.
+  sudo install -d -m 0700 /etc/wireguard
+  wg genkey | sudo sh -c "umask 077 && cat >$MESH_KEY"
+  local public
+  public="$(sudo cat "$MESH_KEY" | wg pubkey)"
+  echo "$public" >"$MESH_DIR/public.key"
 
   # Refreshes the NAT mapping every 10 s until `join` hands the port to WireGuard.
   rm -f "$MESH_DIR/stun.json"
@@ -73,7 +79,7 @@ prepare() {
   # are known. WireGuard gets the STUN port in `join`.
   sudo ip link del "$MESH_IFACE" 2>/dev/null || true
   sudo ip link add "$MESH_IFACE" type wireguard
-  sudo wg set "$MESH_IFACE" private-key "$MESH_DIR/private.key"
+  sudo wg set "$MESH_IFACE" private-key "$MESH_KEY"
   sudo ip address add "$(mesh_ip "$role")/24" dev "$MESH_IFACE"
   sudo ip link set "$MESH_IFACE" mtu "$MESH_MTU" up
   nohup python3 -m http.server "$SHARE_PORT" --bind "$(mesh_ip "$role")" --directory "$MESH_DIR/share" \

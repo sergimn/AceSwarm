@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Rootless Podman for the stack runner of the Podman E2E leg (see e2e/README.md): installs Podman,
-# starts its Docker-compatible API socket for this user, and points the docker CLI (and so
-# `docker compose`, e2e/stack.sh and the specs) at it, the way a rootless Podman host runs
-# AceSwarm with DOCKER_SOCKET set.
+# Rootless Podman for the stack runner of the Podman E2E leg (see e2e/README.md), set up like a
+# host that runs AceSwarm with `docker compose up` on Podman: podman-docker makes `docker` run
+# Podman, `docker compose` becomes `podman compose` with Docker Compose as its provider, and the
+# stack's docker-proxy uses this user's Podman API socket (DOCKER_SOCKET).
 #
 #   e2e/podman.sh setup     install and start; writes the environment to $GITHUB_ENV when set
 #   e2e/podman.sh iptables  ARGS...   iptables in rootless Podman's network namespace
@@ -25,10 +25,29 @@ setup() {
     exit 2
   fi
 
-  command -v podman >/dev/null || apt_install podman passt uidmap
-  if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
-    apt_install docker-cli docker-compose-v2 || apt_install docker.io docker-compose-v2
+  # The runner image's Docker Compose becomes `podman compose`'s provider. Docker's own CLI goes:
+  # podman-docker replaces /usr/bin/docker.
+  local plugin compose=""
+  for plugin in /usr/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
+    /usr/lib/docker/cli-plugins/docker-compose; do
+    [[ -x "$plugin" ]] && compose="$plugin" && break
+  done
+  if [[ -z "$compose" ]]; then
+    log "Docker Compose is missing"
+    exit 1
   fi
+  sudo install -m 0755 "$compose" /usr/local/bin/docker-compose
+  if [[ -e /usr/bin/docker ]]; then
+    sudo systemctl stop docker.socket docker.service 2>/dev/null || true
+    local package
+    if package="$(dpkg -S /usr/bin/docker 2>/dev/null)"; then
+      sudo DEBIAN_FRONTEND=noninteractive timeout 300 apt-get remove -y -qq "${package%%:*}" >/dev/null
+    fi
+    sudo rm -f /usr/bin/docker
+  fi
+  apt_install podman podman-docker passt uidmap
+  # podman-docker prints a notice on every call without it.
+  sudo touch /etc/containers/nodocker
   if ! grep -q "^${user}:" /etc/subuid || ! grep -q "^${user}:" /etc/subgid; then
     sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$user"
   fi
@@ -51,9 +70,8 @@ setup() {
   podman system migrate
   systemctl --user start podman.socket
   local socket="${XDG_RUNTIME_DIR}/podman/podman.sock"
-  export DOCKER_HOST="unix://${socket}"
   deadline=$((SECONDS + 60))
-  until docker version >/dev/null 2>&1; do
+  until curl -sf --unix-socket "$socket" http://podman/_ping >/dev/null; do
     ((SECONDS < deadline)) || {
       log "the Podman API socket does not answer"
       exit 1
@@ -61,16 +79,16 @@ setup() {
     sleep 1
   done
 
-  podman version
-  podman info --format 'rootless={{.Host.Security.Rootless}} cgroups={{.Host.CgroupManager}}/{{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}} rootless-network={{.Host.RootlessNetworkCmd}} runtime={{.Host.OCIRuntime.Name}}'
-  docker version --format 'docker CLI {{.Client.Version}} -> {{.Server.Platform.Name}} {{.Server.Version}}'
-  docker compose version
+  docker version
+  podman info --format 'rootless={{.Host.Security.Rootless}} cgroups={{.Host.CgroupManager}}/{{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}} rootless-network={{.Host.RootlessNetworkCmd}} runtime={{.Host.OCIRuntime.Name}} apparmor={{.Host.Security.AppArmorEnabled}}'
+  PODMAN_COMPOSE_WARNING_LOGS=false docker compose version
 
   if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
       echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
       echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}"
-      echo "DOCKER_HOST=${DOCKER_HOST}"
+      # `podman compose` says which provider it runs on every call.
+      echo "PODMAN_COMPOSE_WARNING_LOGS=false"
       # The socket the stack's docker-proxy mounts, as .env.example documents for rootless Podman.
       echo "DOCKER_SOCKET=${socket}"
       # Podman needs an internal engines network (compose.yaml).
