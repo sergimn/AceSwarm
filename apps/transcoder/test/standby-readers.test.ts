@@ -85,9 +85,25 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(engine.requests).toHaveLength(1);
     });
-    readers.release("http://e1/play");
+    const released = readers.release("http://e1/play");
     expect(engine.requests[0]?.aborted()).toBe(true);
     expect(readers.status()).toEqual([]);
+    expect(await released).toBe(true);
+    // A source without a reader: nothing to wait for.
+    expect(await readers.release("http://e1/play")).toBe(false);
+  });
+
+  test("lets go of a source only once its connection is closed and the engine had time to notice", async () => {
+    const engine = fakeEngine();
+    const readers = new StandbyReaders(logger, { ...settings, releaseGraceMs: 50 }, engine.fetch);
+    readers.set(["http://e1/play"]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    const startedAt = performance.now();
+    expect(await readers.release("http://e1/play")).toBe(true);
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(45);
+    expect(engine.requests).toHaveLength(1);
   });
 
   test("connects again when the engine ends the stream", async () => {

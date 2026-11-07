@@ -86,10 +86,11 @@ export interface StandbyContext {
   /** The path of the engine the stream kept from a failed move, which gets no standby of its own. */
   sparePath: string | undefined;
   /**
-   * The source the transcoder still tries to hand the stream over to: a standby's session after a
-   * failover that gave up, which the transcoder may yet take (see `finishLateFailover`).
+   * The sources the transcoder reads: the one it plays from, and the one it still tries to hand
+   * the stream over to. After a failover that gave up, that can be a standby's session, which the
+   * transcoder may yet take (see `finishLateFailover`); its reader let go of it meanwhile.
    */
-  pendingSource: string | null;
+  transcoderSources: readonly string[];
   openSession: OpenSession;
 }
 
@@ -385,11 +386,12 @@ export class StreamStandbys {
 
   /**
    * Nothing to do for the standby now: it is busy or went, waits for its next try, its path is down,
-   * or the transcoder still tries to hand the stream over to its session.
+   * or the transcoder reads its session itself (so its reader brings no data).
    */
   private waits(standby: StandbyEngine, context: StandbyContext, now: number): boolean {
-    const pending = context.pendingSource !== null && standby.session?.playbackUrl === context.pendingSource;
-    return standby.busy || standby.dropped || pending || now < standby.retryAt || !context.up(standby.path);
+    const url = standby.session?.playbackUrl;
+    const taken = url !== undefined && context.transcoderSources.includes(url);
+    return standby.busy || standby.dropped || taken || now < standby.retryAt || !context.up(standby.path);
   }
 
   /** A new standby on the best path that has none, one per check, while a start slot is free. */

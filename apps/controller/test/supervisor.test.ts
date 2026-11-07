@@ -1430,6 +1430,25 @@ describe("hot standby on the other paths", () => {
     expect(fake.creates()).toBe(2);
   });
 
+  test("leaves a standby alone while the transcoder still waits for its video", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    // A standby that brings no data starts again at once.
+    const fake = await withStandby({ standbyData, standby: { policy, warmupMs: 0 } });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    // The transcoder took over the standby's session from its reader, so no data comes from it
+    // while the transcoder reads it. Starting it again would cut the video the transcoder waits for.
+    standbyData.clear();
+    await fake.instance.tick();
+    await settle();
+    expect(fake.restarted).toEqual([]);
+    expect(fake.removed).toEqual([]);
+  });
+
   test("starting a standby engine again waits for a start slot", async () => {
     const standbyStarts = new MoveSlots(1);
     const fake = await withStandby({ standbyData: new Set(), standbyStarts });

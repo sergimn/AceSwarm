@@ -1,3 +1,4 @@
+import { setTimeout as wait } from "node:timers/promises";
 import type { StandbyReaderStatus } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
@@ -7,9 +8,18 @@ export interface StandbyReaderSettings {
   idleTimeoutMs: number;
   /** Wait between two connections after one ended or failed. */
   retryMs: number;
+  /**
+   * How long a reader that lets go of its source for ffmpeg waits after closing the connection,
+   * so that the engine notices before ffmpeg connects (it allows one reader per session).
+   */
+  releaseGraceMs?: number;
 }
 
-export const DEFAULT_STANDBY_READER_SETTINGS: StandbyReaderSettings = { idleTimeoutMs: 30_000, retryMs: 2000 };
+export const DEFAULT_STANDBY_READER_SETTINGS: StandbyReaderSettings = {
+  idleTimeoutMs: 30_000,
+  retryMs: 2000,
+  releaseGraceMs: 500,
+};
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -26,6 +36,8 @@ class StandbyReader {
   private readonly fetch: Fetch;
   private readonly now: () => number;
   private readonly closed = new AbortController();
+  /** Settles once the reader stopped for good, its last connection closed. */
+  private readonly done: Promise<void>;
   private attempt: AbortController | undefined;
   private state: StandbyReaderStatus["state"] = "connecting";
   private bytes = 0;
@@ -38,7 +50,7 @@ class StandbyReader {
     this.logger = logger;
     this.fetch = fetch;
     this.now = now;
-    void this.run();
+    this.done = this.run();
   }
 
   status(): StandbyReaderStatus {
@@ -51,10 +63,14 @@ class StandbyReader {
     };
   }
 
-  /** Stops reading at once, closing the connection: the engine allows one reader per stream. */
-  close(): void {
+  /**
+   * Stops reading at once, closing the connection: the engine allows one reader per session.
+   * Settles once the connection is closed.
+   */
+  async close(): Promise<void> {
     this.closed.abort();
     this.attempt?.abort();
+    await this.done;
   }
 
   /** A method, so that a check after an `await` sees `close()` calls made meanwhile. */
@@ -159,7 +175,7 @@ export class StandbyReaders {
   set(sources: readonly string[]): StandbyReaderStatus[] {
     for (const [source, reader] of this.readers) {
       if (!sources.includes(source)) {
-        reader.close();
+        void reader.close();
         this.readers.delete(source);
       }
     }
@@ -171,10 +187,20 @@ export class StandbyReaders {
     return this.status();
   }
 
-  /** Stops reading a source that ffmpeg now reads: the engine allows one reader per stream. */
-  release(source: string): void {
-    this.readers.get(source)?.close();
+  /**
+   * Stops reading a source that ffmpeg reads from now on: the engine allows one reader per
+   * session. Settles once the connection is closed and the engine had a moment to notice, with
+   * true when the source had a reader.
+   */
+  async release(source: string): Promise<boolean> {
+    const reader = this.readers.get(source);
+    if (reader === undefined) {
+      return false;
+    }
     this.readers.delete(source);
+    await reader.close();
+    await wait(this.settings.releaseGraceMs ?? 0);
+    return true;
   }
 
   status(): StandbyReaderStatus[] {
@@ -190,7 +216,7 @@ export class StandbyReaders {
 
   closeAll(): void {
     for (const reader of this.readers.values()) {
-      reader.close();
+      void reader.close();
     }
     this.readers.clear();
   }

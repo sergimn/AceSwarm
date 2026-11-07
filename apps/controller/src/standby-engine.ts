@@ -145,7 +145,8 @@ export class StandbyEngine {
         return;
       }
       // Maybe no stream plays from the engine, and then nothing noticed if it stopped or hangs:
-      // checks it, which starts it again or gets the path a new one. A failed check leaves it.
+      // checks it, which starts it again or gets the path a new one. After a failed check the
+      // standby has no engine, and its next try acquires the path's engine again.
       this.engine = undefined;
       this.engine = await this.requiredShared().rejoin(engine, this.deps.streamId, "standby");
     } else {

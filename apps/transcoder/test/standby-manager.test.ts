@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService } from "@aceswarm/shared/service";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager } from "../src/server.ts";
 
@@ -28,8 +28,11 @@ function silentProcess(): ChildProcess {
 describe("standby readers of a stream", () => {
   let hlsDir: string;
   let manager: PipelineManager;
+  /** Every ffmpeg process, in order. */
+  const children: ChildProcess[] = [];
 
   beforeEach(async () => {
+    children.length = 0;
     hlsDir = await mkdtemp(join(tmpdir(), "standby-manager-test-"));
     const settings: PipelineSettings = {
       hlsDir,
@@ -49,7 +52,12 @@ describe("standby readers of a stream", () => {
       },
     };
     // The readers' engines don't exist: they wait a minute before connecting again.
-    manager = new PipelineManager(createService({ name: "test", logger }), settings, logger, silentProcess, {
+    const spawner = (): ChildProcess => {
+      const child = silentProcess();
+      children.push(child);
+      return child;
+    };
+    manager = new PipelineManager(createService({ name: "test", logger }), settings, logger, spawner, {
       idleTimeoutMs: 60_000,
       retryMs: 60_000,
     });
@@ -74,5 +82,29 @@ describe("standby readers of a stream", () => {
 
     await manager.stop("s1");
     expect(manager.standbyStatus("s1")).toBeUndefined();
+  });
+
+  test("opens a standby's source again when ffmpeg fails at once after its reader let go", async () => {
+    await manager.start("s1", "http://e1/play", false);
+    manager.setStandbys("s1", ["http://e2/play"]);
+    await manager.start("s1", "http://e2/play", true);
+    // The engine still counts the reader that just left, and refuses ffmpeg.
+    children[1]?.emit("exit", 183, null);
+    await vi.waitFor(
+      () => {
+        expect(children).toHaveLength(3);
+      },
+      { timeout: 5000 },
+    );
+    expect(manager.get("s1")?.status().pendingSource).toBe("http://e2/play");
+  });
+
+  test("gives up at once on a source that had no standby reader when ffmpeg fails", async () => {
+    await manager.start("s1", "http://e1/play", false);
+    await manager.start("s1", "http://e3/play", true);
+    children[1]?.emit("exit", 183, null);
+    await manager.get("s1")?.sync();
+    expect(manager.get("s1")?.status().pendingSource).toBeNull();
+    expect(children).toHaveLength(2);
   });
 });

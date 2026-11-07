@@ -80,7 +80,9 @@ export class StreamFailover {
       up: (path) => !paths.isDown(path),
       active: this.lastVideoAt !== undefined && this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
       sparePath: this.engines.sparePath,
-      pendingSource: pipeline?.pendingSource ?? null,
+      transcoderSources: [pipeline?.source, pipeline?.pendingSource].filter(
+        (source): source is string => typeof source === "string" && source !== "",
+      ),
       openSession: this.host.openSession,
     });
   }

@@ -21,6 +21,21 @@ function silentProcess(): ChildProcess {
   return child;
 }
 
+/** An ffmpeg run that ends, as when the engine refuses the connection. */
+function exit(child: ChildProcess | undefined, code = 183): void {
+  Object.assign(child ?? {}, { exitCode: code });
+  (child?.stderr as PassThrough | undefined)?.write(
+    "Error opening input files: Invalid data found when processing input\n",
+  );
+  child?.emit("exit", code, null);
+}
+
+/** The source an ffmpeg run reads. */
+function sourceOf(args: string[] | undefined): string | undefined {
+  const index = args?.indexOf("-i") ?? -1;
+  return index === -1 ? undefined : args?.[index + 1];
+}
+
 /** How long an ffmpeg run waits for its input, in microseconds. */
 function inputTimeout(args: string[] | undefined): string | undefined {
   const index = args?.indexOf("-rw_timeout") ?? -1;
@@ -46,7 +61,7 @@ describe("Pipeline", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(handoverTimeoutSeconds: number): Pipeline {
+  function start(handoverTimeoutSeconds: number, now: () => number = Date.now): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -65,12 +80,20 @@ describe("Pipeline", () => {
       },
     };
     const events = { generationStarted: () => undefined, handover: () => undefined };
-    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, (_command, args) => {
-      runs.push(args);
-      const child = silentProcess();
-      children.push(child);
-      return child;
-    });
+    const logger = createLogger("test", "silent");
+    pipeline = new Pipeline(
+      "s1",
+      settings,
+      logger,
+      events,
+      (_command, args) => {
+        runs.push(args);
+        const child = silentProcess();
+        children.push(child);
+        return child;
+      },
+      now,
+    );
     return pipeline;
   }
 
@@ -114,5 +137,78 @@ describe("Pipeline", () => {
     await instance.start("http://engine-1/play", false);
     await instance.start("http://engine-2/play", true);
     expect(inputTimeout(runs[1])).toBe("60000000");
+  });
+
+  it("opens a handover's source again when ffmpeg fails before any video, as often as asked", async () => {
+    const clock = { now: 1000 };
+    const instance = start(120, () => clock.now);
+    await instance.start("http://engine-1/play", false);
+    // The engine has just lost the standby's reader of this session, and refuses ffmpeg at first.
+    await instance.start("http://engine-2/play", true, 2);
+    exit(children[1]);
+    await instance.sync();
+    expect(runs).toHaveLength(2);
+    expect(instance.status().pendingSource).toBe("http://engine-2/play");
+
+    for (const run of [2, 3]) {
+      clock.now += 1000;
+      await instance.sync();
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(run + 1);
+      });
+      expect(sourceOf(runs[run])).toBe("http://engine-2/play");
+      expect(inputTimeout(runs[run])).toBe("120000000");
+      expect(instance.status().pendingSource).toBe("http://engine-2/play");
+      exit(children[run]);
+    }
+
+    clock.now += 1000;
+    await instance.sync();
+    expect(runs).toHaveLength(4);
+    expect(instance.status()).toMatchObject({ source: "http://engine-1/play", pendingSource: null });
+  });
+
+  it("gives up on a handover at once when ffmpeg fails and no reopen was asked", async () => {
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    await instance.start("http://engine-2/play", true);
+    exit(children[1]);
+    await instance.sync();
+    expect(instance.status().pendingSource).toBeNull();
+    expect(runs).toHaveLength(2);
+  });
+
+  it("does not open the source again once ffmpeg delivered video from it", async () => {
+    const clock = { now: 1000 };
+    const instance = start(120, () => clock.now);
+    await instance.start("http://engine-1/play", false);
+    await instance.start("http://engine-2/play", true, 2);
+    (children[1]?.stdout as PassThrough).write("frame=12\nfps=25\nprogress=continue\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    exit(children[1], 1);
+    clock.now += 1000;
+    await instance.sync();
+    expect(runs).toHaveLength(2);
+    expect(instance.status().pendingSource).toBeNull();
+  });
+
+  it("says a restart that failed before any video is still starting until ffmpeg opens it again", async () => {
+    const clock = { now: 1000 };
+    const instance = start(120, () => clock.now);
+    await instance.start("http://engine-1/play", false);
+    exit(children[0], 1);
+    // No picture is left to keep, so the new source starts at once instead of a handover.
+    await instance.start("http://engine-2/play", true, 1);
+    exit(children[1]);
+    expect(instance.status()).toMatchObject({ source: "http://engine-2/play", state: "starting" });
+
+    clock.now += 1000;
+    await instance.sync();
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(sourceOf(runs[2])).toBe("http://engine-2/play");
+    exit(children[2]);
+    expect(instance.status()).toMatchObject({ source: "http://engine-2/play", state: "exited" });
   });
 });

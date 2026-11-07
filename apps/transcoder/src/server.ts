@@ -13,6 +13,8 @@ const startBody = z.object({ source: z.url({ protocol: /^https?$/ }) });
 const startQuery = z.object({ handover: z.enum(["true", "false"]).default("false") });
 /** A stream has a standby on at most a few other paths; the limit only guards against mistakes. */
 const standbysBody = z.object({ sources: z.array(z.url({ protocol: /^https?$/ })).max(16) });
+/** How many times ffmpeg opens a source again that a standby reader just let go of (see `start`). */
+const REOPENS_AFTER_RELEASE = 5;
 
 /**
  * Owns every pipeline and exposes them over HTTP, together with the HLS output. It also reads the
@@ -135,9 +137,10 @@ export class PipelineManager {
       this.pipelines.set(id, pipeline);
     }
     // A standby that becomes the source: ffmpeg reads it from now on, and the engine allows one
-    // reader per stream.
-    this.standbys.get(id)?.release(source);
-    await pipeline.start(source, handover);
+    // reader per session. Right after the standby's reader lets go, the engine may still refuse a
+    // new one for a moment, so ffmpeg opens the source again if it fails before any video.
+    const released = (await this.standbys.get(id)?.release(source)) ?? false;
+    await pipeline.start(source, handover, released ? REOPENS_AFTER_RELEASE : 0);
     return pipeline.status();
   }
 
