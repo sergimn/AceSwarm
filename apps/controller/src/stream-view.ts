@@ -1,4 +1,4 @@
-import type { PeerStats, PipelineStatus, StreamState, StreamView } from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus, StandbyView, StreamState, StreamView } from "@aceswarm/shared/api-types";
 import type { EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { hlsUrls } from "./hls-urls.ts";
@@ -14,6 +14,7 @@ export interface LiveStream {
   peers: PeerStats | undefined;
   recoveries: number;
   engine: EngineHandle | undefined;
+  standbys: StandbyView[];
 }
 
 /** The API's view of a stream: a running one's live state, or a stopped one's configuration. */
@@ -45,6 +46,7 @@ function stopped(stream: StreamConfig): LiveFields {
     uploadKBps: null,
     recoveries: 0,
     engine: null,
+    standbys: [],
   };
 }
 
@@ -64,5 +66,6 @@ function running(live: LiveStream): LiveFields {
     uploadKBps: stats?.speedUp ?? null,
     recoveries: live.recoveries,
     engine: engine === undefined ? null : { name: engine.name, shared: engine.sharedPath !== null },
+    standbys: live.standbys,
   };
 }

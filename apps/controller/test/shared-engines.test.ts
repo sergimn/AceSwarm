@@ -125,8 +125,8 @@ test("streams on the same path share one engine, which gets the path at the gate
   const vpn = await shared.acquire("wg:a", "s3");
   expect(vpn.containerId).not.toBe(a.containerId);
   expect(shared.view()).toEqual([
-    { path: "direct", engine: a.name, streams: 2, retiring: false },
-    { path: "wg:a", engine: vpn.name, streams: 1, retiring: false },
+    { path: "direct", engine: a.name, streams: 2, standbys: 0, retiring: false },
+    { path: "wg:a", engine: vpn.name, streams: 1, standbys: 0, retiring: false },
   ]);
 });
 
@@ -482,5 +482,64 @@ describe("sweeping", () => {
     expect(await taken).toBe(vpn);
     expect(removed).toEqual([direct.containerId]);
     expect(shared.isCurrent(vpn)).toBe(true);
+  });
+});
+
+describe("standby sessions", () => {
+  test("a standby keeps the engine running but doesn't count as a stream on it", async () => {
+    const { shared, removed, clock } = pool();
+    const engine = await shared.acquire("wg:a", "s1", "standby");
+    expect(shared.view()).toMatchObject([{ path: "wg:a", streams: 0, standbys: 1 }]);
+    clock.now += settings.idleTimeoutMs * 2;
+    await shared.sweepIdle(true);
+    expect(removed).toEqual([]);
+
+    await shared.releaseStandby(engine, "s1", true);
+    expect(shared.view()).toMatchObject([{ path: "wg:a", streams: 0, standbys: 0 }]);
+    // It stays warm for the idle timeout, like after a stream that played from it.
+    await shared.sweepIdle(true);
+    expect(removed).toEqual([]);
+    clock.now += settings.idleTimeoutMs;
+    await shared.sweepIdle(true);
+    expect(removed).toEqual([engine.containerId]);
+  });
+
+  test("a stream that fails over to its standby plays from the engine", async () => {
+    const { shared } = pool();
+    const engine = await shared.acquire("wg:a", "s1", "standby");
+    expect(shared.promote(engine, "s1")).toBe(true);
+    expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
+    // Removing its standby afterwards leaves the stream on the engine.
+    await shared.releaseStandby(engine, "s1", true);
+    expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
+    // A stream without a standby on it has nothing to promote.
+    expect(shared.promote(engine, "s2")).toBe(false);
+  });
+
+  test("a stream that plays from the engine gets no standby role on it", async () => {
+    const { shared } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    await shared.acquire("direct", "s1", "standby");
+    expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
+    await shared.release(engine, "s1", true);
+    expect(shared.view()).toMatchObject([{ streams: 0, standbys: 0 }]);
+  });
+
+  test("standbys don't count when every stream on the engine fails", async () => {
+    const { shared } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    await shared.acquire("direct", "s2", "standby");
+    // s1 alone plays from it: it gets the restarts of an engine of its own.
+    expect(shared.reportFailure(engine, "s1", { ...unwatched, wantsRestart: true })).toBe(true);
+  });
+
+  test("a replaced engine goes once no stream plays from it, even with standbys on it", async () => {
+    const { shared, removed } = pool();
+    const engine = await shared.acquire("direct", "s1");
+    await shared.acquire("direct", "s2", "standby");
+    shared.restart(engine);
+    await settle();
+    await shared.release(engine, "s1", true);
+    expect(removed).toEqual([engine.containerId]);
   });
 });

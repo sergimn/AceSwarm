@@ -68,3 +68,16 @@ describe("engine memory settings", () => {
     );
   });
 });
+
+describe("hot standby settings", () => {
+  it("keeps standbys on every other path by default, and fails over after 8 s without video", () => {
+    const config = loadConfig({});
+    expect(config.STANDBY_MAX_PATHS).toBe(0);
+    expect(config.STANDBY_FAILOVER_SECONDS).toBe(8);
+    expect(loadConfig({ STANDBY_MAX_PATHS: "1", STANDBY_FAILOVER_SECONDS: "3" })).toMatchObject({
+      STANDBY_MAX_PATHS: 1,
+      STANDBY_FAILOVER_SECONDS: 3,
+    });
+    expect(() => loadConfig({ STANDBY_FAILOVER_SECONDS: "0" })).toThrow();
+  });
+});

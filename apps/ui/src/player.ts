@@ -2,7 +2,7 @@ import type { Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import Hls from "hls.js/light";
 import { api } from "./api.ts";
 import { errorMessage, h, icon, toast } from "./dom.ts";
-import { formatFreshness, formatPeers, formatSpeed, pathLabel, STATE_LABELS } from "./format.ts";
+import { formatFreshness, formatPeers, formatSpeed, formatStandbys, pathLabel, STATE_LABELS } from "./format.ts";
 import type { Navigator } from "./navigation.ts";
 import type { WatchReporter } from "./watch.ts";
 
@@ -98,6 +98,7 @@ export class Player {
       `Peers: ${formatPeers(stream.peers)}`,
       formatSpeed(stream.downloadKBps),
       pathLabel(stream.path, snapshot.paths),
+      ...(stream.standbys.length > 0 ? [`Standby: ${formatStandbys(stream.standbys, snapshot.paths)}`] : []),
     ].join("  ·  ");
   }
 

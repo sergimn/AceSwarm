@@ -32,11 +32,19 @@ export interface FailureReport {
   hadVideo: boolean;
 }
 
+/**
+ * How a stream uses a shared engine: it plays from it, or keeps a standby session on it, ready to
+ * take over if its own path fails (see `StreamStandbys`).
+ */
+export type SharedRole = "play" | "standby";
+
 /** One shared engine, for the metrics. */
 export interface SharedEngineView {
   path: string;
   engine: string;
   streams: number;
+  /** Streams of other paths with a standby session on it. */
+  standbys: number;
   /** It was replaced and its streams are moving to the new one. */
   retiring: boolean;
 }
@@ -48,8 +56,10 @@ interface Instance {
   ready: Promise<EngineHandle>;
   /** The address the gateway routes through the path. */
   ip: string | undefined;
-  /** Streams with a session on this engine (or opening one). */
+  /** Streams that play from this engine (or are opening a session to). */
   readonly users: Set<string>;
+  /** Streams on other paths with a standby session on it. They don't count for its failure rules. */
+  readonly standbys: Set<string>;
   /** Last failure of each stream on this engine, and whether the stream had played from it. */
   readonly failures: Map<string, { at: number; hadVideo: boolean }>;
   /**
@@ -108,23 +118,24 @@ export class SharedEngines {
 
   /**
    * The path's engine for a stream: the running one, the one left from a previous run, or a new one.
-   * Waits until its API answers. The stream holds it until it calls `release`.
+   * Waits until its API answers. The stream holds it until it calls `release`. With the `standby`
+   * role, the stream only keeps a standby session on it (see `SharedRole`).
    */
-  async acquire(path: string, streamId: string): Promise<EngineHandle> {
+  async acquire(path: string, streamId: string, role: SharedRole = "play"): Promise<EngineHandle> {
     const current = this.current.get(path);
-    if (current?.handle !== undefined && (current.users.size === 0 || current.checking !== undefined)) {
+    if (current?.handle !== undefined && (!inUse(current) || current.checking !== undefined)) {
       // No stream uses it, so none noticed if it stopped or hangs: check it first.
-      return this.rejoin(current.handle, streamId);
+      return this.rejoin(current.handle, streamId, role);
     }
     // While a replacement starts and the old engine is already gone, streams wait for it.
     const instance = current ?? this.pending.get(path) ?? this.start(path, true);
-    instance.users.add(streamId);
+    join(instance, streamId, role);
     try {
       const ready = await instance.ready;
       // It may have restarted on a new address since it became ready (see `check`).
       return instance.handle ?? ready;
     } catch (error) {
-      instance.users.delete(streamId);
+      leave(instance, streamId);
       throw error;
     }
   }
@@ -135,21 +146,21 @@ export class SharedEngines {
    * removed, and the stream gets the path's next engine. Other errors (the Docker API failing for a
    * moment) leave the engine alone: the stream tries again later.
    */
-  async rejoin(handle: EngineHandle, streamId: string): Promise<EngineHandle> {
+  async rejoin(handle: EngineHandle, streamId: string, role: SharedRole = "play"): Promise<EngineHandle> {
     const instance = this.find(handle);
     if (instance === undefined || this.current.get(instance.path) !== instance) {
       if (instance !== undefined) {
         await this.release(handle, streamId, false);
       }
-      return this.acquire(handle.sharedPath ?? "", streamId);
+      return this.acquire(handle.sharedPath ?? "", streamId, role);
     }
-    instance.users.add(streamId);
+    join(instance, streamId, role);
     try {
       return await this.check(instance, handle);
     } catch (error) {
-      instance.users.delete(streamId);
+      leave(instance, streamId);
       if (!(error instanceof EngineGoneError)) {
-        if (instance.users.size === 0) {
+        if (!inUse(instance)) {
           // The error says nothing about the engine, and the stream comes straight back.
           instance.idleSince = this.now();
         }
@@ -163,8 +174,21 @@ export class SharedEngines {
         this.deps.metrics.sharedEngineRestarts.inc({ path: instance.path, reason: "unresponsive" });
         await this.remove(instance, "it stopped answering");
       }
-      return this.acquire(instance.path, streamId);
+      return this.acquire(instance.path, streamId, role);
     }
+  }
+
+  /**
+   * The stream now plays from the engine it had a standby session on (it failed over to it).
+   * Returns false when the stream had no standby session on it.
+   */
+  promote(handle: EngineHandle, streamId: string): boolean {
+    const instance = this.find(handle);
+    if (instance?.standbys.delete(streamId) !== true) {
+      return false;
+    }
+    instance.users.add(streamId);
+    return true;
   }
 
   /**
@@ -179,12 +203,29 @@ export class SharedEngines {
     if (instance === undefined) {
       return;
     }
-    instance.users.delete(streamId);
+    leave(instance, streamId);
     instance.failures.delete(streamId);
     if (played || instance.idleSince === undefined) {
       instance.idleSince = this.now();
     }
     if (instance.retiring && instance.users.size === 0) {
+      await this.remove(instance, "no streams left on it");
+    }
+  }
+
+  /**
+   * The stream's standby session on the engine went. Unlike `release`, it leaves the stream there if
+   * it plays from the engine now (it failed over to it, or moved there).
+   */
+  async releaseStandby(handle: EngineHandle, streamId: string, played: boolean): Promise<void> {
+    const instance = this.find(handle);
+    if (instance?.standbys.delete(streamId) !== true || inUse(instance)) {
+      return;
+    }
+    if (played || instance.idleSince === undefined) {
+      instance.idleSince = this.now();
+    }
+    if (instance.retiring) {
       await this.remove(instance, "no streams left on it");
     }
   }
@@ -251,6 +292,7 @@ export class SharedEngines {
         path: instance.path,
         engine: instance.handle?.name ?? "",
         streams: instance.users.size,
+        standbys: instance.standbys.size,
         retiring: instance.retiring,
       }));
   }
@@ -314,7 +356,7 @@ export class SharedEngines {
     const replacing = this.pending.has(instance.path) || [...this.retiring].some(({ path }) => path === instance.path);
     return (
       instance.handle !== undefined &&
-      instance.users.size === 0 &&
+      !inUse(instance) &&
       !replacing &&
       instance.idleSince !== undefined &&
       this.now() - instance.idleSince >= timeoutMs
@@ -377,6 +419,7 @@ export class SharedEngines {
       ready: promise,
       ip: undefined,
       users: new Set(),
+      standbys: new Set(),
       failures: new Map(),
       idleSince: undefined,
       retiring: false,
@@ -416,7 +459,7 @@ export class SharedEngines {
       await this.route(instance, handle.ip);
     }
     instance.handle = handle;
-    if (instance.users.size === 0) {
+    if (!inUse(instance)) {
       instance.idleSince = this.now();
     }
     return handle;
@@ -518,7 +561,7 @@ export class SharedEngines {
       // The streams that were moving away are gone: from now on the path's engine is idle while
       // nobody uses it.
       const current = this.current.get(instance.path);
-      if (current?.users.size === 0) {
+      if (current !== undefined && !inUse(current)) {
         current.idleSince = this.now();
       }
     }
@@ -553,4 +596,23 @@ export class SharedEngines {
     instance.ip = undefined;
     void this.deps.netgw.unassign(ip).catch(() => undefined);
   }
+}
+
+/** Some stream plays from the engine or keeps a standby session on it. */
+function inUse(instance: Instance): boolean {
+  return instance.users.size > 0 || instance.standbys.size > 0;
+}
+
+function join(instance: Instance, streamId: string, role: SharedRole): void {
+  if (role === "play") {
+    instance.standbys.delete(streamId);
+    instance.users.add(streamId);
+  } else if (!instance.users.has(streamId)) {
+    instance.standbys.add(streamId);
+  }
+}
+
+function leave(instance: Instance, streamId: string): void {
+  instance.users.delete(streamId);
+  instance.standbys.delete(streamId);
 }

@@ -79,3 +79,34 @@ export async function waitForHandover(
   }
   throw new Error("the new path did not deliver video in time");
 }
+
+/** Whether the transcoder's current ffmpeg still reads the session (an engine allows one reader). */
+async function transcoderReads(transcoder: TranscoderClient, id: string, session: EngineSession): Promise<boolean> {
+  const status = await transcoder.status(id).catch(() => undefined);
+  return status?.source === session.playbackUrl && status.state !== "exited";
+}
+
+/**
+ * Starts the transcoder's handover to `session` and waits for its video. A `reused` session the
+ * transcoder still reads gets no second reader, unless that one gives up first (its input timeout).
+ */
+export async function handOverTo(
+  transcoder: TranscoderClient,
+  id: string,
+  session: EngineSession,
+  reused: boolean,
+  timing: HandoverTiming,
+): Promise<PipelineStatus> {
+  const source = session.playbackUrl;
+  if (reused && (await transcoderReads(transcoder, id, session))) {
+    try {
+      return await waitForHandover(transcoder, id, source, timing);
+    } catch (error) {
+      if (!(error instanceof SourceExitedError)) {
+        throw error;
+      }
+    }
+  }
+  await transcoder.start(id, { source }, true);
+  return waitForHandover(transcoder, id, source, timing);
+}

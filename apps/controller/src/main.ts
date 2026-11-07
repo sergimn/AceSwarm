@@ -98,6 +98,18 @@ const orchestrator: Orchestrator = new Orchestrator({
   metrics,
   logger,
   maxKeptEngines: config.MAX_KEPT_ENGINES,
+  standby: {
+    maxPaths: config.STANDBY_MAX_PATHS,
+    failoverAfterMs: config.STANDBY_FAILOVER_SECONDS * 1000,
+    // A standby gets as long as a starting stream to deliver its first data.
+    warmupMs: config.STARTUP_GRACE_SECONDS * 1000,
+    hotWithinMs: 10_000,
+    downGraceMs: 120_000,
+    policy: {
+      baseDelayMs: config.RECOVERY_BASE_DELAY_SECONDS * 1000,
+      maxDelayMs: config.RECOVERY_MAX_DELAY_SECONDS * 1000,
+    },
+  },
   settings: {
     tickMs: config.TICK_MS,
     stallAfterMs: config.STALL_SECONDS * 1000,

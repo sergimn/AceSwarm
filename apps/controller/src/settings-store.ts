@@ -7,9 +7,10 @@ import { Mutex, readJsonFile, writeJsonFile } from "./json-file.ts";
 const fileSchema = z.object({
   version: z.literal(1),
   sharedEngines: z.boolean().default(false),
+  hotStandby: z.boolean().default(true),
 });
 
-export const DEFAULT_SETTINGS: Settings = { sharedEngines: false };
+export const DEFAULT_SETTINGS: Settings = { sharedEngines: false, hotStandby: true };
 
 /** Keeps the settings changed from the UI in `<data>/settings.json`, written atomically. */
 export class SettingsStore {
@@ -29,7 +30,10 @@ export class SettingsStore {
       if (parsed?.success === false) {
         return "the settings file has an unknown format";
       }
-      this.current = parsed === undefined ? { ...DEFAULT_SETTINGS } : { sharedEngines: parsed.data.sharedEngines };
+      this.current =
+        parsed === undefined
+          ? { ...DEFAULT_SETTINGS }
+          : { sharedEngines: parsed.data.sharedEngines, hotStandby: parsed.data.hotStandby };
       return null;
     } catch (error) {
       return error instanceof SyntaxError

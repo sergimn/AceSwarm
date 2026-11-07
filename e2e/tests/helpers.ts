@@ -57,14 +57,15 @@ export async function waitForSteadyPlaying(
 }
 
 /**
- * Removes every stream and WireGuard profile, and turns engine sharing off, so each spec starts
- * from an empty stack.
+ * Removes every stream and WireGuard profile, and turns engine sharing and hot standby off, so
+ * each spec starts from an empty stack with one engine per stream (standby.spec.ts turns hot
+ * standby on).
  */
 export async function resetStack(request: APIRequestContext): Promise<void> {
   // WireGuard only keeps the last profile, so it goes first.
   const policy = await request.patch("/api/network", { data: { wireguardOnly: false } });
   expect(policy.ok(), await policy.text()).toBe(true);
-  const settings = await request.patch("/api/settings", { data: { sharedEngines: false } });
+  const settings = await request.patch("/api/settings", { data: { sharedEngines: false, hotStandby: false } });
   expect(settings.ok(), await settings.text()).toBe(true);
   const { streams } = await snapshot(request);
   for (const stream of streams) {

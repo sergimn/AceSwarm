@@ -32,7 +32,7 @@ const profileSchema = z.object({
 
 const networkSchema = z.object({ wireguardOnly: z.boolean() }).strict();
 
-const settingsSchema = z.object({ sharedEngines: z.boolean().optional() }).strict();
+const settingsSchema = z.object({ sharedEngines: z.boolean().optional(), hotStandby: z.boolean().optional() }).strict();
 
 const streamIdSchema = z.string().regex(/^[a-z0-9]{6,32}$/);
 const viewerSchema = z.object({ stream: streamIdSchema.nullable() }).strict();
