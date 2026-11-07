@@ -10,14 +10,19 @@
 #
 #   mesh.sh prepare ROLE           keys, mesh address, STUN; writes $MESH_DIR/publish/ROLE.json
 #                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE)
-#   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer
+#   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer. A
+#                                  PEER written as NAME? is optional: if it never shows up or never
+#                                  answers, the mesh forms without it.
 #   mesh.sh ip ROLE                prints a role's mesh address
 #   mesh.sh share FILE [NAME]      serves FILE to the other runners at http://<mesh ip>:18999/NAME
 #   mesh.sh wait-file ROLE NAME    waits until ROLE serves NAME (or stops answering) and prints it
+#   mesh.sh wait-all NAME ROLE...  waits until each ROLE that joined serves NAME or stops answering;
+#                                  fails if one stopped answering without it
 #   mesh.sh wait-fetched NAME ROLE...
 #                                  waits (up to 2 minutes) until each ROLE fetched NAME from this runner
 #
-# Roles: wg (WireGuard server), source (Acestream broadcast), stack (AceSwarm and the tests).
+# Roles: wg (WireGuard server), source (Acestream broadcast), stack and stack-podman (AceSwarm and
+# the tests, on Docker and on rootless Podman). Both stacks share the other two.
 # Needs sudo, wireguard-tools, jq, node (for stun.ts) and gh with GH_TOKEN (actions: read).
 set -euo pipefail
 
@@ -40,6 +45,7 @@ mesh_ip() {
     wg) echo 192.0.2.1 ;;
     source) echo 192.0.2.2 ;;
     stack) echo 192.0.2.3 ;;
+    stack-podman) echo 192.0.2.4 ;;
     *)
       log "unknown role $1"
       exit 2
@@ -95,14 +101,15 @@ prepare() {
     >"$MESH_DIR/publish/$role.json"
 }
 
-# Waits until the workflow run has the peer's artifact and downloads it.
+# Waits until the workflow run has the peer's artifact and downloads it. Returns 1 if it never
+# shows up.
 fetch_peer() {
   local peer="$1" name="${MESH_ARTIFACT_PREFIX}$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600}))
   until gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
     --jq '.artifacts[].name' 2>/dev/null | grep -x "$name" >/dev/null; do
     if ((SECONDS > deadline)); then
       log "timed out waiting for the $peer runner (artifact $name)"
-      exit 1
+      return 1
     fi
     sleep 3
   done
@@ -115,9 +122,13 @@ fetch_peer() {
 join() {
   local role="$1"
   shift
-  local peer
+  local peer peers=()
   for peer in "$@"; do
-    fetch_peer "$peer"
+    if fetch_peer "${peer%\?}"; then
+      peers+=("${peer%\?}")
+    elif [[ "$peer" != *\? ]]; then
+      exit 1
+    fi
   done
   # The NAT keeps an idle mapping for well over the second this takes.
   local stun_pid
@@ -128,7 +139,7 @@ join() {
     sleep 0.1
   done
   sudo wg set "$MESH_IFACE" listen-port "$MESH_PORT"
-  for peer in "$@"; do
+  for peer in "${peers[@]}"; do
     local file="$MESH_DIR/peers/$peer.json"
     sudo wg set "$MESH_IFACE" peer "$(jq -r .publicKey "$file")" \
       endpoint "$(jq -r .endpoint "$file")" \
@@ -136,17 +147,21 @@ join() {
       persistent-keepalive 5
   done
   local start=$SECONDS
-  for peer in "$@"; do
-    local ip
+  : >"$MESH_DIR/joined"
+  for peer in "${peers[@]}"; do
+    local ip optional=false
     ip="$(mesh_ip "$peer")"
+    [[ " $* " == *" $peer? "* ]] && optional=true
     until ping -c 1 -W 1 "$ip" >/dev/null 2>&1; do
       if ((SECONDS - start > ${MESH_HANDSHAKE_SECONDS:-180})); then
         sudo wg show "$MESH_IFACE" >&2
         log "no connectivity to $peer ($ip)"
+        [[ "$optional" == true ]] && continue 2
         exit 1
       fi
     done
     log "$peer answers at $ip after $((SECONDS - start)) s"
+    echo "$peer" >>"$MESH_DIR/joined"
   done
   sudo wg show "$MESH_IFACE"
 }
@@ -179,6 +194,46 @@ wait_file() {
   return 1
 }
 
+# Waits for NAME from every ROLE that joined this runner's mesh, side by side, since each one's
+# file server stops with its job: a stack that finishes first must not wait for the other.
+wait_all() {
+  local name="$1" role pending=() missing=0
+  shift
+  for role in "$@"; do
+    if grep -qx "$role" "$MESH_DIR/joined" 2>/dev/null; then
+      pending+=("$role")
+    else
+      log "$role never joined"
+    fi
+  done
+  local -A silent=()
+  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3400}))
+  while ((${#pending[@]} > 0 && SECONDS < deadline)); do
+    local still=()
+    for role in "${pending[@]}"; do
+      if curl -sf -m 5 -o /dev/null "http://$(mesh_ip "$role"):$SHARE_PORT/$name"; then
+        log "got $name from $role"
+      elif ping -c 1 -W 2 "$(mesh_ip "$role")" >/dev/null 2>&1; then
+        silent[$role]=0
+        still+=("$role")
+      elif ((${silent[$role]:-0} + 1 >= 30)); then
+        log "$role stopped answering"
+        missing=1
+      else
+        silent[$role]=$((${silent[$role]:-0} + 1))
+        still+=("$role")
+      fi
+    done
+    pending=("${still[@]}")
+    ((${#pending[@]} == 0)) || sleep 3
+  done
+  if ((${#pending[@]} > 0)); then
+    log "timed out waiting for $name from ${pending[*]}"
+    return 1
+  fi
+  return "$missing"
+}
+
 # The file server stops with this runner's job, so a runner that shares a file and then finishes
 # has to wait until the others fetched it. A runner that is gone never will, hence the time limit.
 wait_fetched() {
@@ -203,9 +258,10 @@ case "${1:-}" in
   ip) mesh_ip "$2" ;;
   share) share "${@:2}" ;;
   wait-file) wait_file "$2" "$3" ;;
+  wait-all) wait_all "${@:2}" ;;
   wait-fetched) wait_fetched "${@:2}" ;;
   *)
-    sed -n '2,21p' "$0" >&2
+    sed -n '2,26p' "$0" >&2
     exit 2
     ;;
 esac

@@ -98,7 +98,7 @@ RUN --mount=type=secret,id=build_ca,required=false \
       iputils-ping \
       wireguard-go \
       wireguard-tools-wg \
-    && mv /usr/bin/wg /usr/local/sbin/wg
+    && mkdir -p /usr/local/sbin && mv /usr/bin/wg /usr/local/sbin/wg
 COPY --from=netgw-deps /app/node_modules node_modules
 COPY apps/netgw/package.json apps/netgw/
 COPY apps/netgw/src apps/netgw/src

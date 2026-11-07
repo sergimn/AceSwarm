@@ -19,9 +19,12 @@ async function fetchText(url: string): Promise<string> {
   return await response.text();
 }
 
-/** The client profile the WireGuard server on the other runner generated for this run. */
+/** This runner's mesh role: `stack`, or `stack-podman` on the rootless Podman runner. */
+const ROLE = process.env["MESH_ROLE"] ?? "stack";
+
+/** The client profile the WireGuard server on the other runner generated for this runner. */
 export async function remoteWireguardProfile(): Promise<string> {
-  return await fetchText(`http://${MESH.wg}:18999/client.conf`);
+  return await fetchText(`http://${MESH.wg}:18999/client-${ROLE}.conf`);
 }
 
 export interface Broadcast {
@@ -34,7 +37,11 @@ export interface Broadcast {
 
 /** The dummy broadcasts on the broadcast runner (e2e/broadcast.sh), at least `count` of them. */
 export async function broadcasts(count: number): Promise<Broadcast[]> {
-  const list = JSON.parse(await fetchText(`http://${MESH.source}:18999/broadcasts.json`)) as Broadcast[];
+  const all = JSON.parse(await fetchText(`http://${MESH.source}:18999/broadcasts.json`)) as Broadcast[];
+  // Each stack runner plays its own broadcasts (E2E_BROADCASTS, like "bc4,bc5,bc6"), so the
+  // tracker's announces for them come from this runner's engines only.
+  const mine = process.env["E2E_BROADCASTS"]?.split(",");
+  const list = mine === undefined ? all : all.filter((broadcast) => mine.includes(broadcast.name));
   expect(list.length).toBeGreaterThanOrEqual(count);
   for (const broadcast of list) {
     expect(broadcast.infohash).toMatch(/^[0-9a-f]{40}$/);

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rootless Podman for the stack runner of the Podman E2E leg (see e2e/README.md), set up like a
 # host that runs AceSwarm with `docker compose up` on Podman: podman-docker makes `docker` run
-# Podman, `docker compose` becomes `podman compose` with Docker Compose as its provider, and the
-# stack's docker-proxy uses this user's Podman API socket (DOCKER_SOCKET).
+# Podman, `docker compose` becomes `podman compose` with Docker Compose (docker-compose-v2) as its
+# provider, and the stack's docker-proxy uses this user's Podman API socket (DOCKER_SOCKET).
 #
 #   e2e/podman.sh setup     install and start; writes the environment to $GITHUB_ENV when set
 #   e2e/podman.sh iptables  ARGS...   iptables in rootless Podman's network namespace
@@ -25,27 +25,20 @@ setup() {
     exit 2
   fi
 
-  # The runner image's Docker Compose becomes `podman compose`'s provider. Docker's own CLI goes:
-  # podman-docker replaces /usr/bin/docker.
-  local plugin compose=""
-  for plugin in /usr/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
-    /usr/lib/docker/cli-plugins/docker-compose; do
-    [[ -x "$plugin" ]] && compose="$plugin" && break
-  done
-  if [[ -z "$compose" ]]; then
-    log "Docker Compose is missing"
-    exit 1
-  fi
-  sudo install -m 0755 "$compose" /usr/local/bin/docker-compose
-  if [[ -e /usr/bin/docker ]]; then
-    sudo systemctl stop docker.socket docker.service 2>/dev/null || true
-    local package
-    if package="$(dpkg -S /usr/bin/docker 2>/dev/null)"; then
-      sudo DEBIAN_FRONTEND=noninteractive timeout 300 apt-get remove -y -qq "${package%%:*}" >/dev/null
+  # The distribution's packages, as on an Ubuntu host: podman-docker replaces /usr/bin/docker, and
+  # docker-compose-v2 is the provider `podman compose` finds. Docker's own packages go first, since
+  # they own the same files.
+  sudo systemctl stop docker.socket docker.service 2>/dev/null || true
+  local file package packages=()
+  for file in /usr/bin/docker /usr/libexec/docker/cli-plugins/docker-compose; do
+    if package="$(dpkg -S "$file" 2>/dev/null)"; then
+      packages+=("${package%%:*}")
     fi
-    sudo rm -f /usr/bin/docker
+  done
+  if ((${#packages[@]} > 0)); then
+    sudo DEBIAN_FRONTEND=noninteractive timeout 300 apt-get remove -y -qq "${packages[@]}" >/dev/null
   fi
-  apt_install podman podman-docker passt uidmap
+  apt_install podman podman-docker docker-compose-v2 passt uidmap
   # podman-docker prints a notice on every call without it.
   sudo touch /etc/containers/nodocker
   if ! grep -q "^${user}:" /etc/subuid || ! grep -q "^${user}:" /etc/subgid; then
