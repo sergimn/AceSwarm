@@ -130,6 +130,8 @@ interface Fakes {
   standbyStarts?: MoveSlots;
   /** The playback URLs whose standby readers get data (`sources` by default). */
   standbyData?: Set<string>;
+  /** While on, the transcoder can't be reached. */
+  transcoderDown?: { on: boolean };
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -263,6 +265,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       return Promise.resolve(pipeline);
     },
     status: () => {
+      if (fakes.transcoderDown?.on === true) {
+        return Promise.reject(new Error("transcoder unreachable"));
+      }
       if (fakes.sources !== undefined) {
         return Promise.resolve(realStatus());
       }
@@ -279,6 +284,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     },
     stop: () => Promise.resolve(),
     setStandbys: (_id: string, sources: string[]) => {
+      if (fakes.transcoderDown?.on === true) {
+        return Promise.reject(new Error("transcoder unreachable"));
+      }
       readers.push(sources);
       if (fakes.sources === undefined || real.active === undefined) {
         return Promise.resolve(undefined);
@@ -1263,10 +1271,8 @@ describe("hot standby on the other paths", () => {
       hotStandby: { on: true },
       ...fakes,
     });
-    // Starts the engine and the stream; video arrives on the next check.
+    // Starts the engine and the stream. Standbys only start once it got video, on the next check.
     await fake.instance.tick();
-    await fake.instance.tick();
-    // Standbys only start once the stream played.
     expect(fake.instance.view().standbys).toEqual([]);
     await fake.instance.tick();
     await settle();
@@ -1380,6 +1386,120 @@ describe("hot standby on the other paths", () => {
     expect(fake.removed).toEqual([standbyEngine.containerId]);
     expect(fake.instance.view().standbys).toEqual([]);
     expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("doesn't fail over while the transcoder can't be reached", async () => {
+    const transcoderDown = { on: false };
+    const fake = await withStandby({ transcoderDown });
+    transcoderDown.on = true;
+    for (let second = 0; second < 18; second += 2) {
+      fake.clock.now += 2000;
+      await fake.instance.tick();
+    }
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+  });
+
+  test("doesn't fail over when the broadcast pauses on every path", async () => {
+    const fake = await withStandby();
+    fake.sources.clear();
+    for (let second = 0; second < 18; second += 2) {
+      fake.clock.now += 2000;
+      await fake.instance.tick();
+    }
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+  });
+
+  test("finishes a failover whose video arrives after it gave up", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    const arrives = new Map<string, number>();
+    const fake = await withStandby({ standbyData, arrives, standby: { policy } });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    // The transcoder kept reading the standby, and its video comes now.
+    arrives.set(play(standbyEngine), fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().engine?.name).toBe(standbyEngine.name);
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
+    expect(fake.creates()).toBe(2);
+  });
+
+  test("starting a standby engine again waits for a start slot", async () => {
+    const standbyStarts = new MoveSlots(1);
+    const fake = await withStandby({ standbyData: new Set(), standbyStarts });
+    // Another stream's standby starts meanwhile.
+    expect(standbyStarts.tryTake()).toBe(true);
+    for (let tick = 0; tick < 30; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.restarted).toEqual([]);
+    standbyStarts.release();
+    fake.clock.now += 5000;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.restarted).toEqual([standbyEngine.containerId]);
+  });
+
+  test("gives up on a path that keeps losing its standbys, until the path goes down", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    let removals = 0;
+    for (let tick = 0; tick < 1000; tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+      await settle();
+      removals = fake.removed.length;
+    }
+    // Three rounds of three tries each, then no more.
+    expect(removals).toBe(3);
+    expect(fake.creates()).toBe(4);
+    expect(fake.instance.view().standbys).toEqual([]);
+
+    fake.paths[1] = { ...vpn, up: false };
+    await fake.instance.tick();
+    fake.paths[1] = vpn;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.creates()).toBe(5);
+  });
+
+  test("removes its standbys once the stream hasn't played for a while, and starts none", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    fake.sources.clear();
+    for (let tick = 0; tick < 90; tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+      await settle();
+      if (tick === 80) {
+        expect(fake.instance.view().standbys).toEqual([]);
+        expect(fake.removed).toContain(standbyEngine.containerId);
+      }
+    }
+    // Meanwhile the recovery ladder goes on, but the stream keeps no standby.
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.readers.at(-1)).toEqual([]);
+  });
+
+  test("moves to the standby once WireGuard only is on, and removes the engine it left", async () => {
+    const policy = { wireguardOnly: false };
+    const pathAllowed = (path: string): boolean => !policy.wireguardOnly || path !== "direct";
+    const fake = await withStandby({ pathAllowed });
+    policy.wireguardOnly = true;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view()).toMatchObject({ engine: { name: standbyEngine.name }, recoveries: 0 });
+    expect(fake.creates()).toBe(2);
+    expect(fake.removed).toEqual([main.containerId]);
+    expect(fake.instance.view().standbys).toEqual([]);
+    expect(fake.instance.assignments()).toEqual([{ ip: standbyEngine.ip, path: "wg:a" }]);
   });
 
   test("removes the standbys once hot standby is turned off", async () => {

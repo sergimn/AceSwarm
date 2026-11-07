@@ -512,17 +512,29 @@ describe("standby sessions", () => {
     // Removing its standby afterwards leaves the stream on the engine.
     await shared.releaseStandby(engine, "s1", true);
     expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
-    // A stream without a standby on it has nothing to promote.
-    expect(shared.promote(engine, "s2")).toBe(false);
+    // An engine that is gone can't take the stream.
+    expect(shared.promote({ ...engine, containerId: "gone" }, "s2")).toBe(false);
   });
 
-  test("a stream that plays from the engine gets no standby role on it", async () => {
-    const { shared } = pool();
-    const engine = await shared.acquire("direct", "s1");
-    await shared.acquire("direct", "s1", "standby");
+  test("a failed move to the engine leaves the stream's standby session there", async () => {
+    const { shared, removed, clock } = pool();
+    const engine = await shared.acquire("wg:a", "s1", "standby");
+    // A path switch that didn't take the standby moves the stream there, and gives up.
+    await shared.acquire("wg:a", "s1");
+    expect(shared.view()).toMatchObject([{ streams: 1, standbys: 1 }]);
+    await shared.release(engine, "s1", false);
+    expect(shared.view()).toMatchObject([{ streams: 0, standbys: 1 }]);
+    clock.now += settings.idleTimeoutMs * 2;
+    await shared.sweepIdle(true);
+    expect(removed).toEqual([]);
+
+    // It fails over to the standby later: the engine counts it.
+    expect(shared.promote(engine, "s1")).toBe(true);
     expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
-    await shared.release(engine, "s1", true);
-    expect(shared.view()).toMatchObject([{ streams: 0, standbys: 0 }]);
+    // Removing the stream's standby session, the other way round, leaves it playing there.
+    await shared.acquire("wg:a", "s1", "standby");
+    await shared.releaseStandby(engine, "s1", true);
+    expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
   });
 
   test("standbys don't count when every stream on the engine fails", async () => {

@@ -82,8 +82,6 @@ export class StreamSupervisor {
   /** Its own engines (with their gateway paths) or its place on a shared engine, and its standbys. */
   private readonly engines: StreamEngines;
   private bootstrapped = false;
-  /** It played since the supervisor started: only then do standbys start. */
-  private playedOnce = false;
   /** Its hot standbys on the other paths, and failing over to them. */
   private readonly failover: StreamFailover;
 
@@ -254,7 +252,6 @@ export class StreamSupervisor {
     if (await this.failover.failOverEarly()) {
       return;
     }
-    this.playedOnce = true;
     await this.engines.played(engine, this.sharing);
     if (this.recovery.failures > 0) {
       this.logger.info({ failures: this.recovery.failures }, "stream recovered");
@@ -300,8 +297,8 @@ export class StreamSupervisor {
   };
 
   private playing(): PlayingStream {
-    const { engine, session, pipeline, playedOnce } = this;
-    return { engine, session, pipeline, playedOnce, path: this.stream.path };
+    const { engine, session, pipeline } = this;
+    return { engine, session, pipeline, path: this.stream.path };
   }
 
   private async bootstrap(): Promise<void> {

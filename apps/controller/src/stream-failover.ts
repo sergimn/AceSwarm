@@ -11,6 +11,10 @@ import type { StreamPaths } from "./stream-paths.ts";
 
 /** A hot standby delivers within seconds; one that doesn't by then isn't waited for any longer. */
 const HOT_HANDOVER_TIMEOUT_MS = 30_000;
+/** How much newer than the stream's last video a standby's data must be, at most, to fail over to it. */
+const FRESH_MARGIN_MS = 4000;
+/** A stream keeps standbys only while it played within this long. */
+const STANDBY_ACTIVE_MS = 10 * 60_000;
 
 /** Where a stream plays from right now, as its supervisor knows it. */
 export interface PlayingStream {
@@ -18,8 +22,6 @@ export interface PlayingStream {
   session: EngineSession | undefined;
   pipeline: PipelineStatus | undefined;
   path: string | null;
-  /** It played since the supervisor started. */
-  playedOnce: boolean;
 }
 
 /** What `StreamFailover` needs from the stream's supervisor. */
@@ -51,6 +53,8 @@ export class StreamFailover {
   private readonly engines: StreamEngines;
   private readonly paths: StreamPaths;
   private readonly host: StreamFailoverHost;
+  /** When the stream last got video, as far as this supervisor saw. */
+  private lastVideoAt: number | undefined;
 
   constructor(streamId: string, engines: StreamEngines, paths: StreamPaths, host: StreamFailoverHost) {
     this.streamId = streamId;
@@ -62,7 +66,10 @@ export class StreamFailover {
   /** Keeps the stream's standbys on the other paths (see `StreamStandbys.maintain`). */
   async maintain(): Promise<void> {
     const { paths } = this;
-    const { path: current, playedOnce } = this.host.playing();
+    const { path: current, pipeline } = this.host.playing();
+    if (pipeline?.lastFrameAt !== null && pipeline?.lastFrameAt !== undefined) {
+      this.lastVideoAt = Math.max(this.lastVideoAt ?? 0, Date.parse(pipeline.lastFrameAt));
+    }
     await this.engines.standbys.maintain({
       enabled: this.host.enabled(),
       sharing: this.host.sharing(),
@@ -71,7 +78,7 @@ export class StreamFailover {
       candidates: paths.standbyCandidates(current),
       usable: (path) => paths.allowed(path) && paths.exists(path),
       up: (path) => !paths.isDown(path),
-      mayStart: playedOnce,
+      active: this.lastVideoAt !== undefined && this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
       sparePath: this.engines.sparePath,
       openSession: this.host.openSession,
     });
@@ -79,7 +86,7 @@ export class StreamFailover {
 
   /** A hot standby is ready to take over. */
   hasHot(): boolean {
-    return this.host.enabled() && this.engines.standbys.hasHot(this.eligible);
+    return this.host.enabled() && this.engines.standbys.hasHot(this.eligible, this.freshAfter());
   }
 
   /**
@@ -105,7 +112,7 @@ export class StreamFailover {
    */
   async failOver(reason: string): Promise<void> {
     const { engine } = this.host.playing();
-    const standby = engine === undefined ? undefined : this.engines.standbys.takeHot(this.eligible);
+    const standby = engine === undefined ? undefined : this.engines.standbys.takeHot(this.eligible, this.freshAfter());
     if (engine === undefined || standby === undefined) {
       return;
     }
@@ -129,7 +136,8 @@ export class StreamFailover {
       return undefined;
     }
     const { standbys } = this.engines;
-    return standbys.takeHot(this.eligible) ?? (target === undefined ? undefined : standbys.takeOn(target));
+    const hot = standbys.takeHot(this.eligible, this.freshAfter());
+    return hot ?? (target === undefined ? undefined : standbys.takeOn(target));
   }
 
   /**
@@ -170,6 +178,20 @@ export class StreamFailover {
       pipeline,
       commit: this.host.commit,
     });
+  }
+
+  /**
+   * A standby counts for a failover only with data newer than the stream's last video, by half the
+   * failover delay (at most `FRESH_MARGIN_MS`): one that stopped with the stream (the transcoder restarting, a broadcast that
+   * pauses everywhere) would not help. Without the pipeline's status, nothing counts.
+   */
+  private freshAfter(): number {
+    const { pipeline } = this.host.playing();
+    if (pipeline === undefined) {
+      return Infinity;
+    }
+    const lastFrameAt = pipeline.lastFrameAt === null ? 0 : Date.parse(pipeline.lastFrameAt);
+    return lastFrameAt + Math.min(this.engines.standbys.settings.failoverAfterMs / 2, FRESH_MARGIN_MS);
   }
 
   /** Paths a standby may take the stream to: another one that is up and allowed. */

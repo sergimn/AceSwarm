@@ -135,7 +135,7 @@ export class SharedEngines {
       // It may have restarted on a new address since it became ready (see `check`).
       return instance.handle ?? ready;
     } catch (error) {
-      leave(instance, streamId);
+      leave(instance, streamId, role);
       throw error;
     }
   }
@@ -150,7 +150,7 @@ export class SharedEngines {
     const instance = this.find(handle);
     if (instance === undefined || this.current.get(instance.path) !== instance) {
       if (instance !== undefined) {
-        await this.release(handle, streamId, false);
+        await (role === "play" ? this.release(handle, streamId, false) : this.releaseStandby(handle, streamId, false));
       }
       return this.acquire(handle.sharedPath ?? "", streamId, role);
     }
@@ -158,7 +158,7 @@ export class SharedEngines {
     try {
       return await this.check(instance, handle);
     } catch (error) {
-      leave(instance, streamId);
+      leave(instance, streamId, role);
       if (!(error instanceof EngineGoneError)) {
         if (!inUse(instance)) {
           // The error says nothing about the engine, and the stream comes straight back.
@@ -180,13 +180,14 @@ export class SharedEngines {
 
   /**
    * The stream now plays from the engine it had a standby session on (it failed over to it).
-   * Returns false when the stream had no standby session on it.
+   * Returns false when the engine is gone.
    */
   promote(handle: EngineHandle, streamId: string): boolean {
     const instance = this.find(handle);
-    if (instance?.standbys.delete(streamId) !== true) {
+    if (instance === undefined) {
       return false;
     }
+    instance.standbys.delete(streamId);
     instance.users.add(streamId);
     return true;
   }
@@ -203,7 +204,8 @@ export class SharedEngines {
     if (instance === undefined) {
       return;
     }
-    leave(instance, streamId);
+    // Its standby session there, if any, stays until `releaseStandby`.
+    leave(instance, streamId, "play");
     instance.failures.delete(streamId);
     if (played || instance.idleSince === undefined) {
       instance.idleSince = this.now();
@@ -603,16 +605,14 @@ function inUse(instance: Instance): boolean {
   return instance.users.size > 0 || instance.standbys.size > 0;
 }
 
+/**
+ * The two roles are independent: a failed move to the engine (`release`) must not drop the standby
+ * session the stream also keeps there, nor the reverse.
+ */
 function join(instance: Instance, streamId: string, role: SharedRole): void {
-  if (role === "play") {
-    instance.standbys.delete(streamId);
-    instance.users.add(streamId);
-  } else if (!instance.users.has(streamId)) {
-    instance.standbys.add(streamId);
-  }
+  (role === "play" ? instance.users : instance.standbys).add(streamId);
 }
 
-function leave(instance: Instance, streamId: string): void {
-  instance.users.delete(streamId);
-  instance.standbys.delete(streamId);
+function leave(instance: Instance, streamId: string, role: SharedRole): void {
+  (role === "play" ? instance.users : instance.standbys).delete(streamId);
 }

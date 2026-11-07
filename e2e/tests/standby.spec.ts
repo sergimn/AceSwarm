@@ -107,8 +107,10 @@ test("fails over to the standby within seconds when the direct path loses the br
   const description = `on the standby ${String(tookSeconds)}s after the direct path lost the broadcast`;
   test.info().annotations.push({ type: "failover", description });
 
-  // A failover, not the ladder: it never restarted anything.
+  // A failover, not the ladder: it never restarted anything, and took seconds once the engine's
+  // buffer ran dry, where the ladder takes minutes to move a stream.
   expect(states.has("recovering")).toBe(false);
+  expect(tookSeconds).toBeLessThan(60);
   const after = await stream(request);
   expect(after.engine?.name).toBe(standbyEngine);
   expect(after.recoveries).toBe(before.recoveries + 1);
@@ -118,14 +120,16 @@ test("fails over to the standby within seconds when the direct path loses the br
 });
 
 test("its old engine gets hot again once the direct path works, and the stream stays put", async ({ request }) => {
-  const before = await waitForSteadyPlaying(request, run.streamId);
   setDirectPathBlocked(false);
   await expect
     .poll(async () => (await standbys(request)).join(", "), { timeout: 240_000, intervals: [2000] })
     .toBe("direct hot");
-  // Sticky: a healthy stream never moves to a standby.
-  const after = await stream(request);
-  expect(after).toMatchObject({ path: VPN_PATH, state: "playing", recoveries: before.recoveries });
+  // Sticky: a healthy stream never moves to a standby that is just as good.
+  const before = await waitForSteadyPlaying(request, run.streamId);
+  for (let check = 0; check < 5; check += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    expect(await stream(request)).toMatchObject({ path: VPN_PATH, state: "playing", recoveries: before.recoveries });
+  }
 });
 
 test("with engines shared per path, the standby is a session on the other path's engine", async ({ request }) => {

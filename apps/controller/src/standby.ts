@@ -37,6 +37,11 @@ export const DEFAULT_STANDBY_SETTINGS: StandbySettings = {
 
 /** Tries a standby gets (starting its engine, opening its session, warming up) before it goes. */
 const STANDBY_MAX_FAILURES = 3;
+/**
+ * Standbys a path lost one after the other before it gets no new one until its status changes
+ * (it goes down, or the stream moves): a path whose probes look fine can still block the stream.
+ */
+const STANDBY_MAX_PATH_ROUNDS = 3;
 
 export interface StreamStandbysDeps {
   streamId: string;
@@ -73,8 +78,11 @@ export interface StandbyContext {
   /** Whether the stream may use the path at all: the gateway has it, and the policy allows it. */
   usable: (path: string) => boolean;
   up: (path: string) => boolean;
-  /** New standbys may start: the stream played since its supervisor started. */
-  mayStart: boolean;
+  /**
+   * The stream played lately (see `StreamFailover`): only then do standbys start or start again.
+   * Otherwise they go, since a broadcast that is off for hours would only make them churn.
+   */
+  active: boolean;
   /** The path of the engine the stream kept from a failed move, which gets no standby of its own. */
   sparePath: string | undefined;
   openSession: OpenSession;
@@ -108,13 +116,19 @@ export class StreamStandbys {
   private readonly engineDeps: StandbyEngineDeps;
   private readonly logger: Logger;
   private readonly standbys = new Map<string, StandbyEngine>();
-  /** Standbys that went while they were starting; they are removed once that ends. */
+  /** Standbys that went and are not removed yet (some wait for their start to end). */
   private readonly leaving = new Set<StandbyEngine>();
   /** Failed standbys per path, and when the path may get a new one. */
   private readonly pathRetries = new Map<string, { failures: number; retryAt: number }>();
   private readonly running = new Set<Promise<void>>();
   /** The candidates of the last check, best first, to pick the best standby for a failover. */
   private ranking: readonly string[] = [];
+  /** The path the stream played on at the last check: a move gives every path a new chance. */
+  private lastCurrent: string | null | undefined;
+  /** Whether the stream may use a path, as of the last check. */
+  private usable: ((path: string) => boolean) | undefined;
+  /** The transcoder told when each standby last got data, on the last check. */
+  private readersSynced = false;
   /**
    * The sources the transcoder was last told to read; unknown at first, so that the first check
    * also stops readers a previous run of the controller left.
@@ -139,13 +153,17 @@ export class StreamStandbys {
   async maintain(context: StandbyContext): Promise<void> {
     if (!context.enabled) {
       this.dropAll("hot standby is off");
+    } else if (!context.active) {
+      this.dropAll("the stream has not played lately");
     } else if (context.known) {
+      this.usable = context.usable;
       this.dropUnneeded(context);
     }
     await this.syncReaders();
-    if (!context.enabled || !context.known) {
+    if (!context.enabled || !context.active || !context.known) {
       return;
     }
+    this.forgetPathRetries(context);
     for (const standby of this.standbys.values()) {
       if (this.isHot(standby)) {
         standby.failures = 0;
@@ -153,19 +171,20 @@ export class StreamStandbys {
       }
       this.advance(standby, context);
     }
-    if (context.mayStart) {
-      this.startMissing(context);
-    }
+    this.startMissing(context);
   }
 
-  /** Whether a hot standby is ready for a failover to a path that `eligible` accepts. */
-  hasHot(eligible: (path: string) => boolean): boolean {
-    return this.ready().some((standby) => this.isHot(standby) && eligible(standby.path));
+  /**
+   * Whether a standby is ready for a failover to a path that `eligible` accepts: hot, and with data
+   * from `freshAfter` on, so that it still gets data now that the stream doesn't (see `hot`).
+   */
+  hasHot(eligible: (path: string) => boolean, freshAfter: number): boolean {
+    return this.hot(eligible, freshAfter) !== undefined;
   }
 
-  /** The best hot standby on a path that `eligible` accepts, taken out for a failover. */
-  takeHot(eligible: (path: string) => boolean): TakenStandby | undefined {
-    return this.take(this.ready().find((standby) => this.isHot(standby) && eligible(standby.path)));
+  /** The best standby `hasHot` accepts, taken out for a failover. */
+  takeHot(eligible: (path: string) => boolean, freshAfter: number): TakenStandby | undefined {
+    return this.take(this.hot(eligible, freshAfter));
   }
 
   /** The standby on `path` once its session is open, hot or not, taken out for a move there. */
@@ -197,7 +216,7 @@ export class StreamStandbys {
     if (this.standbys.has(standby.path)) {
       // Another standby took the path meanwhile: this one goes.
       standby.dropped = true;
-      void this.track(standby.dispose("the path has another standby"));
+      void this.track(this.remove(standby, "the path has another standby"));
       return;
     }
     this.standbys.set(standby.path, standby);
@@ -215,8 +234,10 @@ export class StreamStandbys {
    */
   async adopt(path: string, engine: EngineHandle): Promise<void> {
     const standby = StandbyEngine.adopted(path, engine, this.engineDeps);
-    if (this.standbys.has(path)) {
-      await standby.dispose("the path has a standby already");
+    if (this.standbys.has(path) || this.usable?.(path) === false) {
+      standby.dropped = true;
+      const why = this.standbys.has(path) ? "the path has a standby already" : "the stream may not use its path";
+      await this.remove(standby, why);
       return;
     }
     this.logger.info({ path, engine: engine.name }, "keeping the engine the stream left as the standby on its path");
@@ -321,27 +342,40 @@ export class StreamStandbys {
     return extra.has(standby.path) ? "more standbys than STANDBY_MAX_PATHS" : undefined;
   }
 
-  /** Starts the next step of a standby that isn't ready yet, or starts it again if it brings no data. */
+  /**
+   * Starts the next step of a standby that isn't ready yet, or starts it again if it brings no data.
+   * Nothing happens on a path that is down. Starting an engine, or starting one again, waits for a
+   * start slot.
+   */
   private advance(standby: StandbyEngine, context: StandbyContext): void {
     const now = this.deps.now();
-    if (standby.busy || standby.dropped || now < standby.retryAt) {
+    if (standby.busy || standby.dropped || now < standby.retryAt || !context.up(standby.path)) {
       return;
     }
-    if (standby.engine === undefined) {
-      this.run(standby, () => standby.start(context.openSession));
-      return;
-    }
-    if (standby.session === undefined) {
+    if (standby.session === undefined && standby.engine !== undefined) {
       this.run(standby, () => standby.open(context.openSession));
       return;
     }
     const quietMs = now - (standby.lastDataAt ?? standby.openedAt ?? now);
-    // Without data for too long, it starts again, unless that was its last try.
-    const why = `no data for ${String(Math.round(quietMs / 1000))}s`;
-    if (this.isHot(standby) || quietMs < this.deps.settings.warmupMs || this.fail(standby, why)) {
+    const startsEngine = standby.engine === undefined || !standby.shared;
+    if (standby.engine !== undefined && (this.isHot(standby) || quietMs < this.deps.settings.warmupMs)) {
       return;
     }
-    this.run(standby, () => standby.startAgain(context.openSession));
+    const slot = startsEngine ? this.takeSlot() : undefined;
+    if (slot === false) {
+      // Other standbys start first.
+      return;
+    }
+    if (standby.engine === undefined) {
+      this.run(standby, () => standby.start(context.openSession), slot);
+      return;
+    }
+    // Without data for too long, it starts again, unless that was its last try.
+    if (this.fail(standby, `no data for ${String(Math.round(quietMs / 1000))}s`)) {
+      slot?.();
+      return;
+    }
+    this.run(standby, () => standby.startAgain(context.openSession), slot);
   }
 
   /** A new standby on the best path that has none, one per check, while a start slot is free. */
@@ -356,18 +390,41 @@ export class StreamStandbys {
         candidate !== context.sparePath &&
         now >= (this.pathRetries.get(candidate)?.retryAt ?? 0),
     );
-    const slots = this.deps.startSlots;
-    if (path === undefined || slots?.tryTake() === false) {
+    const slot = path === undefined ? false : this.takeSlot();
+    if (path === undefined || slot === false) {
       return;
     }
     const standby = new StandbyEngine(path, context.sharing, this.engineDeps);
     this.standbys.set(path, standby);
     this.logger.info({ path, shared: standby.shared }, "starting a standby");
-    this.run(
-      standby,
-      () => standby.start(context.openSession),
-      () => slots?.release(),
-    );
+    this.run(standby, () => standby.start(context.openSession), slot);
+  }
+
+  /** A start slot (see `startSlots`): its release, undefined without a limit, false while all are taken. */
+  private takeSlot(): (() => void) | undefined | false {
+    const slots = this.deps.startSlots;
+    if (slots === undefined) {
+      return undefined;
+    }
+    return slots.tryTake()
+      ? () => {
+          slots.release();
+        }
+      : false;
+  }
+
+  /** A path that went down, or a stream that moved, gives every path a new chance. */
+  private forgetPathRetries(context: StandbyContext): void {
+    if (context.current !== this.lastCurrent) {
+      this.lastCurrent = context.current;
+      this.pathRetries.clear();
+      return;
+    }
+    for (const path of this.pathRetries.keys()) {
+      if (!context.up(path)) {
+        this.pathRetries.delete(path);
+      }
+    }
   }
 
   private limit(): number {
@@ -392,8 +449,7 @@ export class StreamStandbys {
       if (!standby.dropped) {
         return;
       }
-      this.leaving.delete(standby);
-      await standby.dispose("it went while starting");
+      await this.remove(standby, "it went while starting");
     })();
     void this.track(task);
   }
@@ -421,9 +477,13 @@ export class StreamStandbys {
     if (!last) {
       return false;
     }
-    // The path gets a new standby later, after a longer wait each time.
+    // The path gets a new standby later, after a longer wait each time, and none after a few rounds.
     const failures = (this.pathRetries.get(standby.path)?.failures ?? 0) + STANDBY_MAX_FAILURES;
-    this.pathRetries.set(standby.path, { failures, retryAt: this.retryAfter(failures) });
+    const done = failures >= STANDBY_MAX_FAILURES * STANDBY_MAX_PATH_ROUNDS;
+    this.pathRetries.set(standby.path, { failures, retryAt: done ? Infinity : this.retryAfter(failures) });
+    if (done) {
+      this.logger.warn({ path: standby.path }, "no new standby on the path until it goes down or the stream moves");
+    }
     this.drop(standby, why);
     return true;
   }
@@ -450,7 +510,17 @@ export class StreamStandbys {
       this.logger.info({ path: standby.path, reason: why }, "removing the standby once it finished starting");
       return;
     }
-    void this.track(standby.dispose(why));
+    void this.track(this.remove(standby, why));
+  }
+
+  /** Removes a standby that went; `owns` still knows its engine until it is gone. */
+  private async remove(standby: StandbyEngine, why: string): Promise<void> {
+    this.leaving.add(standby);
+    try {
+      await standby.dispose(why);
+    } finally {
+      this.leaving.delete(standby);
+    }
   }
 
   // ---- transcoder -----------------------------------------------------------------------------
@@ -464,6 +534,7 @@ export class StreamStandbys {
       }
     }
     const sources = sessions.keys().toArray();
+    this.readersSynced = false;
     if (sources.length === 0 && this.readerSources?.length === 0) {
       return;
     }
@@ -474,6 +545,7 @@ export class StreamStandbys {
       this.logger.debug({ err: describeError(error) }, "could not reach the transcoder for the standbys");
       return;
     }
+    this.readersSynced = status !== undefined;
     // Without a pipeline the transcoder reads nothing for the stream.
     this.readerSources = status === undefined ? [] : sources;
     const readers = status ?? [];
@@ -492,6 +564,20 @@ export class StreamStandbys {
 
   private isHot(standby: StandbyEngine): boolean {
     return standby.isHot(this.deps.settings.hotWithinMs);
+  }
+
+  /**
+   * The best standby for a failover. Its data must come from this check, and from `freshAfter` on:
+   * when the transcoder can't be reached, or the broadcast pauses on every path, the standbys' last
+   * data is as old as the stream's last video, and moving would not help.
+   */
+  private hot(eligible: (path: string) => boolean, freshAfter: number): StandbyEngine | undefined {
+    if (!this.readersSynced) {
+      return undefined;
+    }
+    return this.ready().find(
+      (standby) => this.isHot(standby) && (standby.lastDataAt ?? 0) >= freshAfter && eligible(standby.path),
+    );
   }
 
   /** Standbys a failover can take, best path first. */
