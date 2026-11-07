@@ -55,6 +55,8 @@ class Generation {
   readonly stderrTail: string[] = [];
   /** How many more times ffmpeg opens the source again when this run fails before any video. */
   reopens = 0;
+  /** When the handover this run is for began: the first run's start, for a run that reopened. */
+  handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
 
@@ -72,6 +74,7 @@ class Generation {
     this.mode = mode;
     this.startedAt = startedAt;
     this.inputTimeoutSeconds = inputTimeoutSeconds;
+    this.handoverSince = startedAt;
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */
@@ -143,22 +146,33 @@ export class Pipeline {
     }
     const inputTimeoutSeconds = handover ? this.handoverInputTimeoutSeconds() : this.settings.plan.inputTimeoutSeconds;
     const canHandOver = handover && this.active !== undefined && this.active.state !== "exited";
-    if (canHandOver) {
-      if (this.pending !== undefined) {
-        this.retire(this.pending);
-      }
-      this.pending = await this.launch(source, "handover", inputTimeoutSeconds, reopens);
-      return;
-    }
     if (this.pending !== undefined) {
       this.retire(this.pending);
       this.pending = undefined;
     }
+    if (canHandOver) {
+      const launched = await this.launch(source, "handover", inputTimeoutSeconds, reopens);
+      this.replace("pending", launched);
+      return;
+    }
     const previous = this.active;
     const reason = previous === undefined ? "start" : "restart";
-    this.active = await this.launch(source, reason, inputTimeoutSeconds, reopens);
+    const launched = await this.launch(source, reason, inputTimeoutSeconds, reopens);
     if (previous !== undefined) {
       this.retire(previous);
+    }
+    this.replace("active", launched);
+  }
+
+  /**
+   * Puts a generation that `start` launched in its place, retiring the one there: a sync may have
+   * opened the old source again meanwhile (see `reopen`).
+   */
+  private replace(slot: "active" | "pending", generation: Generation): void {
+    const displaced = this[slot];
+    this[slot] = generation;
+    if (displaced !== undefined && displaced !== generation) {
+      this.retire(displaced);
     }
   }
 
@@ -266,13 +280,14 @@ export class Pipeline {
       // Another sync (for a player's playlist request) dealt with it meanwhile.
       return;
     }
+    const timedOut = this.now() - pending.handoverSince > this.settings.handoverTimeoutMs;
     if (ready) {
       this.promote(pending);
-    } else if (pending.willReopen()) {
+    } else if (pending.willReopen() && !timedOut) {
       if (this.mayReopenNow(pending)) {
         this.reopen(pending);
       }
-    } else if (pending.state === "exited" || this.now() - pending.startedAt > this.settings.handoverTimeoutMs) {
+    } else if (pending.state === "exited" || timedOut) {
       const stderr = pending.stderrTail.slice(-5);
       this.logger.warn({ generation: pending.number, error: pending.error, stderr }, "handover failed");
       this.retire(pending);
@@ -288,6 +303,7 @@ export class Pipeline {
   /** Starts ffmpeg again on the source of a run that failed before any video (see `start`). */
   private reopen(generation: Generation): void {
     const next = this.prepare(generation.source, generation.inputTimeoutSeconds, generation.reopens - 1);
+    next.handoverSince = generation.handoverSince;
     if (generation === this.pending) {
       this.pending = next;
     } else {

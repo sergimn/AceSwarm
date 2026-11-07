@@ -16,7 +16,11 @@ function silentProcess(): ChildProcess {
     stderr: new PassThrough(),
     exitCode: null,
     signalCode: null,
-    kill: () => true,
+    killed: false,
+    kill: () => {
+      Object.assign(child, { killed: true });
+      return true;
+    },
   });
   return child;
 }
@@ -210,5 +214,38 @@ describe("Pipeline", () => {
     expect(sourceOf(runs[2])).toBe("http://engine-2/play");
     exit(children[2]);
     expect(instance.status()).toMatchObject({ source: "http://engine-2/play", state: "exited" });
+  });
+
+  it("leaves one ffmpeg running when a sync opens a source again while a restart starts", async () => {
+    const clock = { now: 1000 };
+    const instance = start(120, () => clock.now);
+    await instance.start("http://engine-1/play", false, 2);
+    exit(children[0]);
+    clock.now += 1000;
+    await Promise.all([instance.start("http://engine-2/play", false), instance.sync()]);
+    // The sync's run of the old source creates its directories before it would start ffmpeg.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const running = children.filter((child) => child.exitCode === null && !child.killed);
+    expect(running.map((child) => sourceOf(runs[children.indexOf(child)]))).toEqual(["http://engine-2/play"]);
+    expect(instance.status().source).toBe("http://engine-2/play");
+  });
+
+  it("gives up on a handover whose source keeps failing once the handover timeout passed", async () => {
+    const clock = { now: 1000 };
+    const instance = start(120, () => clock.now);
+    await instance.start("http://engine-1/play", false);
+    await instance.start("http://engine-2/play", true, 5);
+    exit(children[1]);
+    clock.now += 60_000;
+    await instance.sync();
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    exit(children[2]);
+    // The reopened run started a minute later, but the handover began two minutes ago.
+    clock.now += 61_000;
+    await instance.sync();
+    expect(runs).toHaveLength(3);
+    expect(instance.status().pendingSource).toBeNull();
   });
 });
