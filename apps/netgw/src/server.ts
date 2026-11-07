@@ -53,7 +53,7 @@ export function registerMetrics(service: Service, gateway: Gateway): void {
   });
   const peers = new Gauge({
     name: "aceswarm_engine_peers",
-    help: "Peers seen in the gateway's connection table per engine",
+    help: "Peers seen in the gateway's connection table per engine (connected, active: sending data, uploading: getting data)",
     labelNames: ["engine_ip", "kind"],
     registers,
   });
@@ -93,6 +93,9 @@ export function registerMetrics(service: Service, gateway: Gateway): void {
         peers.set({ engine_ip: stats.ip, kind: "connected" }, stats.connected);
         if (stats.active !== null) {
           peers.set({ engine_ip: stats.ip, kind: "active" }, stats.active);
+        }
+        if (stats.uploading !== null) {
+          peers.set({ engine_ip: stats.ip, kind: "uploading" }, stats.uploading);
         }
       }
       total.set(paths.length);

@@ -36,9 +36,9 @@ describe("formatFreshness", () => {
 
 describe("formatPeers", () => {
   it("leads with peers that send data", () => {
-    expect(formatPeers({ connected: 12, active: 4, countries: [] })).toBe("4 sending · 12 connected");
-    expect(formatPeers({ connected: 12, active: null, countries: [] })).toBe("12 connected");
-    expect(formatPeers({ connected: null, active: null, countries: [] })).toBe("Unknown");
+    expect(formatPeers({ connected: 12, active: 4, uploading: null, countries: [] })).toBe("4 sending · 12 connected");
+    expect(formatPeers({ connected: 12, active: null, uploading: null, countries: [] })).toBe("12 connected");
+    expect(formatPeers({ connected: null, active: null, uploading: null, countries: [] })).toBe("Unknown");
   });
 });
 

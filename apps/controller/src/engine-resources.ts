@@ -1,6 +1,19 @@
 import type { Logger } from "@aceswarm/shared/logger";
 import type { ContainerDetails, DockerClient } from "./docker.ts";
 
+/**
+ * Memory an idle engine uses before it holds any stream data: about 145 MiB with the x86 engine in
+ * testing, less on some hosts. From there its memory grows by about the stream data it keeps, until
+ * its memory cache reaches the cap (ENGINE_MEMORY_CACHE_MB), and then stays flat.
+ */
+export const IDLE_ENGINE_MEMORY_BYTES = 145 * 1024 * 1024;
+
+/**
+ * Readings this soon after an engine started don't count as its idle memory: the engine may still
+ * be loading (it took about 3 s on the x86 engine in CI) and use far less than once it runs.
+ */
+export const ENGINE_LOADING_MS = 20_000;
+
 /** Memory of one engine container. */
 export interface EngineMemory {
   stream: string;
@@ -8,19 +21,49 @@ export interface EngineMemory {
   engine: string;
   usedBytes: number;
   limitBytes: number;
+  /** The engine's memory cache cap (`--memory-cache-limit`); null when it has none. */
+  cacheLimitBytes: number | null;
+  /**
+   * Estimated stream data in the engine's memory cache. Engines don't report it, so this is the
+   * memory used above an idle engine's, at most the cap (see estimateCacheBytes).
+   */
+  cacheBytes: number;
+}
+
+/** The memory cache cap an engine container was started with, from its environment. */
+export function engineCacheLimit(env: readonly string[] | null | undefined): number | null {
+  const prefix = "ACESWARM_MEMORY_CACHE_BYTES=";
+  const value = env?.findLast((entry) => entry.startsWith(prefix))?.slice(prefix.length);
+  if (value === undefined || !/^\d+$/.test(value)) {
+    return null;
+  }
+  const bytes = Number(value);
+  return bytes > 0 && Number.isSafeInteger(bytes) ? bytes : null;
+}
+
+/**
+ * Estimated memory cache use: the memory above an idle engine's, at most the cap. The idle memory is
+ * the engine's lowest reading once it finished loading, which an engine sampled soon after it
+ * started shows, or IDLE_ENGINE_MEMORY_BYTES when that is lower (an engine first seen with a full
+ * cache, such as after a controller restart).
+ */
+export function estimateCacheBytes(usedBytes: number, lowestBytes: number, cacheLimitBytes: number | null): number {
+  const aboveIdle = Math.max(0, usedBytes - Math.min(lowestBytes, IDLE_ENGINE_MEMORY_BYTES));
+  return cacheLimitBytes === null ? aboveIdle : Math.min(aboveIdle, cacheLimitBytes);
 }
 
 export interface EngineResourceOptions {
   stack: string;
   /** Called once for every out-of-memory kill seen. */
   onOomKill: (stream: string) => void;
+  now?: () => number;
 }
 
 /**
  * Samples the memory of every engine of the stack and notices out-of-memory kills, so the
- * dashboards show how close engines run to their limit (ENGINE_MEMORY_MB). The container runtime
- * restarts an engine killed this way, which only shows in its inspect data: the last exit time
- * changes and OOMKilled is set.
+ * dashboards show how close engines run to their limit (ENGINE_MEMORY_MB) and how full their memory
+ * cache is. The container runtime restarts an engine killed this way, which only shows in its
+ * inspect data: the last exit time changes and OOMKilled is set.
  */
 export class EngineResourceMonitor {
   private readonly docker: DockerClient;
@@ -29,6 +72,8 @@ export class EngineResourceMonitor {
   private memory: EngineMemory[] = [];
   /** Last exit time seen per container id. */
   private readonly lastExit = new Map<string, string>();
+  /** Lowest memory reading per container id once it finished loading, since its last start. */
+  private readonly lowest = new Map<string, { startedAt: string; bytes: number }>();
 
   constructor(docker: DockerClient, options: EngineResourceOptions, logger: Logger) {
     this.docker = docker;
@@ -60,7 +105,13 @@ export class EngineResourceMonitor {
       }
       const usage = await this.docker.memoryUsage(container.Id);
       if (usage !== undefined) {
-        memory.push({ stream, engine, ...usage });
+        const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
+        const cacheBytes = estimateCacheBytes(
+          usage.usedBytes,
+          this.lowestBytes(details, usage.usedBytes),
+          cacheLimitBytes,
+        );
+        memory.push({ stream, engine, ...usage, cacheLimitBytes, cacheBytes });
       }
     }
     for (const id of this.lastExit.keys()) {
@@ -68,7 +119,31 @@ export class EngineResourceMonitor {
         this.lastExit.delete(id);
       }
     }
+    for (const id of this.lowest.keys()) {
+      if (!seen.has(id)) {
+        this.lowest.delete(id);
+      }
+    }
     this.memory = memory;
+  }
+
+  /**
+   * Updates and returns the container's lowest memory reading once it finished loading; a restart
+   * starts it over. While it loads, IDLE_ENGINE_MEMORY_BYTES stands in. An unreadable start time
+   * counts as loaded.
+   */
+  private lowestBytes(details: ContainerDetails | undefined, usedBytes: number): number {
+    if (details === undefined) {
+      return usedBytes;
+    }
+    const startedAt = details.State.StartedAt;
+    if ((this.options.now ?? Date.now)() - Date.parse(startedAt) < ENGINE_LOADING_MS) {
+      return IDLE_ENGINE_MEMORY_BYTES;
+    }
+    const previous = this.lowest.get(details.Id);
+    const bytes = previous?.startedAt === startedAt ? Math.min(previous.bytes, usedBytes) : usedBytes;
+    this.lowest.set(details.Id, { startedAt, bytes });
+    return bytes;
   }
 
   private checkExit(details: ContainerDetails, stream: string, engine: string): void {
