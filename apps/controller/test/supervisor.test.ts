@@ -1557,7 +1557,10 @@ describe("hot standby on the other paths", () => {
           calls.push(`acquire ${path} as ${role}`);
           return Promise.resolve(byPath.get(path));
         },
-        rejoin: (handle: EngineHandle) => Promise.resolve(handle),
+        rejoin: (handle: EngineHandle, _stream: string, role = "play") => {
+          calls.push(`rejoin ${handle.sharedPath ?? "?"} as ${role}`);
+          return Promise.resolve(handle);
+        },
         release: (handle: EngineHandle) => {
           calls.push(`release ${handle.sharedPath ?? "?"}`);
           return Promise.resolve();
@@ -1600,6 +1603,21 @@ describe("hot standby on the other paths", () => {
       await fake.instance.tick();
       await settle();
       expect(pool.calls.at(-1)).toBe("acquire direct as standby");
+    });
+
+    test("a standby session that brings no data checks its shared engine before it opens again", async () => {
+      const pool = sharedEngines();
+      const sources = new Set([play(onDirect), play(onVpn)]);
+      const fake = await withStandby({ shared: pool.shared, sharing: { on: true }, sources, standbyData: new Set() });
+      for (let tick = 0; tick < 40 && !pool.calls.includes("rejoin wg:a as standby"); tick += 1) {
+        fake.clock.now += 5000;
+        await fake.instance.tick();
+        await settle();
+      }
+      // Maybe no stream plays from that engine, and then nothing else would notice that it stopped.
+      expect(pool.calls).toEqual(["acquire direct as play", "acquire wg:a as standby", "rejoin wg:a as standby"]);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", engine: { name: onVpn.name } }]);
+      expect(fake.creates()).toBe(0);
     });
 
     test("replaces the standbys of its own with sessions on shared engines once sharing is on", async () => {

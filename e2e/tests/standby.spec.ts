@@ -2,6 +2,7 @@ import { expect, test, type APIRequestContext } from "@playwright/test";
 import type { StreamState, StreamView } from "../../packages/shared/src/api-types.ts";
 import {
   addStream,
+  docker,
   engineContainers,
   gatewayAssignments,
   resetStack,
@@ -11,12 +12,16 @@ import {
   waitForPlaying,
   waitForSteadyPlaying,
 } from "./helpers.ts";
-import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, setVpnServerUnreachable } from "./mesh.ts";
+import { broadcasts, remoteWireguardProfile } from "./mesh.ts";
 
 /**
  * Hot standby: a stream on the direct path keeps a standby on the VPN that already pulls the
- * broadcast, so when the direct path loses the broadcast it fails over within seconds, without
- * starting an engine or going through the recovery ladder. See e2e/README.md.
+ * broadcast, so when the engine it plays from fails it moves to the standby within seconds,
+ * without starting an engine or going through the recovery ladder. See e2e/README.md.
+ *
+ * The engine fails by being paused: it stops answering, as one that hangs. Cutting the direct path
+ * off would not stall the stream here: its engine keeps getting the broadcast from the standby,
+ * over the engines' network.
  */
 test.describe.configure({ mode: "serial" });
 
@@ -25,7 +30,7 @@ const VPN_PATH = `wg:${PROFILE}`;
 /** A failover takes seconds; the ladder would take minutes to move the stream. */
 const FAILOVER_TIMEOUT_MS = 120_000;
 /** Filled in by the first test; the tests share one stream. */
-const run = { streamId: "" };
+const run = { streamId: "", paused: [] as string[] };
 
 async function patchSettings(request: APIRequestContext, data: Record<string, boolean>): Promise<void> {
   const response = await request.patch("/api/settings", { data });
@@ -45,6 +50,22 @@ async function standbys(request: APIRequestContext): Promise<string[]> {
   return (await stream(request)).standbys.map(({ path, state }) => `${path} ${state}`);
 }
 
+/** Pauses an engine container, so it stops answering like an engine that hangs. */
+function pauseEngine(name: string): void {
+  docker("pause", name);
+  run.paused.push(name);
+}
+
+function unpauseEngines(): void {
+  for (const name of run.paused.splice(0)) {
+    try {
+      docker("unpause", name);
+    } catch {
+      // The controller removed it meanwhile.
+    }
+  }
+}
+
 /** Polls until the stream plays on `path`, and returns every state it showed meanwhile. */
 async function statesUntilOn(request: APIRequestContext, path: string): Promise<Set<StreamState>> {
   const states = new Set<StreamState>();
@@ -61,15 +82,12 @@ async function statesUntilOn(request: APIRequestContext, path: string): Promise<
 }
 
 test.beforeAll(async ({ request }) => {
-  setDirectPathBlocked(false);
-  setVpnServerUnreachable(false);
   await resetStack(request);
   await patchSettings(request, { hotStandby: true });
 });
 
 test.afterAll(async ({ request }) => {
-  setDirectPathBlocked(false);
-  setVpnServerUnreachable(false);
+  unpauseEngines();
   await request.patch("/api/settings", { data: { hotStandby: false, sharedEngines: false } });
 });
 
@@ -94,21 +112,27 @@ test("keeps a hot standby on the VPN once the stream plays", async ({ request })
   expect((await stream(request)).path).toBe("direct");
 });
 
-test("fails over to the standby within seconds when the direct path loses the broadcast", async ({ request }) => {
+test("fails over to the standby within seconds when the engine it plays from stops answering", async ({ request }) => {
   const before = await waitForSteadyPlaying(request, run.streamId);
   const standbyEngine = before.standbys[0]?.engine?.name;
   expect(standbyEngine).toBeTruthy();
+  expect(before.engine?.name).toBeTruthy();
   const engines = engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"));
 
-  setDirectPathBlocked(true);
-  const blockedAt = Date.now();
-  const states = await statesUntilOn(request, VPN_PATH);
-  const tookSeconds = Math.round((Date.now() - blockedAt) / 1000);
-  const description = `on the standby ${String(tookSeconds)}s after the direct path lost the broadcast`;
+  pauseEngine(before.engine!.name);
+  const pausedAt = Date.now();
+  let states: Set<StreamState>;
+  try {
+    states = await statesUntilOn(request, VPN_PATH);
+  } finally {
+    unpauseEngines();
+  }
+  const tookSeconds = Math.round((Date.now() - pausedAt) / 1000);
+  const description = `on the standby ${String(tookSeconds)}s after its engine stopped answering`;
   test.info().annotations.push({ type: "failover", description });
 
-  // A failover, not the ladder: it never restarted anything, and took seconds once the engine's
-  // buffer ran dry, where the ladder takes minutes to move a stream.
+  // A failover, not the ladder: it never restarted anything, and took seconds, where the ladder
+  // takes minutes to move a stream.
   expect(states.has("recovering")).toBe(false);
   expect(tookSeconds).toBeLessThan(60);
   const after = await stream(request);
@@ -119,8 +143,9 @@ test("fails over to the standby within seconds when the direct path loses the br
   await expect.poll(async () => (await stream(request)).standbys.map(({ path }) => path)).toEqual(["direct"]);
 });
 
-test("its old engine gets hot again once the direct path works, and the stream stays put", async ({ request }) => {
-  setDirectPathBlocked(false);
+test("the engine it left gets hot again as the direct path's standby, and the stream stays put", async ({
+  request,
+}) => {
   await expect
     .poll(async () => (await standbys(request)).join(", "), { timeout: 240_000, intervals: [2000] })
     .toBe("direct hot");
@@ -152,18 +177,20 @@ test("with engines shared per path, the standby is a session on the other path's
   expect((await snapshot(request)).hotStandby.enabled).toBe(true);
 });
 
-test("fails over to the direct path's shared engine when the VPN goes away", async ({ request }) => {
+test("fails over to the direct path's shared engine when the VPN's engine stops answering", async ({ request }) => {
   const before = await waitForSteadyPlaying(request, run.streamId);
-  setVpnServerUnreachable(true);
+  expect(before.engine?.shared).toBe(true);
+  pauseEngine(before.engine!.name);
+  let states: Set<StreamState>;
   try {
-    const states = await statesUntilOn(request, "direct");
-    expect(states.has("recovering")).toBe(false);
-    const after = await stream(request);
-    expect(after.engine?.shared).toBe(true);
-    expect(after.recoveries).toBe(before.recoveries + 1);
+    states = await statesUntilOn(request, "direct");
   } finally {
-    setVpnServerUnreachable(false);
+    unpauseEngines();
   }
+  expect(states.has("recovering")).toBe(false);
+  const after = await stream(request);
+  expect(after.engine?.shared).toBe(true);
+  expect(after.recoveries).toBe(before.recoveries + 1);
 });
 
 test("turning hot standby off removes the standbys", async ({ page, request }) => {

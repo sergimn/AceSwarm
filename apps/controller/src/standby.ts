@@ -85,6 +85,11 @@ export interface StandbyContext {
   active: boolean;
   /** The path of the engine the stream kept from a failed move, which gets no standby of its own. */
   sparePath: string | undefined;
+  /**
+   * The source the transcoder still tries to hand the stream over to: a standby's session after a
+   * failover that gave up, which the transcoder may yet take (see `finishLateFailover`).
+   */
+  pendingSource: string | null;
   openSession: OpenSession;
 }
 
@@ -349,7 +354,7 @@ export class StreamStandbys {
    */
   private advance(standby: StandbyEngine, context: StandbyContext): void {
     const now = this.deps.now();
-    if (standby.busy || standby.dropped || now < standby.retryAt || !context.up(standby.path)) {
+    if (this.waits(standby, context, now)) {
       return;
     }
     if (standby.session === undefined && standby.engine !== undefined) {
@@ -376,6 +381,15 @@ export class StreamStandbys {
       return;
     }
     this.run(standby, () => standby.startAgain(context.openSession), slot);
+  }
+
+  /**
+   * Nothing to do for the standby now: it is busy or went, waits for its next try, its path is down,
+   * or the transcoder still tries to hand the stream over to its session.
+   */
+  private waits(standby: StandbyEngine, context: StandbyContext, now: number): boolean {
+    const pending = context.pendingSource !== null && standby.session?.playbackUrl === context.pendingSource;
+    return standby.busy || standby.dropped || pending || now < standby.retryAt || !context.up(standby.path);
   }
 
   /** A new standby on the best path that has none, one per check, while a start slot is free. */

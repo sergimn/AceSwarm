@@ -123,8 +123,9 @@ export class SharedEngines {
    */
   async acquire(path: string, streamId: string, role: SharedRole = "play"): Promise<EngineHandle> {
     const current = this.current.get(path);
-    if (current?.handle !== undefined && (!inUse(current) || current.checking !== undefined)) {
-      // No stream uses it, so none noticed if it stopped or hangs: check it first.
+    if (current?.handle !== undefined && (current.users.size === 0 || current.checking !== undefined)) {
+      // No stream plays from it, so none noticed if it stopped or hangs (standby sessions don't
+      // either): check it first.
       return this.rejoin(current.handle, streamId, role);
     }
     // While a replacement starts and the old engine is already gone, streams wait for it.

@@ -537,6 +537,23 @@ describe("standby sessions", () => {
     expect(shared.view()).toMatchObject([{ streams: 1, standbys: 0 }]);
   });
 
+  test("an engine only standby sessions use is checked before anyone takes it", async () => {
+    const fake = pool();
+    const engine = await fake.shared.acquire("wg:a", "s1", "standby");
+    // It stopped. No stream plays from it, so none noticed: a stream that moves there gets a new one.
+    fake.dead.add(engine.containerId);
+    const next = await fake.shared.acquire("wg:a", "s2");
+    expect(next.containerId).not.toBe(engine.containerId);
+    expect(fake.removed).toEqual([engine.containerId]);
+
+    // A standby session that brings no data checks its engine before it opens again.
+    await fake.shared.release(next, "s2", true);
+    fake.dead.add(next.containerId);
+    const again = await fake.shared.rejoin(next, "s3", "standby");
+    expect(again.containerId).not.toBe(next.containerId);
+    expect(fake.shared.view()).toMatchObject([{ path: "wg:a", engine: again.name, streams: 0, standbys: 1 }]);
+  });
+
   test("standbys don't count when every stream on the engine fails", async () => {
     const { shared } = pool();
     const engine = await shared.acquire("direct", "s1");

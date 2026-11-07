@@ -144,6 +144,10 @@ export class StandbyEngine {
         // Replaced meanwhile: the next check drops it.
         return;
       }
+      // Maybe no stream plays from the engine, and then nothing noticed if it stopped or hangs:
+      // checks it, which starts it again or gets the path a new one. A failed check leaves it.
+      this.engine = undefined;
+      this.engine = await this.requiredShared().rejoin(engine, this.deps.streamId, "standby");
     } else {
       try {
         this.engine = await this.deps.engines.restart(engine, async (handle) => {
@@ -218,7 +222,8 @@ export class StandbyEngine {
   /** Removes the container of its own engine, and its path at the gateway; the next try starts a new one. */
   private async forgetOwnEngine(idOrName: string): Promise<void> {
     this.engine = undefined;
-    this.generation = undefined;
+    // `owns` knows the container by its generation until it is gone: removing it takes a while.
+    const { generation } = this;
     if (this.ip !== undefined) {
       await this.deps.gateway.drop(this.ip);
       this.ip = undefined;
@@ -226,6 +231,9 @@ export class StandbyEngine {
     await this.deps.engines.remove({ containerId: idOrName, name: idOrName }).catch((error: unknown) => {
       this.deps.logger.warn({ err: error, engine: idOrName }, "could not remove a standby engine");
     });
+    if (this.generation === generation) {
+      this.generation = undefined;
+    }
   }
 
   private async route(ip: string): Promise<void> {
