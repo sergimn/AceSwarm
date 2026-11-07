@@ -66,6 +66,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
   {
     viewers: () => orchestrator.viewers(),
     sharedEngines: () => sharedEngines.view(),
+    engines: () => engineResources.running(),
   },
 );
 const sharedEngines = new SharedEngines({
@@ -124,10 +125,22 @@ const orchestrator: Orchestrator = new Orchestrator({
 
 await registerRoutes(service, orchestrator, { uiDir: config.UI_DIR, transcoderUrl: config.TRANSCODER_URL });
 await orchestrator.start();
+// One sample at a time: with a slow Docker API, samples would pile up and an older one could
+// finish last, putting back an old engine count or clearing a fresh one.
+const engineSampling = { busy: false };
 const sampleEngines = (): void => {
-  void engineResources.sample().catch((error: unknown) => {
-    logger.debug({ err: error }, "could not sample engine resources");
-  });
+  if (engineSampling.busy) {
+    return;
+  }
+  engineSampling.busy = true;
+  void engineResources
+    .sample()
+    .catch((error: unknown) => {
+      logger.debug({ err: error }, "could not sample engine resources");
+    })
+    .finally(() => {
+      engineSampling.busy = false;
+    });
 };
 sampleEngines();
 const engineResourceTimer = setInterval(sampleEngines, config.ENGINE_STATS_SECONDS * 1000);

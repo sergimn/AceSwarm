@@ -3,6 +3,7 @@ import type { StreamView } from "../../packages/shared/src/api-types.ts";
 import {
   addStream,
   engineContainers,
+  reportedEngines,
   resetStack,
   sharedEngineContainers,
   snapshot,
@@ -116,6 +117,8 @@ test("turning it on in the Streams dialog moves playing streams onto one engine"
   expect(await engineOf(request, bystander.id)).toBe(engine);
   // Their own engines are gone.
   await expect.poll(() => [...engineContainers(watched.id), ...engineContainers(bystander.id)]).toEqual([]);
+  // The dashboard's "Engines running" counts the shared engine, once.
+  await expect.poll(() => reportedEngines(request)).toEqual({ own: 0, shared: 1 });
   await waitForPlaying(request, watched.id);
 });
 

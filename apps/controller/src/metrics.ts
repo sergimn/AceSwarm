@@ -1,12 +1,25 @@
 import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
 import { Counter, Gauge, type Registry } from "@prometheus-io/client";
-import type { EngineMemory } from "./engine-resources.ts";
+import type { EngineCount, EngineMemory } from "./engine-resources.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
 export interface MetricSources {
   viewers?: () => ViewerView[];
   sharedEngines?: () => SharedEngineView[];
+  /** Engines running at the last sample; undefined before the first, or when it could not list them. */
+  engines?: () => EngineCount | undefined;
+}
+
+/** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
+function setEngineCount(gauge: Gauge<"kind">, source: (() => EngineCount | undefined) | undefined): void {
+  gauge.reset();
+  const count = source?.();
+  if (count === undefined) {
+    return;
+  }
+  gauge.set({ kind: "own" }, count.own);
+  gauge.set({ kind: "shared" }, count.shared);
 }
 
 function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: StreamView[]): void {
@@ -129,6 +142,7 @@ export class ControllerMetrics {
           viewers.set(labels, stream.viewers);
         }
         setStandbyGauge(standbys, current.streams);
+        setEngineCount(engines, sources.engines);
         const watchers = sources.viewers?.() ?? [];
         for (const viewer of watchers) {
           watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
@@ -248,6 +262,12 @@ export class ControllerMetrics {
       name: "aceswarm_stream_standby",
       help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed",
       labelNames: ["stream", "path", "state"],
+      registers,
+    });
+    const engines = new Gauge({
+      name: "aceswarm_engines",
+      help: "Engine containers running at the last sample (every ENGINE_STATS_SECONDS), by kind: own (a stream's: the one it plays from, a standby, or one kept to retry a move) and shared (a network path's)",
+      labelNames: ["kind"],
       registers,
     });
   }

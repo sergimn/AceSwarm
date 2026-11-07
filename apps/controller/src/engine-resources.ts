@@ -1,5 +1,5 @@
 import type { Logger } from "@aceswarm/shared/logger";
-import type { ContainerDetails, DockerClient } from "./docker.ts";
+import type { ContainerDetails, ContainerSummary, DockerClient } from "./docker.ts";
 
 /**
  * Memory an idle engine uses before it holds any stream data: about 145 MiB with the x86 engine in
@@ -52,6 +52,25 @@ export function estimateCacheBytes(usedBytes: number, lowestBytes: number, cache
   return cacheLimitBytes === null ? aboveIdle : Math.min(aboveIdle, cacheLimitBytes);
 }
 
+/** Engine containers running, by kind. */
+export interface EngineCount {
+  /** Engines of one stream: the one it plays from, its standbys on other paths, one it keeps to retry a move. */
+  own: number;
+  /** Engines of a network path that all its streams share. */
+  shared: number;
+}
+
+/** Counts the running engines of a container list; paused, restarting or stopped ones don't count. */
+function countRunning(containers: readonly ContainerSummary[]): EngineCount {
+  const count: EngineCount = { own: 0, shared: 0 };
+  for (const container of containers) {
+    if (container.State === "running") {
+      count[container.Labels["aceswarm.shared-path"] === undefined ? "own" : "shared"] += 1;
+    }
+  }
+  return count;
+}
+
 export interface EngineResourceOptions {
   stack: string;
   /** Called once for every out-of-memory kill seen. */
@@ -69,6 +88,8 @@ export class EngineResourceMonitor {
   private readonly docker: DockerClient;
   private readonly options: EngineResourceOptions;
   private readonly logger: Logger;
+  /** Undefined before the first sample, or when the last one could not list the engines. */
+  private count: EngineCount | undefined;
   private memory: EngineMemory[] = [];
   /** Last exit time seen per container id. */
   private readonly lastExit = new Map<string, string>();
@@ -85,11 +106,24 @@ export class EngineResourceMonitor {
     return this.memory;
   }
 
+  /** The engines running at the last sample; undefined before the first, or when it could not list them. */
+  running(): EngineCount | undefined {
+    return this.count;
+  }
+
   async sample(): Promise<void> {
-    const containers = await this.docker.listContainers({
-      "aceswarm.stack": this.options.stack,
-      "aceswarm.role": "engine",
-    });
+    let containers: ContainerSummary[];
+    try {
+      containers = await this.docker.listContainers({
+        "aceswarm.stack": this.options.stack,
+        "aceswarm.role": "engine",
+      });
+    } catch (error) {
+      // An old count would pass for the engines running now.
+      this.count = undefined;
+      throw error;
+    }
+    this.count = countRunning(containers);
     const memory: EngineMemory[] = [];
     const seen = new Set<string>();
     for (const container of containers) {

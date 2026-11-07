@@ -191,3 +191,23 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
     return { ok: false, output: String((error as { stderr?: unknown }).stderr ?? error) };
   }
 }
+
+/**
+ * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
+ * "Engines running" adds up); undefined before its first sample, or when it could not list them.
+ */
+export async function reportedEngines(
+  request: APIRequestContext,
+): Promise<{ own: number; shared: number } | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const text = await response.text();
+  // The registry adds a default service label.
+  const value = (kind: string): number | undefined => {
+    const match = new RegExp(String.raw`^aceswarm_engines\{kind="${kind}"[^}]*\} (\S+)$`, "m").exec(text);
+    return match === null ? undefined : Number(match[1]);
+  };
+  const own = value("own");
+  const shared = value("shared");
+  return own === undefined || shared === undefined ? undefined : { own, shared };
+}
