@@ -21,7 +21,11 @@
         "label": "Metrics",
         "type": "datasource",
         "query": "prometheus",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": "Prometheus",
+          "value": "aceswarm-prometheus"
+        },
         "hide": 0,
         "refresh": 1
       },
@@ -30,7 +34,11 @@
         "label": "Logs",
         "type": "datasource",
         "query": "loki",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": "Loki",
+          "value": "aceswarm-loki"
+        },
         "hide": 0,
         "refresh": 1
       },
