@@ -31,7 +31,8 @@ export const UPLOAD_MIN_BYTES = 16_384;
  * What each sent packet counts as besides stream data. Conntrack counts whole packets: IP and TCP
  * headers take about 52 bytes, IP and UDP 28. The rest covers the small control messages of the
  * engine's protocol. A fast download sends many acknowledgements, which add up to more than a
- * block between two samples, but they carry no stream data.
+ * block between two samples, but they carry no stream data. On a flow that is busy both ways, the
+ * acknowledgements take a little off the upload, so the count leans low rather than high.
  */
 export const PACKET_OVERHEAD_BYTES = 64;
 
