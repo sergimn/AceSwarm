@@ -61,8 +61,9 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
   expect(cache).toBeGreaterThanOrEqual(0);
   expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
-  // The broadcast runner is the only peer and needs nothing from us: the acknowledgements of what it
-  // sends don't count as uploads, in any of six gateway samples in a row.
+  // The broadcast runner is the only peer and needs nothing from us: what the engine sends back while
+  // it downloads (acknowledgements and requests) doesn't count as uploads, in any of six gateway
+  // samples in a row soon after playback starts, when it downloads fastest.
   const uploading = String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`;
   await expect.poll(() => value(uploading)).toBeDefined();
   for (let sample = 0; sample < 6; sample++) {

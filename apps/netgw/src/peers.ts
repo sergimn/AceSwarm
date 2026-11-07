@@ -16,8 +16,6 @@ export interface Flow {
   receivedBytes: number | undefined;
   /** Bytes the engine sent to the remote side, headers included; undefined without accounting. */
   sentBytes: number | undefined;
-  /** Packets the engine sent to the remote side; undefined without conntrack accounting. */
-  sentPackets: number | undefined;
   key: string;
 }
 
@@ -28,13 +26,14 @@ export interface Flow {
 export const UPLOAD_MIN_BYTES = 16_384;
 
 /**
- * What each sent packet counts as besides stream data. Conntrack counts whole packets: IP and TCP
- * headers take about 52 bytes, IP and UDP 28. The rest covers the small control messages of the
- * engine's protocol. A fast download sends many acknowledgements, which add up to more than a
- * block between two samples, but they carry no stream data. On a flow that is busy both ways, the
- * acknowledgements take a little off the upload, so the count leans low rather than high.
+ * Share of what a peer sent the engine that the engine may send back without it counting as an
+ * upload. Every download sends traffic back: acknowledgements (a packet of about 52 bytes for every
+ * one or two received, under 4% of what was received) and requests for the next blocks. On a fast
+ * download they add up to more than a block between two samples, but they carry no stream data. A
+ * peer the engine both downloads from and uploads to counts only once it gets more than this share
+ * back, so the count leans low rather than high.
  */
-export const PACKET_OVERHEAD_BYTES = 64;
+export const REPLY_SHARE = 1 / 8;
 
 /** Parses `conntrack -L` output (default format, with or without accounting counters). */
 export function parseConntrack(output: string): Flow[] {
@@ -64,10 +63,6 @@ export function parseConntrack(output: string): Flow[] {
       .matchAll(/\bbytes=(\d+)/g)
       .map((match) => Number.parseInt(match[1] ?? "0", 10))
       .toArray();
-    const packets = line
-      .matchAll(/\bpackets=(\d+)/g)
-      .map((match) => Number.parseInt(match[1] ?? "0", 10))
-      .toArray();
     const source = sources[0];
     const remote = destinations[0];
     if (source === undefined || remote === undefined) {
@@ -82,7 +77,6 @@ export function parseConntrack(output: string): Flow[] {
       replied: established && !line.includes("[UNREPLIED]"),
       receivedBytes: bytes.length >= 2 ? bytes[1] : undefined,
       sentBytes: bytes.length >= 2 ? bytes[0] : undefined,
-      sentPackets: packets.length >= 2 ? packets[0] : undefined,
       key: `${protocol}|${source}|${sourcePorts[0] ?? ""}|${remote}|${destinationPorts[0] ?? ""}`,
     });
   }
@@ -107,7 +101,8 @@ function topCountries(ips: Iterable<string>, geo: GeoLookup, limit: number): Cou
  * Derives peer statistics per engine from the gateway's connection tracking table: the gateway
  * routes every engine, so it sees each engine's peers, which the engine API does not expose.
  * "Active" peers are those whose received byte counter grew since the previous sample, and
- * "uploading" peers those the engine sent at least UPLOAD_MIN_BYTES of stream data since then.
+ * "uploading" peers those the engine sent at least UPLOAD_MIN_BYTES more than REPLY_SHARE of what
+ * they sent it since then.
  */
 export class PeerTracker {
   private readonly runner: CommandRunner;
@@ -116,7 +111,7 @@ export class PeerTracker {
   private readonly ignoredPorts: ReadonlySet<number>;
   private readonly now: () => number;
   private previousBytes = new Map<string, number>();
-  private previousSent = new Map<string, { bytes: number; packets: number }>();
+  private previousSent = new Map<string, number>();
   private stats = new Map<string, PeerStats>();
 
   constructor(
@@ -161,7 +156,7 @@ export class PeerTracker {
       { connected: Set<string>; active: Set<string>; uploading: Set<string>; accounted: boolean }
     >();
     const bytes = new Map<string, number>();
-    const sent = new Map<string, { bytes: number; packets: number }>();
+    const sent = new Map<string, number>();
     for (const flow of flows) {
       if (!inSubnet(flow.source, this.subnet) || isPrivate(flow.remote) || this.ignoredPorts.has(flow.remotePort)) {
         continue;
@@ -179,14 +174,13 @@ export class PeerTracker {
       }
       entry.accounted = true;
       bytes.set(flow.key, flow.receivedBytes);
-      if (flow.receivedBytes > (this.previousBytes.get(flow.key) ?? 0)) {
+      const received = flow.receivedBytes - (this.previousBytes.get(flow.key) ?? 0);
+      if (received > 0) {
         entry.active.add(flow.remote);
       }
-      if (flow.sentBytes !== undefined && flow.sentPackets !== undefined) {
-        const now = { bytes: flow.sentBytes, packets: flow.sentPackets };
-        const before = this.previousSent.get(flow.key) ?? { bytes: 0, packets: 0 };
-        sent.set(flow.key, now);
-        const data = now.bytes - before.bytes - (now.packets - before.packets) * PACKET_OVERHEAD_BYTES;
+      if (flow.sentBytes !== undefined) {
+        sent.set(flow.key, flow.sentBytes);
+        const data = flow.sentBytes - (this.previousSent.get(flow.key) ?? 0) - Math.max(0, received) * REPLY_SHARE;
         if (data >= UPLOAD_MIN_BYTES) {
           entry.uploading.add(flow.remote);
         }
