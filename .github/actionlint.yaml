@@ -1,0 +1,5 @@
+# GitHub-hosted labels newer than the pinned actionlint knows about.
+self-hosted-runner:
+  labels:
+    # Ubuntu 26.04 image (public preview), used by the Podman E2E leg.
+    - ubuntu-26.04

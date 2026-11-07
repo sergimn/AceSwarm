@@ -19,9 +19,12 @@ async function fetchText(url: string): Promise<string> {
   return await response.text();
 }
 
-/** The client profile the WireGuard server on the other runner generated for this run. */
+/** This runner's mesh role: `stack`, or `stack-podman` on the rootless Podman runner. */
+const ROLE = process.env["MESH_ROLE"] ?? "stack";
+
+/** The client profile the WireGuard server on the other runner generated for this runner. */
 export async function remoteWireguardProfile(): Promise<string> {
-  return await fetchText(`http://${MESH.wg}:18999/client.conf`);
+  return await fetchText(`http://${MESH.wg}:18999/client-${ROLE}.conf`);
 }
 
 export interface Broadcast {
@@ -34,7 +37,11 @@ export interface Broadcast {
 
 /** The dummy broadcasts on the broadcast runner (e2e/broadcast.sh), at least `count` of them. */
 export async function broadcasts(count: number): Promise<Broadcast[]> {
-  const list = JSON.parse(await fetchText(`http://${MESH.source}:18999/broadcasts.json`)) as Broadcast[];
+  const all = JSON.parse(await fetchText(`http://${MESH.source}:18999/broadcasts.json`)) as Broadcast[];
+  // Each stack runner plays its own broadcasts (E2E_BROADCASTS, like "bc4,bc5,bc6"), so the
+  // tracker's announces for them come from this runner's engines only.
+  const mine = process.env["E2E_BROADCASTS"]?.split(",");
+  const list = mine === undefined ? all : all.filter((broadcast) => mine.includes(broadcast.name));
   expect(list.length).toBeGreaterThanOrEqual(count);
   for (const broadcast of list) {
     expect(broadcast.infohash).toMatch(/^[0-9a-f]{40}$/);
@@ -66,22 +73,34 @@ export async function lastAnnounce(infohash: string, ip: string): Promise<string
   return times.toSorted((a, b) => a.localeCompare(b, "en")).at(-1) ?? "";
 }
 
-/** Adds or removes a DROP rule for traffic this runner's containers forward (DOCKER-USER). */
+const PODMAN = process.env["E2E_RUNTIME"] === "podman";
+
+/**
+ * iptables where this runner's container traffic is forwarded: the host's DOCKER-USER chain with
+ * Docker, the FORWARD chain of rootless Podman's network namespace with Podman (e2e/podman.sh).
+ * Either one sees the containers' traffic only, not the runner's own.
+ */
+function iptables(args: string[], options: { stdio?: "ignore" } = {}): void {
+  execFileSync(PODMAN ? "e2e/podman.sh" : "sudo", ["iptables", ...args], options);
+}
+
+/** Adds or removes a DROP rule for traffic this runner's containers forward. */
 function setForwardDrop(match: string[], drop: boolean): void {
-  const rule = ["DOCKER-USER", ...match, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
+  const chain = PODMAN ? "FORWARD" : "DOCKER-USER";
+  const rule = [chain, ...match, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
   const present = (): boolean => {
     try {
-      execFileSync("sudo", ["iptables", "-C", ...rule], { stdio: "ignore" });
+      iptables(["-C", ...rule], { stdio: "ignore" });
       return true;
     } catch {
       return false;
     }
   };
   if (drop && !present()) {
-    execFileSync("sudo", ["iptables", "-I", ...rule]);
+    iptables(["-I", ...rule]);
   }
   while (!drop && present()) {
-    execFileSync("sudo", ["iptables", "-D", ...rule]);
+    iptables(["-D", ...rule]);
   }
 }
 

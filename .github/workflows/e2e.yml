@@ -1,14 +1,17 @@
-# End-to-end tests across three GitHub-hosted runners, with real Acestream engines (no mocks):
+# End-to-end tests across four GitHub-hosted runners, with real Acestream engines (no mocks):
 #
-#   wg      a throwaway WireGuard server; generates the client profile
-#   source  three dummy live broadcasts from real Acestream engines, plus the tracker players use
-#   stack   AceSwarm with real engines, and the Playwright tests
+#   wg            a throwaway WireGuard server; generates one client profile per stack runner
+#   source        six dummy live broadcasts from real Acestream engines, plus the tracker players
+#                 use: bc1-bc3 for one stack runner, bc4-bc6 for the other
+#   stack         AceSwarm on Docker with real engines, and the Playwright tests
+#   stack-podman  the same on rootless Podman, set up like a host that runs `docker compose up` on
+#                 Podman (e2e/podman.sh)
 #
 # The runners can't accept connections from the internet, so they first join a WireGuard mesh by
 # hole punching, using STUN and this run's artifacts to find each other (e2e/mesh.sh). The
 # WireGuard server and the broadcasts then start in parallel. e2e/README.md has diagrams.
 #
-# Re-run all jobs, never only the failed one: the three runners only work together.
+# Re-run all jobs, never only the failed one: the runners only work together.
 name: E2E
 
 on:
@@ -51,17 +54,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
-        run: e2e/mesh.sh join wg source stack
+        # A stack runner that never shows up must not take the other one's VPN down with it.
+        run: e2e/mesh.sh join wg source "stack?" "stack-podman?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Start the WireGuard server
         run: |
           e2e/vpn.sh build
-          e2e/vpn.sh start "$(e2e/mesh.sh ip wg)"
-          e2e/mesh.sh share "$(e2e/vpn.sh profile)" client.conf
+          e2e/vpn.sh start "$(e2e/mesh.sh ip wg)" client-stack client-stack-podman
+          for client in client-stack client-stack-podman; do
+            e2e/mesh.sh share "$(e2e/vpn.sh profile "$client")"
+          done
       - name: Serve until the tests are done
-        run: e2e/mesh.sh wait-file stack "done"
+        run: e2e/mesh.sh wait-all "done" stack stack-podman
       - name: Logs
         if: always()
         run: |
@@ -88,17 +94,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
-        run: e2e/mesh.sh join source wg stack
+        run: e2e/mesh.sh join source wg "stack?" "stack-podman?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Start the broadcasts
         run: |
-          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 3
+          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 6
           e2e/broadcast.sh wait > "$RUNNER_TEMP/broadcasts.json"
           e2e/mesh.sh share "$RUNNER_TEMP/broadcasts.json"
       - name: Serve until the tests are done
-        run: e2e/mesh.sh wait-file stack "done"
+        run: e2e/mesh.sh wait-all "done" stack stack-podman
       - name: Logs
         if: always()
         run: |
@@ -106,9 +112,28 @@ jobs:
           e2e/broadcast.sh logs
 
   stack:
-    name: AceSwarm with real engines
-    runs-on: ubuntu-24.04
+    name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      # Each stack runner tests on its own; one failing must not cancel the other.
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: docker
+            role: stack
+            os: ubuntu-24.04
+            broadcasts: bc1,bc2,bc3
+          # Rootless Podman 5 from the distribution, as on a current Ubuntu host.
+          - runtime: podman
+            role: stack-podman
+            os: ubuntu-26.04
+            broadcasts: bc4,bc5,bc6
+    env:
+      MESH_ROLE: ${{ matrix.role }}
+      # Its own broadcasts: the tests tell the paths apart by who announced to the tracker, and both
+      # stack runners' VPN traffic leaves from the WireGuard server's runner.
+      E2E_BROADCASTS: ${{ matrix.broadcasts }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,18 +143,23 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - name: Find this runner's public UDP address
-        run: e2e/mesh.sh prepare stack
+        run: |
+          e2e/mesh.sh prepare "$MESH_ROLE"
+          echo "MESH_SELF_IP=$(e2e/mesh.sh ip "$MESH_ROLE")" >>"$GITHUB_ENV"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ env.MESH_ARTIFACT_PREFIX }}stack
+          name: ${{ env.MESH_ARTIFACT_PREFIX }}${{ matrix.role }}
           path: ${{ runner.temp }}/mesh/publish/
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
-        run: e2e/mesh.sh join stack wg source
+        run: e2e/mesh.sh join "$MESH_ROLE" wg source
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
+      - name: Set up rootless Podman
+        if: matrix.runtime == 'podman'
+        run: e2e/podman.sh setup
       - run: npm ci
       - run: npx playwright install --with-deps chromium ffmpeg
       - name: Build the images and start AceSwarm
@@ -138,8 +168,9 @@ jobs:
           e2e/stack.sh up
       - name: Wait for the WireGuard server and the broadcasts
         run: |
-          e2e/mesh.sh wait-file wg client.conf >/dev/null
+          e2e/mesh.sh wait-file wg "client-$MESH_ROLE.conf" >/dev/null
           e2e/mesh.sh wait-file source broadcasts.json
+          e2e/stack.sh check
       - name: Run the tests
         run: npm run e2e
       - name: Tell the other runners the tests are done
@@ -158,7 +189,7 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-results-${{ github.run_attempt }}
+          name: e2e-results-${{ matrix.runtime }}-${{ github.run_attempt }}
           path: |
             playwright-report/
             test-results/
@@ -166,4 +197,8 @@ jobs:
           retention-days: 14
       - name: Stop AceSwarm
         if: always()
+        # On Ubuntu 26.04, Podman can't stop pasta when the last container leaves its network
+        # ("rootless netns: kill network process: permission denied"): pasta's AppArmor profile
+        # doesn't let it receive signals. The runner is thrown away anyway.
+        continue-on-error: ${{ matrix.runtime == 'podman' }}
         run: e2e/stack.sh down

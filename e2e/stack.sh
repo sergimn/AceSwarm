@@ -2,7 +2,12 @@
 # The AceSwarm side of the end-to-end tests: builds the images (with the real engine image) and
 # starts or stops the stack. See e2e/README.md.
 #
-#   e2e/stack.sh build|up|down|logs
+#   e2e/stack.sh build|up|down|logs|check
+#
+# `check` fails fast when the gateway can't ping its probe target (the WireGuard server's runner)
+# on the direct path: every path would stay down and every test would time out.
+#
+# On the Podman leg, `docker` is Podman (podman-docker, see e2e/podman.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -31,6 +36,9 @@ down() {
 
 logs() {
   compose logs --no-color
+  # What the gateway runs as and can reach: its WireGuard setup writes and reads these paths.
+  echo "--- netgw identity and runtime directories"
+  compose exec -T netgw sh -c 'id; grep -E "^Cap(Eff|Bnd)" /proc/self/status; cat /proc/self/attr/current 2>/dev/null; echo; ls -land /run /run/aceswarm /run/wireguard /config/wireguard /config/wireguard/* 2>&1; grep -E " /(run|config)" /proc/self/mountinfo' || true
   local engine
   for engine in $(docker ps -aq --filter "label=aceswarm.stack=${ACESWARM_STACK_NAME}"); do
     echo "--- engine $(docker inspect -f '{{.Name}}' "$engine")"
@@ -39,13 +47,22 @@ logs() {
   done
 }
 
+check() {
+  # shellcheck disable=SC2016 # expanded inside the gateway container
+  if ! compose exec -T netgw sh -c 'ping -c 3 -W 2 "${PROBE_TARGETS%%,*}"'; then
+    echo "the gateway can't ping its probe target, so no network path can come up" >&2
+    return 1
+  fi
+}
+
 case "${1:-}" in
   build) build ;;
+  check) check ;;
   up) compose up -d --wait --wait-timeout 180 ;;
   down) down ;;
   logs) logs ;;
   *)
-    echo "usage: $0 build|up|down|logs" >&2
+    echo "usage: $0 build|up|down|logs|check" >&2
     exit 2
     ;;
 esac
