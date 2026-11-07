@@ -12,6 +12,9 @@
 # WireGuard server and the broadcasts then start in parallel. e2e/README.md has diagrams.
 #
 # Re-run all jobs, never only the failed one: the runners only work together.
+#
+# Every step has a time limit of a few times its usual length, so a step that hangs fails within
+# minutes rather than at the job's limit, and mesh.sh stops waiting for a runner whose job ended.
 name: E2E
 
 on:
@@ -37,17 +40,23 @@ jobs:
   wg:
     name: WireGuard server
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Serves until both stack jobs are done, so it outlasts their limit.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        timeout-minutes: 5
         with:
           node-version-file: .node-version
       - name: Find this runner's public UDP address
+        # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
+        timeout-minutes: 6
         run: e2e/mesh.sh prepare wg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 3
         with:
           name: ${{ env.MESH_ARTIFACT_PREFIX }}wg
           path: ${{ runner.temp }}/mesh/publish/
@@ -55,11 +64,14 @@ jobs:
           retention-days: 1
       - name: Join the mesh
         # A stack runner that never shows up must not take the other one's VPN down with it.
+        # Usually seconds; up to 10 minutes per peer for a runner that starts late.
+        timeout-minutes: 20
         run: e2e/mesh.sh join wg source "stack?" "stack-podman?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Start the WireGuard server
+        timeout-minutes: 10
         run: |
           e2e/vpn.sh build
           e2e/vpn.sh start "$(e2e/mesh.sh ip wg)" client-stack client-stack-podman
@@ -70,6 +82,7 @@ jobs:
         run: e2e/mesh.sh wait-all "done" stack stack-podman
       - name: Logs
         if: always()
+        timeout-minutes: 5
         run: |
           sudo wg show wg-mesh || true
           e2e/vpn.sh logs
@@ -77,28 +90,37 @@ jobs:
   source:
     name: Dummy Acestream broadcast
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Serves until both stack jobs are done, so it outlasts their limit.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        timeout-minutes: 5
         with:
           node-version-file: .node-version
       - name: Find this runner's public UDP address
+        # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
+        timeout-minutes: 6
         run: e2e/mesh.sh prepare source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 3
         with:
           name: ${{ env.MESH_ARTIFACT_PREFIX }}source
           path: ${{ runner.temp }}/mesh/publish/
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
+        # Usually seconds; up to 10 minutes per peer for a runner that starts late.
+        timeout-minutes: 20
         run: e2e/mesh.sh join source wg "stack?" "stack-podman?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Start the broadcasts
+        timeout-minutes: 10
         run: |
           e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 6
           e2e/broadcast.sh wait > "$RUNNER_TEMP/broadcasts.json"
@@ -107,6 +129,7 @@ jobs:
         run: e2e/mesh.sh wait-all "done" stack stack-podman
       - name: Logs
         if: always()
+        timeout-minutes: 5
         run: |
           sudo wg show wg-mesh || true
           e2e/broadcast.sh logs
@@ -114,7 +137,7 @@ jobs:
   stack:
     name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 50
     strategy:
       # Each stack runner tests on its own; one failing must not cancel the other.
       fail-fast: false
@@ -136,45 +159,62 @@ jobs:
       E2E_BROADCASTS: ${{ matrix.broadcasts }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        timeout-minutes: 5
         with:
           node-version-file: .node-version
           cache: npm
       - name: Find this runner's public UDP address
+        # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
+        timeout-minutes: 6
         run: |
           e2e/mesh.sh prepare "$MESH_ROLE"
           echo "MESH_SELF_IP=$(e2e/mesh.sh ip "$MESH_ROLE")" >>"$GITHUB_ENV"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 3
         with:
           name: ${{ env.MESH_ARTIFACT_PREFIX }}${{ matrix.role }}
           path: ${{ runner.temp }}/mesh/publish/
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
+        # Usually seconds; up to 10 minutes per peer for a runner that starts late.
+        timeout-minutes: 20
         run: e2e/mesh.sh join "$MESH_ROLE" wg source
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Set up rootless Podman
         if: matrix.runtime == 'podman'
+        timeout-minutes: 10
         run: e2e/podman.sh setup
       - run: npm ci
+        timeout-minutes: 10
       - run: npx playwright install --with-deps chromium ffmpeg
+        timeout-minutes: 10
       - name: Build the images and start AceSwarm
+        timeout-minutes: 15
         run: |
           e2e/stack.sh build
           e2e/stack.sh up
       - name: Wait for the WireGuard server and the broadcasts
+        # Usually ready by now, but the shared runners start their servers only once both stacks
+        # joined or 10 minutes passed.
+        timeout-minutes: 15
         run: |
           e2e/mesh.sh wait-file wg "client-$MESH_ROLE.conf" >/dev/null
           e2e/mesh.sh wait-file source broadcasts.json
           e2e/stack.sh check
       - name: Run the tests
+        # About 14 minutes. Playwright stops at 30 (globalTimeout) and still writes its report.
+        timeout-minutes: 35
         run: npm run e2e
       - name: Tell the other runners the tests are done
         if: always()
+        timeout-minutes: 5
         run: |
           date -u > "$RUNNER_TEMP/done"
           e2e/mesh.sh share "$RUNNER_TEMP/done"
@@ -182,12 +222,14 @@ jobs:
           e2e/mesh.sh wait-fetched "done" wg source
       - name: Logs
         if: always()
+        timeout-minutes: 5
         run: |
           sudo wg show wg-mesh || true
           e2e/stack.sh logs > e2e-stack.log 2>&1 || true
           tail -n 200 e2e-stack.log
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 5
         with:
           name: e2e-results-${{ matrix.runtime }}-${{ github.run_attempt }}
           path: |
@@ -201,4 +243,5 @@ jobs:
         # ("rootless netns: kill network process: permission denied"): pasta's AppArmor profile
         # doesn't let it receive signals. The runner is thrown away anyway.
         continue-on-error: ${{ matrix.runtime == 'podman' }}
+        timeout-minutes: 5
         run: e2e/stack.sh down
