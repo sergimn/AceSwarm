@@ -49,6 +49,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
     viewers: 0,
     hls: { preview: "", full: "", thumbnail: "" },
     engine: null,
+    standbys: [],
   };
   new ControllerMetrics(
     registry,

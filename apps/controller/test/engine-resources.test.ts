@@ -16,6 +16,7 @@ interface FakeEngine {
   oomKilled: boolean;
   memory: MemoryUsage | undefined;
   env?: string[] | null;
+  startedAt?: string;
 }
 
 const MB = 1024 * 1024;
@@ -57,7 +58,7 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
                 Running: entry.running,
                 Status: entry.running ? "running" : "exited",
                 ExitCode: 0,
-                StartedAt: NEVER,
+                StartedAt: entry.startedAt ?? NEVER,
                 FinishedAt: entry.finishedAt,
                 OOMKilled: entry.oomKilled,
               },
@@ -127,10 +128,30 @@ describe("EngineResourceMonitor", () => {
   });
 
   it("estimates the cache as the memory above an idle engine's, at most the cap", () => {
-    expect(estimateCacheBytes(100 * MB, 128 * MB)).toBe(0);
-    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 40 * MB, 128 * MB)).toBe(40 * MB);
-    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 140 * MB, 128 * MB)).toBe(128 * MB);
-    expect(estimateCacheBytes(IDLE_ENGINE_MEMORY_BYTES + 900 * MB, null)).toBe(900 * MB);
+    const idle = IDLE_ENGINE_MEMORY_BYTES;
+    expect(estimateCacheBytes(100 * MB, 100 * MB, 128 * MB)).toBe(0);
+    expect(estimateCacheBytes(idle + 40 * MB, idle + 40 * MB, 128 * MB)).toBe(40 * MB);
+    expect(estimateCacheBytes(idle + 140 * MB, idle, 128 * MB)).toBe(128 * MB);
+    expect(estimateCacheBytes(idle + 900 * MB, idle, null)).toBe(900 * MB);
+    // An engine that idled lower than that counts from its own lowest reading.
+    expect(estimateCacheBytes(180 * MB, 100 * MB, 128 * MB)).toBe(80 * MB);
+  });
+
+  it("counts from each engine's lowest reading since it started", async () => {
+    const fresh = { ...engine("a", "s1", 100), startedAt: "2026-11-07T10:00:00Z" };
+    const { monitor } = setup([fresh]);
+    await monitor.sample();
+    expect(monitor.latest()[0]?.cacheBytes).toBe(0);
+
+    fresh.memory = { usedBytes: 180 * MB, limitBytes: 768 * MB };
+    await monitor.sample();
+    expect(monitor.latest()[0]?.cacheBytes).toBe(80 * MB);
+
+    // After a restart the engine starts over, and a first reading above the idle memory counts from that.
+    fresh.startedAt = "2026-11-07T11:00:00Z";
+    fresh.memory = { usedBytes: IDLE_ENGINE_MEMORY_BYTES + 60 * MB, limitBytes: 768 * MB };
+    await monitor.sample();
+    expect(monitor.latest()[0]?.cacheBytes).toBe(60 * MB);
   });
 
   it("counts each out-of-memory kill once, after the runtime restarted the engine", async () => {

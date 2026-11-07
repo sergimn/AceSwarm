@@ -52,7 +52,8 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
     const match = new RegExp(String.raw`^${series} (\S+)$`, "m").exec(text);
     return match === null ? undefined : Number(match[1]);
   };
-  const engine = String.raw`\{stream="${stream!.id}",engine="[^"]+"\}`;
+  // Prometheus adds labels of its own, such as service.
+  const engine = String.raw`\{stream="${stream!.id}",engine="[^"]+"[^}]*\}`;
   // The default ENGINE_MEMORY_CACHE_MB (128).
   await expect
     .poll(() => value(`aceswarm_engine_memory_cache_limit_bytes${engine}`), { timeout: 60_000 })
@@ -62,7 +63,7 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
   // The broadcast runner is the only peer and needs nothing from us, but the count is there.
   await expect
-    .poll(() => value(String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"\}`))
+    .poll(() => value(String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`))
     .toBeGreaterThanOrEqual(0);
 });
 
