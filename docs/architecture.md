@@ -203,7 +203,7 @@ Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engi
 
 ## Monitoring
 
-- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, how many streams each shared engine plays and why it was replaced, how full each engine's memory cache is, and how much the engines upload. The gateway counts the peers each engine sends stream data to (at least 16 KiB between two samples) from its connection table, next to the peers sending data to it. Recording rules compute availability, and alerts cover:
+- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, how many streams each shared engine plays and why it was replaced, how full each engine's memory cache is, and how much the engines upload. The gateway counts the peers each engine sends stream data to from its connection table, next to the peers sending data to it: a peer counts when the engine sent it at least 16 KiB between two samples (`PEERS_INTERVAL_SECONDS`), after taking 64 bytes per packet off for headers and acknowledgements, which a fast download sends plenty of. Recording rules compute availability, and alerts cover:
   - stream down or flapping,
   - path down,
   - engine memory near its limit, and out-of-memory kills,

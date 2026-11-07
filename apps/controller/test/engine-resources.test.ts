@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ContainerDetails, ContainerSummary, DockerClient, MemoryUsage } from "../src/docker.ts";
 import {
   engineCacheLimit,
+  ENGINE_LOADING_MS,
   EngineResourceMonitor,
   estimateCacheBytes,
   IDLE_ENGINE_MEMORY_BYTES,
@@ -73,6 +74,9 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
   return fake as unknown as DockerClient;
 }
 
+/** The fake clock's time: an hour after the engines in these tests started. */
+const clock = { now: Date.parse("2026-11-07T11:00:00Z") };
+
 function setup(engines: FakeEngine[]): { monitor: EngineResourceMonitor; kills: string[] } {
   const kills: string[] = [];
   const monitor = new EngineResourceMonitor(
@@ -82,6 +86,7 @@ function setup(engines: FakeEngine[]): { monitor: EngineResourceMonitor; kills: 
       onOomKill: (stream) => {
         kills.push(stream);
       },
+      now: () => clock.now,
     },
     createLogger("test", "silent"),
   );
@@ -148,10 +153,26 @@ describe("EngineResourceMonitor", () => {
     expect(monitor.latest()[0]?.cacheBytes).toBe(80 * MB);
 
     // After a restart the engine starts over, and a first reading above the idle memory counts from that.
-    fresh.startedAt = "2026-11-07T11:00:00Z";
+    fresh.startedAt = "2026-11-07T10:30:00Z";
     fresh.memory = { usedBytes: IDLE_ENGINE_MEMORY_BYTES + 60 * MB, limitBytes: 768 * MB };
     await monitor.sample();
     expect(monitor.latest()[0]?.cacheBytes).toBe(60 * MB);
+  });
+
+  it("leaves out readings taken while an engine is still loading", async () => {
+    const starting = { ...engine("a", "s1", 20), startedAt: new Date(clock.now - 1000).toISOString() };
+    const { monitor } = setup([starting]);
+    await monitor.sample();
+    expect(monitor.latest()[0]?.cacheBytes).toBe(0);
+
+    clock.now += ENGINE_LOADING_MS;
+    starting.memory = { usedBytes: 120 * MB, limitBytes: 768 * MB };
+    await monitor.sample();
+    clock.now += 60_000;
+    starting.memory = { usedBytes: 170 * MB, limitBytes: 768 * MB };
+    await monitor.sample();
+    // Counted from 120 MiB, not from the 20 MiB it used while loading.
+    expect(monitor.latest()[0]?.cacheBytes).toBe(50 * MB);
   });
 
   it("counts each out-of-memory kill once, after the runtime restarted the engine", async () => {

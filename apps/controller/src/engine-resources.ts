@@ -8,6 +8,12 @@ import type { ContainerDetails, DockerClient } from "./docker.ts";
  */
 export const IDLE_ENGINE_MEMORY_BYTES = 145 * 1024 * 1024;
 
+/**
+ * Readings this soon after an engine started don't count as its idle memory: the engine may still
+ * be loading (it took about 3 s on the x86 engine in CI) and use far less than once it runs.
+ */
+export const ENGINE_LOADING_MS = 20_000;
+
 /** Memory of one engine container. */
 export interface EngineMemory {
   stream: string;
@@ -37,9 +43,9 @@ export function engineCacheLimit(env: readonly string[] | null | undefined): num
 
 /**
  * Estimated memory cache use: the memory above an idle engine's, at most the cap. The idle memory is
- * the engine's lowest reading, which an engine sampled soon after it started shows, or
- * IDLE_ENGINE_MEMORY_BYTES when that is lower (an engine first seen with a full cache, such as after
- * a controller restart).
+ * the engine's lowest reading once it finished loading, which an engine sampled soon after it
+ * started shows, or IDLE_ENGINE_MEMORY_BYTES when that is lower (an engine first seen with a full
+ * cache, such as after a controller restart).
  */
 export function estimateCacheBytes(usedBytes: number, lowestBytes: number, cacheLimitBytes: number | null): number {
   const aboveIdle = Math.max(0, usedBytes - Math.min(lowestBytes, IDLE_ENGINE_MEMORY_BYTES));
@@ -50,14 +56,14 @@ export interface EngineResourceOptions {
   stack: string;
   /** Called once for every out-of-memory kill seen. */
   onOomKill: (stream: string) => void;
+  now?: () => number;
 }
 
 /**
  * Samples the memory of every engine of the stack and notices out-of-memory kills, so the
  * dashboards show how close engines run to their limit (ENGINE_MEMORY_MB) and how full their memory
- * cache is. The container runtime
- * restarts an engine killed this way, which only shows in its inspect data: the last exit time
- * changes and OOMKilled is set.
+ * cache is. The container runtime restarts an engine killed this way, which only shows in its
+ * inspect data: the last exit time changes and OOMKilled is set.
  */
 export class EngineResourceMonitor {
   private readonly docker: DockerClient;
@@ -66,7 +72,7 @@ export class EngineResourceMonitor {
   private memory: EngineMemory[] = [];
   /** Last exit time seen per container id. */
   private readonly lastExit = new Map<string, string>();
-  /** Lowest memory reading per container id, since its last start. */
+  /** Lowest memory reading per container id once it finished loading, since its last start. */
   private readonly lowest = new Map<string, { startedAt: string; bytes: number }>();
 
   constructor(docker: DockerClient, options: EngineResourceOptions, logger: Logger) {
@@ -121,12 +127,19 @@ export class EngineResourceMonitor {
     this.memory = memory;
   }
 
-  /** Updates and returns the container's lowest memory reading; a restart starts it over. */
+  /**
+   * Updates and returns the container's lowest memory reading once it finished loading; a restart
+   * starts it over. While it loads, IDLE_ENGINE_MEMORY_BYTES stands in. An unreadable start time
+   * counts as loaded.
+   */
   private lowestBytes(details: ContainerDetails | undefined, usedBytes: number): number {
     if (details === undefined) {
       return usedBytes;
     }
     const startedAt = details.State.StartedAt;
+    if ((this.options.now ?? Date.now)() - Date.parse(startedAt) < ENGINE_LOADING_MS) {
+      return IDLE_ENGINE_MEMORY_BYTES;
+    }
     const previous = this.lowest.get(details.Id);
     const bytes = previous?.startedAt === startedAt ? Math.min(previous.bytes, usedBytes) : usedBytes;
     this.lowest.set(details.Id, { startedAt, bytes });

@@ -61,10 +61,11 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
   expect(cache).toBeGreaterThanOrEqual(0);
   expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
-  // The broadcast runner is the only peer and needs nothing from us, but the count is there.
+  // The broadcast runner is the only peer and needs nothing from us: acknowledgements of what it
+  // sends don't count as uploads.
   await expect
     .poll(() => value(String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`))
-    .toBeGreaterThanOrEqual(0);
+    .toBe(0);
 });
 
 test("detects infohashes without being told", async ({ page, request }) => {

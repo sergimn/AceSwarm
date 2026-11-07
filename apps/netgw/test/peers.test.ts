@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/exec.ts";
 import { StaticGeoLookup, type GeoLookup } from "../src/geoip.ts";
-import { parseConntrack, PeerTracker, UPLOAD_MIN_BYTES } from "../src/peers.ts";
+import { PACKET_OVERHEAD_BYTES, parseConntrack, PeerTracker, UPLOAD_MIN_BYTES } from "../src/peers.ts";
 
 const ENGINE = "172.31.250.130";
 
-function udp(remote: string, bytes: number, port = 8621, sent = 900): string {
-  return `udp      17 29 src=${ENGINE} dst=${remote} sport=8621 dport=${String(port)} packets=10 bytes=${String(sent)} src=${remote} dst=198.51.100.2 sport=${String(port)} dport=8621 packets=12 bytes=${String(bytes)} mark=0 use=1`;
+function udp(remote: string, bytes: number, port = 8621, sent = 900, sentPackets = 10): string {
+  return `udp      17 29 src=${ENGINE} dst=${remote} sport=8621 dport=${String(port)} packets=${String(sentPackets)} bytes=${String(sent)} src=${remote} dst=198.51.100.2 sport=${String(port)} dport=8621 packets=12 bytes=${String(bytes)} mark=0 use=1`;
+}
+
+/** Flows to three peers, with the bytes and packets the engine sent each. */
+function flows(sent: [number, number][]): string {
+  return ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+    .map((remote, index) => udp(remote, 1000, 8621, sent[index]![0], sent[index]![1]))
+    .join("\n");
 }
 
 const TCP_ESTABLISHED = `ipv4     2 tcp      6 431999 ESTABLISHED src=${ENGINE} dst=93.184.216.34 sport=40000 dport=7764 packets=5 bytes=400 src=93.184.216.34 dst=198.51.100.2 sport=7764 dport=40000 packets=6 bytes=5000 [ASSURED] mark=0 use=1`;
@@ -33,6 +40,7 @@ describe("parseConntrack", () => {
       replied: true,
       receivedBytes: 5000,
       sentBytes: 900,
+      sentPackets: 10,
     });
     expect(established).toMatchObject({
       protocol: "tcp",
@@ -56,29 +64,43 @@ describe("PeerTracker", () => {
     expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 1, countries: [{ code: "US", count: 1 }] });
   });
 
-  it("counts the peers the engine sent at least one block of data to since the previous sample", () => {
+  it("counts the peers the engine sent at least one block of stream data to since the previous sample", () => {
     const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [], () => 0);
     tracker.update(
       parseConntrack(
-        [udp("1.1.1.1", 1000, 8621, 100), udp("8.8.8.8", 1000, 8621, 100), udp("9.9.9.9", 1000, 8621, 50_000)].join(
-          "\n",
-        ),
+        flows([
+          [100, 1],
+          [100, 1],
+          [50_000, 30],
+        ]),
       ),
     );
     // A flow seen for the first time counts everything it sent so far.
     expect(tracker.get(ENGINE)).toMatchObject({ uploading: 1 });
 
-    // 1.1.1.1 got requests only, 8.8.8.8 a block of data, 9.9.9.9 nothing new.
+    // 1.1.1.1 got 400 acknowledgements (more bytes than a block, but no stream data), 8.8.8.8 a block
+    // in 12 packets, 9.9.9.9 nothing new.
+    const block = UPLOAD_MIN_BYTES + 12 * PACKET_OVERHEAD_BYTES;
     tracker.update(
       parseConntrack(
-        [
-          udp("1.1.1.1", 2000, 8621, 100 + UPLOAD_MIN_BYTES - 1),
-          udp("8.8.8.8", 2000, 8621, 100 + UPLOAD_MIN_BYTES),
-          udp("9.9.9.9", 2000, 8621, 50_000),
-        ].join("\n"),
+        flows([
+          [100 + 400 * 52, 401],
+          [100 + block, 13],
+          [50_000, 30],
+        ]),
       ),
     );
-    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 3, uploading: 1 });
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, uploading: 1 });
+    tracker.update(
+      parseConntrack(
+        flows([
+          [100 + 400 * 52, 401],
+          [100 + block + block - 1, 25],
+          [50_000, 30],
+        ]),
+      ),
+    );
+    expect(tracker.get(ENGINE)).toMatchObject({ uploading: 0 });
   });
 
   it("ignores private remotes, other subnets and ignored ports", () => {

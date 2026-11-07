@@ -859,7 +859,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Peers each engine sent stream data to (at least 16 KiB in 5 s), from the gateway's connection table. Without an open inbound port, an engine only reaches the peers it connects to itself, which rarely need data from it, so this stays low. Every stream on a shared engine shows the same peers.",
+      "description": "Peers each engine sent stream data to between two gateway samples (at least one 16 KiB block, not counting packet headers and acknowledgements), from the gateway's connection table. Only peers the engine connected to itself count: the gateway forwards no inbound ports. Every stream on a shared engine shows the same peers.",
       "gridPos": {
         "h": 8,
         "w": 12,
