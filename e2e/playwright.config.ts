@@ -16,6 +16,9 @@ export default defineConfig({
   retries: 0,
   // Real engines buffer, and recovering a stream climbs a ladder of restarts before a path move.
   timeout: 480_000,
+  // In CI the whole run stops at 30 minutes (it usually takes about 14), before the workflow
+  // step's own limit, so the report of a stuck run is still written and uploaded.
+  globalTimeout: process.env["CI"] === undefined ? 0 : 1_800_000,
   expect: { timeout: 60_000 },
   reporter: process.env["CI"] === undefined ? "list" : [["list"], ["html", { open: "never" }]],
   use: {
