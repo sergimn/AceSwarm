@@ -4,6 +4,9 @@
 #   source  three dummy live broadcasts from real Acestream engines, plus the tracker players use
 #   stack   AceSwarm with real engines, and the Playwright tests
 #
+# The whole set runs twice, side by side: with Docker, and with rootless Podman through its
+# Docker-compatible API (e2e/podman.sh). Each leg has its own three runners and its own mesh.
+#
 # The runners can't accept connections from the internet, so they first join a WireGuard mesh by
 # hole punching, using STUN and this run's artifacts to find each other (e2e/mesh.sh). The
 # WireGuard server and the broadcasts then start in parallel. e2e/README.md has diagrams.
@@ -26,15 +29,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Per attempt, so a re-run never picks up the addresses of runners that are gone.
-  MESH_ARTIFACT_PREFIX: mesh-${{ github.run_attempt }}-
-
 jobs:
   wg:
-    name: WireGuard server
+    name: WireGuard server${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    env:
+      # Per leg and attempt, so a re-run never picks up the addresses of runners that are gone.
+      MESH_ARTIFACT_PREFIX: mesh-${{ matrix.runtime }}-${{ github.run_attempt }}-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,9 +75,15 @@ jobs:
           e2e/vpn.sh logs
 
   source:
-    name: Dummy Acestream broadcast
+    name: Dummy Acestream broadcast${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    env:
+      MESH_ARTIFACT_PREFIX: mesh-${{ matrix.runtime }}-${{ github.run_attempt }}-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,9 +118,20 @@ jobs:
           e2e/broadcast.sh logs
 
   stack:
-    name: AceSwarm with real engines
-    runs-on: ubuntu-24.04
+    name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: docker
+            os: ubuntu-24.04
+          # Rootless Podman 5 from the distribution, as on a current Ubuntu host.
+          - runtime: podman
+            os: ubuntu-26.04
+    env:
+      MESH_ARTIFACT_PREFIX: mesh-${{ matrix.runtime }}-${{ github.run_attempt }}-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,6 +153,9 @@ jobs:
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
+      - name: Set up rootless Podman
+        if: matrix.runtime == 'podman'
+        run: e2e/podman.sh setup
       - run: npm ci
       - run: npx playwright install --with-deps chromium ffmpeg
       - name: Build the images and start AceSwarm
@@ -158,7 +184,7 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-results-${{ github.run_attempt }}
+          name: e2e-results-${{ matrix.runtime }}-${{ github.run_attempt }}
           path: |
             playwright-report/
             test-results/

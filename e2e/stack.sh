@@ -3,6 +3,9 @@
 # starts or stops the stack. See e2e/README.md.
 #
 #   e2e/stack.sh build|up|down|logs
+#
+# With E2E_RUNTIME=podman (set by e2e/podman.sh setup), the images are built with Podman and the
+# docker CLI talks to Podman's API through DOCKER_HOST.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,10 +20,13 @@ compose() {
 }
 
 build() {
+  local builder=docker
+  # Podman's API has no BuildKit, so its images are built with Podman itself (same storage).
+  [[ "${E2E_RUNTIME:-docker}" == podman ]] && builder=podman
   for target in controller transcoder netgw; do
-    docker build -q --target "$target" -t "aceswarm-${target}:e2e" . >/dev/null
+    "$builder" build -q --target "$target" -t "aceswarm-${target}:e2e" . >/dev/null
   done
-  docker build -q -f engine/Dockerfile -t aceswarm-engine:e2e . >/dev/null
+  "$builder" build -q -f engine/Dockerfile -t aceswarm-engine:e2e . >/dev/null
 }
 
 down() {
@@ -31,6 +37,9 @@ down() {
 
 logs() {
   compose logs --no-color
+  # What the gateway runs as and can reach: its WireGuard setup writes and reads these paths.
+  echo "--- netgw identity and runtime directories"
+  compose exec -T netgw sh -c 'id; grep -E "^Cap(Eff|Bnd)" /proc/self/status; cat /proc/self/attr/current 2>/dev/null; echo; ls -land /run /run/aceswarm /run/wireguard /config/wireguard /config/wireguard/* 2>&1; grep -E " /(run|config)" /proc/self/mountinfo' || true
   local engine
   for engine in $(docker ps -aq --filter "label=aceswarm.stack=${ACESWARM_STACK_NAME}"); do
     echo "--- engine $(docker inspect -f '{{.Name}}' "$engine")"

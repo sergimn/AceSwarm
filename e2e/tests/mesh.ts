@@ -66,22 +66,34 @@ export async function lastAnnounce(infohash: string, ip: string): Promise<string
   return times.toSorted((a, b) => a.localeCompare(b, "en")).at(-1) ?? "";
 }
 
-/** Adds or removes a DROP rule for traffic this runner's containers forward (DOCKER-USER). */
+const PODMAN = process.env["E2E_RUNTIME"] === "podman";
+
+/**
+ * iptables where this runner's container traffic is forwarded: the host's DOCKER-USER chain with
+ * Docker, the FORWARD chain of rootless Podman's network namespace with Podman (e2e/podman.sh).
+ * Either one sees the containers' traffic only, not the runner's own.
+ */
+function iptables(args: string[], options: { stdio?: "ignore" } = {}): void {
+  execFileSync(PODMAN ? "e2e/podman.sh" : "sudo", ["iptables", ...args], options);
+}
+
+/** Adds or removes a DROP rule for traffic this runner's containers forward. */
 function setForwardDrop(match: string[], drop: boolean): void {
-  const rule = ["DOCKER-USER", ...match, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
+  const chain = PODMAN ? "FORWARD" : "DOCKER-USER";
+  const rule = [chain, ...match, "-m", "comment", "--comment", "aceswarm-e2e", "-j", "DROP"];
   const present = (): boolean => {
     try {
-      execFileSync("sudo", ["iptables", "-C", ...rule], { stdio: "ignore" });
+      iptables(["-C", ...rule], { stdio: "ignore" });
       return true;
     } catch {
       return false;
     }
   };
   if (drop && !present()) {
-    execFileSync("sudo", ["iptables", "-I", ...rule]);
+    iptables(["-I", ...rule]);
   }
   while (!drop && present()) {
-    execFileSync("sudo", ["iptables", "-D", ...rule]);
+    iptables(["-D", ...rule]);
   }
 }
 
