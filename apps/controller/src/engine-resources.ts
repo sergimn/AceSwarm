@@ -1,5 +1,5 @@
 import type { Logger } from "@aceswarm/shared/logger";
-import type { ContainerDetails, DockerClient } from "./docker.ts";
+import type { ContainerDetails, ContainerSummary, DockerClient } from "./docker.ts";
 
 /** Memory of one engine container. */
 export interface EngineMemory {
@@ -8,6 +8,25 @@ export interface EngineMemory {
   engine: string;
   usedBytes: number;
   limitBytes: number;
+}
+
+/** Engine containers running, by kind. */
+export interface EngineCount {
+  /** Engines of one stream: the one it plays from, its standbys on other paths, one it keeps to retry a move. */
+  own: number;
+  /** Engines of a network path that all its streams share. */
+  shared: number;
+}
+
+/** Counts the running engines of a container list; paused, restarting or stopped ones don't count. */
+function countRunning(containers: readonly ContainerSummary[]): EngineCount {
+  const count: EngineCount = { own: 0, shared: 0 };
+  for (const container of containers) {
+    if (container.State === "running") {
+      count[container.Labels["aceswarm.shared-path"] === undefined ? "own" : "shared"] += 1;
+    }
+  }
+  return count;
 }
 
 export interface EngineResourceOptions {
@@ -26,6 +45,8 @@ export class EngineResourceMonitor {
   private readonly docker: DockerClient;
   private readonly options: EngineResourceOptions;
   private readonly logger: Logger;
+  /** Undefined until the first sample. */
+  private count: EngineCount | undefined;
   private memory: EngineMemory[] = [];
   /** Last exit time seen per container id. */
   private readonly lastExit = new Map<string, string>();
@@ -40,11 +61,17 @@ export class EngineResourceMonitor {
     return this.memory;
   }
 
+  /** The engines running at the last sample; undefined before the first. */
+  running(): EngineCount | undefined {
+    return this.count;
+  }
+
   async sample(): Promise<void> {
     const containers = await this.docker.listContainers({
       "aceswarm.stack": this.options.stack,
       "aceswarm.role": "engine",
     });
+    this.count = countRunning(containers);
     const memory: EngineMemory[] = [];
     const seen = new Set<string>();
     for (const container of containers) {

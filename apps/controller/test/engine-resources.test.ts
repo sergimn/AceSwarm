@@ -6,6 +6,10 @@ import { EngineResourceMonitor } from "../src/engine-resources.ts";
 interface FakeEngine {
   id: string;
   stream: string;
+  /** Set for a path's shared engine, which has no stream label. */
+  sharedPath?: string;
+  /** The container state when it is neither running nor exited, such as paused. */
+  state?: string;
   running: boolean;
   finishedAt: string;
   oomKilled: boolean;
@@ -33,8 +37,11 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
         engines.map((entry) => ({
           Id: entry.id,
           Names: [`/aceswarm-engine-${entry.stream}-1`],
-          State: entry.running ? "running" : "exited",
-          Labels: { "aceswarm.stream": entry.stream },
+          State: entry.state ?? (entry.running ? "running" : "exited"),
+          Labels:
+            entry.sharedPath === undefined
+              ? { "aceswarm.stream": entry.stream }
+              : { "aceswarm.shared-path": entry.sharedPath },
         })),
       ),
     inspectContainer: (id: string): Promise<ContainerDetails | undefined> => {
@@ -115,5 +122,22 @@ describe("EngineResourceMonitor", () => {
     await monitor.sample();
 
     expect(kills).toEqual([]);
+  });
+
+  it("counts the running engines, own and shared, from the last sample", async () => {
+    const shared = { ...engine("d", "", 200), sharedPath: "wg:vpn" };
+    const restarting = { ...engine("e", "", 0), sharedPath: "direct", state: "restarting" };
+    const paused = { ...engine("f", "s4", 100), state: "paused" };
+    const stopped = { ...engine("c", "s3", 10), running: false };
+    const engines = [engine("a", "s1", 300), engine("b", "s1", 200), shared, restarting, paused, stopped];
+    const { monitor } = setup(engines);
+    expect(monitor.running()).toBeUndefined();
+
+    await monitor.sample();
+    expect(monitor.running()).toEqual({ own: 2, shared: 1 });
+
+    engines.splice(0, 3);
+    await monitor.sample();
+    expect(monitor.running()).toEqual({ own: 0, shared: 0 });
   });
 });

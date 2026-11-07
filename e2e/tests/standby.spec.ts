@@ -5,6 +5,7 @@ import {
   docker,
   engineContainers,
   gatewayAssignments,
+  reportedEngines,
   resetStack,
   sharedEngineContainers,
   snapshot,
@@ -108,6 +109,8 @@ test("keeps a hot standby on the VPN once the stream plays", async ({ request })
     .toBe(`${VPN_PATH} hot`);
   // An engine of its own on the VPN, routed through the tunnel.
   expect(engineContainers(run.streamId)).toHaveLength(2);
+  // The dashboard's "Engines running" counts the standby's engine too.
+  await expect.poll(() => reportedEngines(request)).toEqual({ own: 2, shared: 0 });
   expect(gatewayAssignments().map(({ path }) => path)).toContain(VPN_PATH);
   expect((await stream(request)).path).toBe("direct");
 });

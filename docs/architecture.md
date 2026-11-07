@@ -209,7 +209,7 @@ Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engi
   - engine memory near its limit, and out-of-memory kills,
   - a service being down.
 - **Logs.** Alloy discovers the stack's containers through a second socket proxy that allows no changes. It labels their logs by service, role and stream, then ships them to Loki.
-- **Dashboard.** It ships as portable JSON with data source variables, so it can be imported into an existing Grafana.
+- **Dashboard.** It ships as portable JSON with data source variables, so it can be imported into an existing Grafana. Its top row shows the streams live and configured, the engines running, the paths up and the recoveries. The engine count comes from the container runtime every `ENGINE_STATS_SECONDS` (15), so it includes every engine container: the ones streams play from, hot standbys, shared engines, and engines kept for a retry or idle after their last stream left.
 
 ## Tests
 
