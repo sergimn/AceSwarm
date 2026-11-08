@@ -545,7 +545,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "Delivering (green): the stream plays and produces new video frames (aceswarm_stream_up). Not delivering (red): any other state, such as starting, buffering, stalled, recovering, switching path, off or error. Waiting for source (dark red): the broadcast's live edge has not moved for STALE_SOURCE_SECONDS (the stream's stale-source state), so no old video is published and the stream retries until the broadcast is back. Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
+      "description": "Delivering (green): the stream plays (Live in the UI) and produces new video frames (aceswarm_stream_up). Waiting for source (dark red): the stream is stale-source, because its source's live edge has not moved for STALE_SOURCE_SECONDS (60 by default) or the engine serves it that far behind. No old video is published, and the stream retries until the broadcast is back. Not delivering (red): every other state (starting, buffering, stalled, recovering, switching path, off or error). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
     },
     {
       "type": "bargauge",
