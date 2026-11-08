@@ -150,7 +150,7 @@ With **Hot standby on other paths** on (the default; `PATCH /api/settings`, `{ "
 - **Background work.** Standbys start, open their sessions, start again and go in the background, so the stream's own checks never wait for them. At most two standby engines start (or start again) at once, across all streams.
 - **Shared engines** count a stream's standby session and its play role on an engine separately, so a failed move to the engine of a path where the stream also has a standby leaves that standby counted.
 - **After a controller restart,** standbys aren't taken over: the stream's own engine is, and the others are removed. New standbys start once the stream plays.
-- **Metrics.** `aceswarm_stream_standby{stream, path, state}` (`starting`, `warming`, `hot`, `failed`) and `aceswarm_shared_engine_standbys{path, engine}`.
+- **Metrics.** `aceswarm_stream_standby{stream, path, state}` (`starting`, `warming`, `hot`, `failed`) and `aceswarm_shared_engine_standbys{path, engine}`. The dashboard's "Delivering new frames" timeline shows a stream that plays with at least one hot standby in blue ("High availability"), and one that plays without in green ("Delivering").
 
 ### Viewers
 
