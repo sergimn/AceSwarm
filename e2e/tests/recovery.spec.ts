@@ -9,13 +9,13 @@ const bc: Broadcast[] = [];
 test.beforeAll(async ({ request }) => {
   setDirectPathBlocked(false);
   await resetStack(request);
-  bc.push(...(await broadcasts(2)));
+  bc.push(...(await broadcasts(3)));
 });
 
 test.afterAll(async () => {
   setDirectPathBlocked(false);
-  if (bc[0] !== undefined) {
-    await setBroadcastInput(bc[0], true);
+  if (bc[2] !== undefined) {
+    await setBroadcastInput(bc[2], true);
   }
 });
 
@@ -72,7 +72,9 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
   request,
 }) => {
   await resetStack(request);
-  const stream = await addStream(request, bc[0]!.infohash, "Paused");
+  // The third broadcast, whose input this stops and starts: streams.spec measures how much an
+  // engine of the first one uploads, and nothing should have disturbed that one.
+  const stream = await addStream(request, bc[2]!.infohash, "Paused");
   await waitForPlaying(request, stream.id);
   await expect
     .poll(async () => (await streamById(request, stream.id))?.liveEdge?.state, { timeout: 30_000 })
@@ -81,7 +83,7 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
 
   // The source engine keeps running with the window it has, and so does the stream's engine:
   // data still comes for each new session, but the live edge stops (STALE_SOURCE_SECONDS: 30).
-  await setBroadcastInput(bc[0]!, false);
+  await setBroadcastInput(bc[2]!, false);
   try {
     await expect
       .poll(async () => (await streamById(request, stream.id))?.state, { timeout: 120_000, intervals: [1000] })
@@ -108,7 +110,7 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     expect(tries).toBeGreaterThanOrEqual(1);
     expect(tries).toBeLessThanOrEqual(4);
   } finally {
-    await setBroadcastInput(bc[0]!, true);
+    await setBroadcastInput(bc[2]!, true);
   }
 
   // The next new session gets new data: it plays again, from video that is new.
