@@ -520,11 +520,11 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "Down",
+                  "text": "Not delivering",
                   "color": "red"
                 },
                 "1": {
-                  "text": "Up",
+                  "text": "Delivering",
                   "color": "green"
                 },
                 "2": {
@@ -535,24 +535,7 @@
             }
           ],
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              },
-              {
-                "color": "dark-red",
-                "value": 2
-              }
-            ]
+            "mode": "fixed"
           }
         },
         "overrides": []
@@ -562,7 +545,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "Green while the stream produces new video frames (aceswarm_stream_up). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red at first, then dark red, \"Waiting for source\", once its live edge has not moved for STALE_SOURCE_SECONDS (the stream's stale-source state), until the broadcast is back."
+      "description": "Delivering (green): the stream plays (Live in the UI) and produces new video frames (aceswarm_stream_up). Waiting for source (dark red): the stream is stale-source, because its source's live edge has not moved for STALE_SOURCE_SECONDS (60 by default) or the engine serves it that far behind. No old video is published, and the stream retries until the broadcast is back. Not delivering (red): every other state (starting, buffering, stalled, recovering, switching path, off or error). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
     },
     {
       "type": "bargauge",
@@ -1544,20 +1527,7 @@
             }
           ],
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
+            "mode": "fixed"
           }
         },
         "overrides": []
