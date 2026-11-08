@@ -1,7 +1,9 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, test, vi } from "vitest";
 import {
+  CHECK_PRIORITY,
   DEFAULT_DECODE_CHECK_SETTINGS,
+  type CheckPriority,
   type DecodeCheck,
   type DecodeChecker,
   type DecodeResult,
@@ -38,18 +40,23 @@ function fakeEngine(status = 200) {
 
 /** Decode checks that each test ends by hand. */
 function fakeDecoder(free = true) {
-  const checks: { fed: Uint8Array[]; urgent: boolean; stopped: boolean; end: (result: DecodeResult) => void }[] = [];
-  const asked: { who: object; urgent: boolean }[] = [];
+  const checks: {
+    fed: Uint8Array[];
+    priority: CheckPriority;
+    stopped: boolean;
+    end: (result: DecodeResult) => void;
+  }[] = [];
+  const asked: { who: object; priority: CheckPriority }[] = [];
   const cancelled: object[] = [];
   const decoder: DecodeChecker = {
     settings: { ...DEFAULT_DECODE_CHECK_SETTINGS, intervalMs: 60_000, retryMs: 10_000, maxRetryMs: 30_000 },
-    start: (who, urgent): DecodeCheck | undefined => {
-      asked.push({ who, urgent });
+    start: (who, priority): DecodeCheck | undefined => {
+      asked.push({ who, priority });
       if (!free) {
         return undefined;
       }
       const { promise, resolve } = Promise.withResolvers<DecodeResult>();
-      const check = { fed: [] as Uint8Array[], urgent, stopped: false, end: resolve };
+      const check = { fed: [] as Uint8Array[], priority, stopped: false, end: resolve };
       checks.push(check);
       return {
         result: promise,
@@ -225,8 +232,8 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(readers.status()[0]?.lastDataAt).toBe(new Date(1000).toISOString());
     });
-    // A standby without a passed check asks as urgent.
-    expect(checks).toMatchObject([{ urgent: true }]);
+    // A standby never checked asks ahead of routine re-checks.
+    expect(checks).toMatchObject([{ priority: CHECK_PRIORITY.first }]);
     expect(fedBytes(checks[0])).toBe(940);
 
     clock.now = 2000;
@@ -242,7 +249,7 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(2);
     });
-    expect(checks[1]?.urgent).toBe(false);
+    expect(checks[1]?.priority).toBe(CHECK_PRIORITY.routine);
     expect(asked.every(({ who }) => who === asked[0]?.who)).toBe(true);
     readers.closeAll();
     expect(checks[1]?.stopped).toBe(true);
@@ -291,7 +298,13 @@ describe("StandbyReaders", () => {
     });
     expect(checks).toHaveLength(3);
     await failAt(31_000 + 30_000, 4);
-    expect(checks.every((check) => check.urgent)).toBe(true);
+    // After a failure, its data doesn't count: it asks ahead of the rest.
+    expect(checks.map((check) => check.priority)).toEqual([
+      CHECK_PRIORITY.first,
+      CHECK_PRIORITY.afterFailure,
+      CHECK_PRIORITY.afterFailure,
+      CHECK_PRIORITY.afterFailure,
+    ]);
 
     // A check that passes makes the data count again.
     clock.now = 61_000 + 30_000;
@@ -352,7 +365,7 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(2);
     });
-    expect(checks[1]?.urgent).toBe(true);
+    expect(checks[1]?.priority).toBe(CHECK_PRIORITY.afterFailure);
 
     // The connection drops mid-check at 11 000: the check stops and says nothing.
     engine.bodies[0]?.close();
@@ -375,7 +388,24 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(3);
     });
-    expect(checks[2]?.urgent).toBe(true);
+    expect(checks[2]?.priority).toBe(CHECK_PRIORITY.afterFailure);
+
+    // Cut short again at 21 000: the wait doubles, to 20 s.
+    engine.bodies[1]?.close();
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(3);
+    });
+    clock.now = 21_000 + 19_999;
+    engine.bodies[2]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]?.bytes).toBe(940 * 5);
+    });
+    expect(checks).toHaveLength(3);
+    clock.now = 21_000 + 20_000;
+    engine.bodies[2]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(checks).toHaveLength(4);
+    });
     readers.closeAll();
   });
 

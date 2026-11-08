@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { PipelineStatus, StandbyReaderStatus, StandbySource } from "@aceswarm/shared/api-types";
+import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { Service } from "@aceswarm/shared/service";
 import { Counter, Gauge } from "@prometheus-io/client";
@@ -51,7 +52,15 @@ export class PipelineManager {
     this.standbySettings = standbySettings;
     this.watchLiveEdge = options.watchLiveEdge ?? watchLiveEdge;
     this.decoder =
-      options.decoder ?? createDecodeChecker({ ...DEFAULT_DECODE_CHECK_SETTINGS, ffmpegPath: settings.ffmpegPath });
+      options.decoder ??
+      createDecodeChecker(
+        { ...DEFAULT_DECODE_CHECK_SETTINGS, ffmpegPath: settings.ffmpegPath },
+        {
+          onCannotStart: (error) => {
+            logger.warn({ error: describeError(error) }, "ffmpeg can't start, so no standby's video is checked");
+          },
+        },
+      );
     const registers = [service.registry];
     this.generations = new Counter({
       name: "aceswarm_pipeline_starts_total",

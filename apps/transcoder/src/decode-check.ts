@@ -44,8 +44,15 @@ export interface DecodeCheck {
 }
 
 /**
- * Hands out checks, at most `maxRunning` at once. Who waits longest goes first, but urgent
- * requests (a standby never checked, or whose last check failed) go before routine re-checks.
+ * How soon a standby needs a check: one whose last check failed doesn't count as hot until one
+ * passes, one never checked counts until one fails, and a routine re-check can wait.
+ */
+export const CHECK_PRIORITY = { routine: 0, first: 1, afterFailure: 2 } as const;
+export type CheckPriority = (typeof CHECK_PRIORITY)[keyof typeof CHECK_PRIORITY];
+
+/**
+ * Hands out checks, at most `maxRunning` at once. Higher priorities go first, and among the same
+ * priority who waits longest.
  */
 export interface DecodeChecker {
   readonly settings: DecodeCheckSettings;
@@ -53,12 +60,19 @@ export interface DecodeChecker {
    * A check for `who` if it is its turn and one is free; otherwise it waits in line (asking again
    * keeps its place) and gets undefined.
    */
-  start: (who: object, urgent: boolean) => DecodeCheck | undefined;
+  start: (who: object, priority: CheckPriority) => DecodeCheck | undefined;
   /** Leaves the line: the reader closed, or its data stopped coming. */
   cancel: (who: object) => void;
 }
 
 export type DecodeSpawner = (command: string, args: string[]) => ChildProcess;
+
+export interface DecodeCheckerOptions {
+  spawner?: DecodeSpawner;
+  now?: () => number;
+  /** Called the first time ffmpeg can't start: no check says anything until it can. */
+  onCannotStart?: (error: unknown) => void;
+}
 
 const defaultSpawner: DecodeSpawner = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "ignore"] });
 
@@ -96,7 +110,7 @@ export function decodeCheckArgs(): string[] {
 
 interface Waiting {
   who: object;
-  urgent: boolean;
+  priority: CheckPriority;
   /** Its place in line. */
   since: number;
   /** When it last asked. */
@@ -110,12 +124,20 @@ interface Waiting {
  */
 export function createDecodeChecker(
   settings: DecodeCheckSettings = DEFAULT_DECODE_CHECK_SETTINGS,
-  spawner: DecodeSpawner = defaultSpawner,
-  now: () => number = Date.now,
+  options: DecodeCheckerOptions = {},
 ): DecodeChecker {
+  const { spawner = defaultSpawner, now = Date.now } = options;
   let running = 0;
   let order = 0;
   const line = new Map<object, Waiting>();
+  let warned = false;
+  const cannotStart = (error: unknown): void => {
+    if (warned) {
+      return;
+    }
+    warned = true;
+    options.onCannotStart?.(error);
+  };
 
   /** Who goes next among those still asking. */
   function next(): Waiting | undefined {
@@ -130,8 +152,8 @@ export function createDecodeChecker(
     for (const waiting of line.values()) {
       if (
         best === undefined ||
-        (waiting.urgent && !best.urgent) ||
-        (waiting.urgent === best.urgent && waiting.since < best.since)
+        waiting.priority > best.priority ||
+        (waiting.priority === best.priority && waiting.since < best.since)
       ) {
         best = waiting;
       }
@@ -141,12 +163,12 @@ export function createDecodeChecker(
 
   return {
     settings,
-    start: (who, urgent) => {
+    start: (who, priority) => {
       const waiting = line.get(who);
       if (waiting === undefined) {
-        line.set(who, { who, urgent, since: order++, askedAt: now() });
+        line.set(who, { who, priority, since: order++, askedAt: now() });
       } else {
-        waiting.urgent = urgent;
+        waiting.priority = priority;
         waiting.askedAt = now();
       }
       if (running >= settings.maxRunning || next()?.who !== who) {
@@ -154,7 +176,7 @@ export function createDecodeChecker(
       }
       line.delete(who);
       running += 1;
-      const check = runCheck(settings, spawner, now);
+      const check = runCheck(settings, { spawner, now, cannotStart });
       void check.result.finally(() => {
         running -= 1;
       });
@@ -166,7 +188,14 @@ export function createDecodeChecker(
   };
 }
 
-function runCheck(settings: DecodeCheckSettings, spawner: DecodeSpawner, now: () => number): DecodeCheck {
+interface RunDeps {
+  spawner: DecodeSpawner;
+  now: () => number;
+  cannotStart: (error: unknown) => void;
+}
+
+function runCheck(settings: DecodeCheckSettings, deps: RunDeps): DecodeCheck {
+  const { spawner, now, cannotStart } = deps;
   const { promise: result, resolve: settle } = Promise.withResolvers<DecodeResult>();
   let child: ChildProcess | undefined;
   let done = false;
@@ -198,7 +227,8 @@ function runCheck(settings: DecodeCheckSettings, spawner: DecodeSpawner, now: ()
 
   try {
     child = spawner(settings.ffmpegPath, decodeCheckArgs());
-  } catch {
+  } catch (error) {
+    cannotStart(error);
     finish("inconclusive");
   }
   const progress = new ProgressParser();
@@ -212,7 +242,8 @@ function runCheck(settings: DecodeCheckSettings, spawner: DecodeSpawner, now: ()
   });
   // ffmpeg that can't start says nothing about the video; one that gives up on the data found
   // none it could decode (no video stream, or nothing it could read).
-  child?.on("error", () => {
+  child?.on("error", (error) => {
+    cannotStart(error);
     finish("inconclusive");
   });
   child?.on("exit", () => {

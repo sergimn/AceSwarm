@@ -2,7 +2,13 @@ import { setTimeout as wait } from "node:timers/promises";
 import type { StandbyReaderStatus, StandbySource } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { DecodeCheck, DecodeChecker, DecodeResult } from "./decode-check.ts";
+import {
+  CHECK_PRIORITY,
+  type CheckPriority,
+  type DecodeCheck,
+  type DecodeChecker,
+  type DecodeResult,
+} from "./decode-check.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS, LiveEdge, type LiveEdgeSettings, type WatchLiveEdge } from "./live-edge.ts";
 import { TsPackets } from "./ts-packets.ts";
 
@@ -79,6 +85,8 @@ class StandbyReader {
   private decodes: boolean | undefined;
   /** Checks in a row that found no video: the wait before the next one doubles with each. */
   private failedChecks = 0;
+  /** Checks in a row that said nothing: the wait before the next one doubles with these too. */
+  private quietChecks = 0;
   private check: DecodeCheck | undefined;
   private nextCheckAt = 0;
 
@@ -203,14 +211,15 @@ class StandbyReader {
 
   /**
    * Feeds the running decode check every chunk, so that ffmpeg gets the stream without gaps, or
-   * asks for one on MPEG-TS video when it is time. A standby without a passed check asks first.
+   * asks for one on MPEG-TS video when it is time. A standby whose last check failed asks first,
+   * since its data doesn't count meanwhile, then one never checked.
    */
   private decodeCheck(chunk: Uint8Array, video: boolean): void {
     if (this.decoder === undefined) {
       return;
     }
     if (this.check === undefined && video && this.now() >= this.nextCheckAt) {
-      const check = this.decoder.start(this, this.decodes !== true);
+      const check = this.decoder.start(this, this.checkPriority());
       if (check !== undefined) {
         this.check = check;
         void check.result.then((result) => {
@@ -219,6 +228,13 @@ class StandbyReader {
       }
     }
     this.check?.feed(chunk);
+  }
+
+  private checkPriority(): CheckPriority {
+    if (this.decodes === undefined) {
+      return CHECK_PRIORITY.first;
+    }
+    return this.decodes ? CHECK_PRIORITY.routine : CHECK_PRIORITY.afterFailure;
   }
 
   private checked(check: DecodeCheck, result: DecodeResult): void {
@@ -230,17 +246,20 @@ class StandbyReader {
     if (this.isClosed() || settings === undefined) {
       return;
     }
+    const backoff = (tries: number): number => Math.min(settings.retryMs * 2 ** (tries - 1), settings.maxRetryMs);
     // A check that says nothing (stopped with its connection, data that stopped coming, ffmpeg
-    // that couldn't start) leaves the answer as it was, and the next one comes a little later.
+    // that couldn't start) leaves the answer as it was. The next one comes a little later, later
+    // each time in a row, and never sooner than after the failures before it.
     if (result === "inconclusive") {
-      this.nextCheckAt = this.now() + settings.retryMs;
+      this.quietChecks += 1;
+      this.nextCheckAt =
+        this.now() + Math.max(backoff(this.quietChecks), this.failedChecks > 0 ? backoff(this.failedChecks) : 0);
       return;
     }
     const decoded = result === "decoded";
+    this.quietChecks = 0;
     this.failedChecks = decoded ? 0 : this.failedChecks + 1;
-    this.nextCheckAt =
-      this.now() +
-      (decoded ? settings.intervalMs : Math.min(settings.retryMs * 2 ** (this.failedChecks - 1), settings.maxRetryMs));
+    this.nextCheckAt = this.now() + (decoded ? settings.intervalMs : backoff(this.failedChecks));
     if (this.decodes !== decoded) {
       if (decoded) {
         this.logger.info({ source: this.source }, "standby video decodes");
