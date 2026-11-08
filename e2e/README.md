@@ -181,16 +181,16 @@ flowchart LR
   I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
 ```
 
-| Spec                     | Engines | Checks                                                                                                                                                                                                      |
-| ------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                                   |
-| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                               |
-| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                              |
-| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone, a broadcast that stops and comes back: "stale-source", nothing old published, slow retries, fresh video after |
-| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids                     |
-| `standby.spec.ts`        | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off         |
-| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                           |
-| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                           |
+| Spec                     | Engines | Checks                                                                                                                                                                                                                                                                 |
+| ------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                                                                                              |
+| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                                                                                          |
+| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                                                                                         |
+| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone, a broadcast that stops and comes back: "stale-source", nothing old published, slow retries, fresh video after                                                            |
+| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids                                                                                |
+| `standby.spec.ts`        | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off, a broadcast that stops while both its engines hold its old window |
+| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                                                                                      |
+| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                                                                                      |
 
 ### Content IDs and infohashes
 
@@ -340,6 +340,10 @@ sequenceDiagram
   T->>AS: pause the VPN's shared engine, then unpause it
   AS->>AS: fail over to the direct path's shared engine
   T->>AS: turn "Hot standby on other paths" off in the Streams dialog: standbys go
+  T->>AS: turn it on again, without engine sharing: two engines of its own, one standby "hot"
+  T->>AS: stop the broadcast's input: both engines keep its old window and peer with each other
+  AS->>AS: "stale-source", the standby goes, no segment listed or "playing" after the threshold
+  T->>AS: start the input: it plays from new data, and its standby gets hot again
 ```
 
 The faults are engines that hang, not paths that lose the broadcast. With a standby running, cutting the direct path off does not stall the stream: its engine keeps getting the broadcast from the standby, over the engines' network.

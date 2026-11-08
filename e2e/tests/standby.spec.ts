@@ -13,7 +13,7 @@ import {
   waitForPlaying,
   waitForSteadyPlaying,
 } from "./helpers.ts";
-import { broadcasts, remoteWireguardProfile } from "./mesh.ts";
+import { broadcasts, remoteWireguardProfile, setBroadcastInput, type Broadcast } from "./mesh.ts";
 
 /**
  * Hot standby: a stream on the direct path keeps a standby on the VPN that already pulls the
@@ -31,7 +31,7 @@ const VPN_PATH = `wg:${PROFILE}`;
 /** A failover takes seconds; the ladder would take minutes to move the stream. */
 const FAILOVER_TIMEOUT_MS = 120_000;
 /** Filled in by the first test; the tests share one stream. */
-const run = { streamId: "", paused: [] as string[] };
+const run = { streamId: "", paused: [] as string[], broadcast: undefined as Broadcast | undefined };
 
 async function patchSettings(request: APIRequestContext, data: Record<string, boolean>): Promise<void> {
   const response = await request.patch("/api/settings", { data });
@@ -67,6 +67,24 @@ function unpauseEngines(): void {
   }
 }
 
+/** Notes when each segment of the playlist was first listed. */
+async function noteSegments(
+  request: APIRequestContext,
+  playlist: string,
+  firstSeen: Map<string, number>,
+): Promise<void> {
+  const response = await request.get(playlist);
+  if (!response.ok()) {
+    return;
+  }
+  const text = await response.text();
+  for (const line of text.split("\n")) {
+    if (line.length > 0 && !line.startsWith("#") && !firstSeen.has(line)) {
+      firstSeen.set(line, Date.now());
+    }
+  }
+}
+
 /** Polls until the stream plays on `path`, and returns every state it showed meanwhile. */
 async function statesUntilOn(request: APIRequestContext, path: string): Promise<Set<StreamState>> {
   const states = new Set<StreamState>();
@@ -89,11 +107,15 @@ test.beforeAll(async ({ request }) => {
 
 test.afterAll(async ({ request }) => {
   unpauseEngines();
+  if (run.broadcast !== undefined) {
+    await setBroadcastInput(run.broadcast, true);
+  }
   await request.patch("/api/settings", { data: { hotStandby: false, sharedEngines: false } });
 });
 
 test("keeps a hot standby on the VPN once the stream plays", async ({ request }) => {
   const [broadcast] = await broadcasts(1);
+  run.broadcast = broadcast;
   run.streamId = (await addStream(request, broadcast!.infohash, "Standby")).id;
   const playing = await waitForPlaying(request, run.streamId);
   expect(playing.path).toBe("direct");
@@ -209,4 +231,77 @@ test("turning hot standby off removes the standbys", async ({ page, request }) =
   await expect.poll(async () => standbys(request), { timeout: 60_000 }).toEqual([]);
   // The stream plays on.
   expect((await stream(request)).state).toBe("playing");
+});
+
+test("a broadcast that stops: neither engine feeds the other's old window into the stream", async ({ request }) => {
+  // Two engines of its own pull the broadcast: the one it plays from and the standby on the other
+  // path. Once the broadcast stops, each still has the old window, and they are each other's
+  // peers: a new session or a new engine of either one gets that window from the other.
+  await patchSettings(request, { hotStandby: true, sharedEngines: false });
+  await expect
+    .poll(
+      async () => {
+        const view = await stream(request);
+        const standby = view.standbys.map(({ state, engine }) => `${state} shared=${String(engine?.shared)}`);
+        return `${view.state} shared=${String(view.engine?.shared)}; ${standby.join(", ")}`;
+      },
+      { timeout: 300_000, intervals: [2000] },
+    )
+    .toBe("playing shared=false; hot shared=false");
+  expect(engineContainers(run.streamId)).toHaveLength(2);
+  const playlist = (await stream(request)).hls.full;
+  const firstSeen = new Map<string, number>();
+  await noteSegments(request, playlist, firstSeen);
+
+  await setBroadcastInput(run.broadcast!, false);
+  const stoppedAt = Date.now();
+  /** STALE_SOURCE_SECONDS in e2e/compose.e2e.yaml: after this, all it has is old. */
+  const staleAfterMs = 30_000;
+  const playingAt: number[] = [];
+  try {
+    // It waits for the broadcast, and its standby goes: it would only load the same window.
+    const deadline = stoppedAt + 150_000;
+    for (;;) {
+      const view = await stream(request);
+      if (view.state === "playing") {
+        playingAt.push(Date.now());
+      }
+      await noteSegments(request, playlist, firstSeen);
+      if (view.state === "stale-source" && view.standbys.length === 0 && engineContainers(run.streamId).length === 1) {
+        break;
+      }
+      expect(Date.now(), `still ${view.state} with ${String(view.standbys.length)} standbys`).toBeLessThan(deadline);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    // What it published before leaves the playlist once it is older than the threshold.
+    await expect.poll(async () => (await request.get(playlist)).status(), { timeout: 45_000 }).toBe(404);
+    // While it waits, its new sessions and engines get the old window: none of it is published.
+    for (let check = 0; check < 30; check += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const view = await stream(request);
+      expect(view.state).toBe("stale-source");
+      expect(view.standbys).toEqual([]);
+      await noteSegments(request, playlist, firstSeen);
+      expect((await request.get(playlist)).status()).toBe(404);
+    }
+  } finally {
+    await setBroadcastInput(run.broadcast!, true);
+  }
+  // Video from the last seconds before it stopped may still come, from either engine; nothing
+  // listed later than the threshold, or played then, can be anything but old.
+  const late = [...firstSeen].filter(([, at]) => at > stoppedAt + staleAfterMs).map(([uri]) => uri);
+  expect(late).toEqual([]);
+  expect(playingAt.filter((at) => at > stoppedAt + staleAfterMs)).toEqual([]);
+
+  // Back: it plays from new data, and gets its standby again.
+  const back = await waitForPlaying(request, run.streamId, 180_000);
+  expect(back.liveEdge?.state).toBe("live");
+  expect(Date.parse(back.liveEdge!.advancedAt!)).toBeGreaterThan(Date.now() - 15_000);
+  await expect
+    .poll(async () => (await stream(request)).standbys.map(({ state }) => state), {
+      timeout: 300_000,
+      intervals: [2000],
+    })
+    .toEqual(["hot"]);
+  expect(engineContainers(run.streamId)).toHaveLength(2);
 });
