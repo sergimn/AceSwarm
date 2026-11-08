@@ -26,10 +26,10 @@ export interface RecoveryDecision {
  * failures: 0 → restart pipeline, 1 → restart pipeline, 2 → restart engine, 3 → switch path,
  * then alternate engine restart and path switch with growing delays.
  *
- * While the broadcast sends nothing new (`staleSource`), every other try is only a new session,
- * and the others a new engine (every second one of those a path switch, when there is a path to
- * switch to): the broadcast coming back is what helps, and a new session finds that out as well
- * as a new engine, without the churn. An engine whose state is stuck gets replaced all the same.
+ * While the broadcast sends nothing new (`staleSource`), every try replaces the engine: the one
+ * whose live edge stopped goes, so it can't keep its old window, and a new one looks for the
+ * broadcast from scratch. Every second try does that on another path, when there is one to switch
+ * to. (On a shared engine, other streams play from it: only the stream's session starts again.)
  */
 export function nextRecovery(
   state: RecoveryState,
@@ -40,11 +40,7 @@ export function nextRecovery(
   const { failures } = state;
   let action: RecoveryAction;
   if (staleSource) {
-    if (failures % 2 === 0) {
-      action = "restart-pipeline";
-    } else {
-      action = canSwitchPath && failures % 4 === 3 ? "switch-path" : "restart-engine";
-    }
+    action = canSwitchPath && failures % 2 === 1 ? "switch-path" : "restart-engine";
   } else if (failures < 2) {
     action = "restart-pipeline";
   } else if (failures === 2) {

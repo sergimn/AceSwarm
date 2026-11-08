@@ -23,23 +23,9 @@ describe("nextRecovery", () => {
     ]);
   });
 
-  it("alternates a new session and a new engine while the broadcast sends nothing new", () => {
-    expect(actions(8, true, true)).toEqual([
-      "restart-pipeline",
-      "restart-engine",
-      "restart-pipeline",
-      "switch-path",
-      "restart-pipeline",
-      "restart-engine",
-      "restart-pipeline",
-      "switch-path",
-    ]);
-    expect(actions(4, false, true)).toEqual([
-      "restart-pipeline",
-      "restart-engine",
-      "restart-pipeline",
-      "restart-engine",
-    ]);
+  it("replaces the engine on every try while the broadcast sends nothing new", () => {
+    expect(actions(4, true, true)).toEqual(["restart-engine", "switch-path", "restart-engine", "switch-path"]);
+    expect(actions(4, false, true)).toEqual(["restart-engine", "restart-engine", "restart-engine", "restart-engine"]);
   });
 
   it("never switches path when there is nowhere to go", () => {

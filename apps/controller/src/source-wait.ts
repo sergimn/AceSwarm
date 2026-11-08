@@ -92,7 +92,7 @@ export class SourceWait {
 
   /** What the stream does once the wait is over. */
   get next(): string {
-    return this.stale ? "trying a new session" : "retrying";
+    return this.stale ? "trying a new engine" : "retrying";
   }
 
   /** The waits between the ladder's steps. */

@@ -12,7 +12,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   1. restart the stream,
   2. restart its engine,
   3. move it to another network path.
-- **Only new video.** When a broadcast stops, its engine and its peers keep serving the minutes of it they already have. Ace Swarm follows each engine's live edge, the newest data of the broadcast it knows of, and only publishes video while that edge moves. A stream whose broadcast stopped shows "Waiting for source" instead of old video. It tries a new session every so often and plays again once the broadcast is back.
+- **Only new video.** When a broadcast stops, its engine and its peers keep serving the minutes of it they already have. Ace Swarm follows each engine's live edge, the newest data of the broadcast it knows of, and only publishes video while that edge moves. A stream whose broadcast stopped shows "Waiting for source" instead of old video. It replaces that engine with a new one every so often and plays again once the broadcast is back.
 - **Hot standby.** With more than one network path, every playing stream also runs on each other path. When its engine or path fails, it fails over to a standby that already has the stream, within seconds instead of the minute or so a new engine needs to find peers.
 - **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine only restarts when the stream you are watching fails or several of its streams fail at once, and its streams keep their picture while it does.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.

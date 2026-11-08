@@ -1046,7 +1046,7 @@ describe("a broadcast that sends nothing new (stale source)", () => {
     expect(fake.sessions()).toBe(opened + 1);
     expect(fake.instance.view()).toMatchObject({
       state: "stale-source",
-      message: "no new data from the broadcast for 61s; restart pipeline",
+      message: "no new data from the broadcast for 61s; restart engine",
     });
 
     // The new session only has the old window too.
@@ -1064,11 +1064,11 @@ describe("a broadcast that sends nothing new (stale source)", () => {
     }
     // 30 s, then 60 s (the stale waits double, up to RECOVERY_MAX_DELAY_SECONDS: 60 s here).
     expect(actions).toEqual([30, 90, 150, 210]);
-    // Every other try is a new engine: a new session first (with the one at the start).
-    expect(fake.restarted).toHaveLength(2);
+    // Every try replaces the engine, the one at the start too.
+    expect(fake.restarted).toHaveLength(5);
     expect([...states]).toEqual(["stale-source"]);
     expect(fake.instance.view().message).toMatch(
-      /^no new data from the broadcast for 61s; trying a new session in \d+s$/,
+      /^no new data from the broadcast for 61s; trying a new engine in \d+s$/,
     );
   });
 
