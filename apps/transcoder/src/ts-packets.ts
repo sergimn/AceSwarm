@@ -3,6 +3,8 @@ const PACKET_BYTES = 188;
 const SYNC_BYTE = 0x47;
 /** Padding packets, which a muxer sends to keep the bitrate: they carry nothing. */
 const NULL_PID = 0x1f_ff;
+/** PIDs below this carry tables (PAT, SDT, EIT and the like), not audio or video. */
+const FIRST_STREAM_PID = 0x20;
 /** In-sync packets in a row needed to lock on: random bytes all but never line up this long. */
 const LOCK_PACKETS = 5;
 
@@ -17,8 +19,10 @@ export class TsPackets {
 
   /**
    * Feeds the next chunk, and returns how many of the packets it completed carry stream data: in
-   * sync, without the transport error flag, and not padding. A packet whose end hasn't come yet
-   * counts with the chunk that brings it.
+   * sync, without the transport error flag, with a payload, on a PID of audio or video (not a
+   * table) and not padding. A packet whose end hasn't come yet counts with the chunk that brings it.
+   * Which PID holds the video isn't checked (that would mean following the PMT and knowing every
+   * codec's stream type); a decode check covers that.
    */
   push(chunk: Uint8Array): number {
     const data = this.pending.length === 0 ? chunk : concat(this.pending, chunk);
@@ -67,7 +71,8 @@ function carriesData(data: Uint8Array, at: number): boolean {
   const flags = data[at + 1] ?? 0;
   const transportError = (flags & 0x80) !== 0;
   const pid = ((flags & 0x1f) << 8) | (data[at + 2] ?? 0);
-  return !transportError && pid !== NULL_PID;
+  const payload = ((data[at + 3] ?? 0) & 0x10) !== 0;
+  return !transportError && payload && pid >= FIRST_STREAM_PID && pid !== NULL_PID;
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

@@ -1,6 +1,11 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, test, vi } from "vitest";
-import { DEFAULT_DECODE_CHECK_SETTINGS, type DecodeCheck, type DecodeChecker } from "../src/decode-check.ts";
+import {
+  DEFAULT_DECODE_CHECK_SETTINGS,
+  type DecodeCheck,
+  type DecodeChecker,
+  type DecodeResult,
+} from "../src/decode-check.ts";
 import type { LiveEdge } from "../src/live-edge.ts";
 import { StandbyReaders } from "../src/standby-readers.ts";
 import { noise, NULL_PID, tsPackets } from "./ts-fixtures.ts";
@@ -31,32 +36,45 @@ function fakeEngine(status = 200) {
   return { fetch, requests, bodies };
 }
 
-/** Decode checks that each test ends by hand, with or without video. */
+/** Decode checks that each test ends by hand. */
 function fakeDecoder(free = true) {
-  const checks: { fed: number; stopped: boolean; end: (decoded: boolean) => void }[] = [];
+  const checks: { fed: Uint8Array[]; urgent: boolean; stopped: boolean; end: (result: DecodeResult) => void }[] = [];
+  const asked: { who: object; urgent: boolean }[] = [];
+  const cancelled: object[] = [];
   const decoder: DecodeChecker = {
-    settings: { ...DEFAULT_DECODE_CHECK_SETTINGS, intervalMs: 60_000, retryMs: 10_000 },
-    start: (): DecodeCheck | undefined => {
+    settings: { ...DEFAULT_DECODE_CHECK_SETTINGS, intervalMs: 60_000, retryMs: 10_000, maxRetryMs: 30_000 },
+    start: (who, urgent): DecodeCheck | undefined => {
+      asked.push({ who, urgent });
       if (!free) {
         return undefined;
       }
-      const { promise, resolve } = Promise.withResolvers<boolean>();
-      const check = { fed: 0, stopped: false, end: resolve };
+      const { promise, resolve } = Promise.withResolvers<DecodeResult>();
+      const check = { fed: [] as Uint8Array[], urgent, stopped: false, end: resolve };
       checks.push(check);
       return {
         result: promise,
         feed: (chunk) => {
-          check.fed += chunk.length;
+          check.fed.push(chunk);
         },
         stop: () => {
           check.stopped = true;
-          resolve(false);
+          resolve("inconclusive");
         },
       };
     },
+    cancel: (who) => {
+      cancelled.push(who);
+    },
   };
-  return { decoder, checks };
+  return { decoder, checks, asked, cancelled };
 }
+
+/** Lets every pending promise callback run. */
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** How many bytes a check got. */
+const fedBytes = (check: { fed: Uint8Array[] } | undefined): number =>
+  (check?.fed ?? []).reduce((total, chunk) => total + chunk.length, 0);
 
 describe("StandbyReaders", () => {
   test("only counts data that comes while the standby's live edge moves", async () => {
@@ -194,9 +212,9 @@ describe("StandbyReaders", () => {
     readers.closeAll();
   });
 
-  test("counts data once ffmpeg decoded video from it, and checks again a minute later", async () => {
+  test("counts data before its first decode check ends, and checks again a minute after one passed", async () => {
     const engine = fakeEngine();
-    const { decoder, checks } = fakeDecoder();
+    const { decoder, checks, asked } = fakeDecoder();
     const clock = { now: 1000 };
     const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, undefined, decoder);
     readers.set(["http://e1/play"]);
@@ -205,12 +223,14 @@ describe("StandbyReaders", () => {
     });
     engine.bodies[0]?.enqueue(tsPackets(5));
     await vi.waitFor(() => {
-      expect(checks[0]?.fed).toBe(940);
+      expect(readers.status()[0]?.lastDataAt).toBe(new Date(1000).toISOString());
     });
-    expect(readers.status()[0]?.lastDataAt).toBeNull();
+    // A standby without a passed check asks as urgent.
+    expect(checks).toMatchObject([{ urgent: true }]);
+    expect(fedBytes(checks[0])).toBe(940);
 
     clock.now = 2000;
-    checks[0]?.end(true);
+    checks[0]?.end("decoded");
     engine.bodies[0]?.enqueue(tsPackets(5));
     await vi.waitFor(() => {
       expect(readers.status()[0]).toMatchObject({ lastDataAt: new Date(2000).toISOString(), error: null });
@@ -222,15 +242,98 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(2);
     });
-    // While the next check runs, the last one's answer holds.
-    expect(readers.status()[0]?.lastDataAt).toBe(new Date(62_000).toISOString());
+    expect(checks[1]?.urgent).toBe(false);
+    expect(asked.every(({ who }) => who === asked[0]?.who)).toBe(true);
     readers.closeAll();
     expect(checks[1]?.stopped).toBe(true);
   });
 
-  test("stops counting data ffmpeg can't decode, says so, and checks again sooner", async () => {
+  test("stops counting data ffmpeg can't decode, says so, and waits longer after each failed check", async () => {
     const engine = fakeEngine();
     const { decoder, checks } = fakeDecoder();
+    const clock = { now: 1000 };
+    const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, undefined, decoder);
+    readers.set(["http://e1/play"]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    const failAt = async (at: number, count: number): Promise<void> => {
+      clock.now = at;
+      engine.bodies[0]?.enqueue(tsPackets(5));
+      await vi.waitFor(() => {
+        expect(checks).toHaveLength(count);
+      });
+      checks[count - 1]?.end("no-video");
+    };
+    await failAt(1000, 1);
+    clock.now = 2000;
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({
+        lastDataAt: new Date(1000).toISOString(),
+        error: "ffmpeg decoded no video from it",
+      });
+    });
+
+    // 10 s, then 20 s, then at most 30 s (maxRetryMs) between checks.
+    clock.now = 1000 + 9999;
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]?.bytes).toBe(940 * 3);
+    });
+    expect(checks).toHaveLength(1);
+    await failAt(1000 + 10_000, 2);
+    await failAt(11_000 + 20_000, 3);
+    clock.now = 31_000 + 29_999;
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]?.bytes).toBe(940 * 6);
+    });
+    expect(checks).toHaveLength(3);
+    await failAt(31_000 + 30_000, 4);
+    expect(checks.every((check) => check.urgent)).toBe(true);
+
+    // A check that passes makes the data count again.
+    clock.now = 61_000 + 30_000;
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(checks).toHaveLength(5);
+    });
+    checks[4]?.end("decoded");
+    clock.now = 92_000;
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({ lastDataAt: new Date(92_000).toISOString(), error: null });
+    });
+    readers.closeAll();
+  });
+
+  test("feeds a running check every chunk, so ffmpeg gets the stream without gaps", async () => {
+    const engine = fakeEngine();
+    const { decoder, checks } = fakeDecoder();
+    const readers = new StandbyReaders(logger, settings, engine.fetch, () => 1000, undefined, decoder);
+    readers.set(["http://e1/play"]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    const stream = tsPackets(23);
+    for (const [from, to] of [
+      [0, 1880],
+      [1880, 1980],
+      [1980, 2100],
+      [2100, stream.length],
+    ] as const) {
+      engine.bodies[0]?.enqueue(stream.subarray(from, to));
+    }
+    await vi.waitFor(() => {
+      expect(fedBytes(checks[0])).toBe(stream.length);
+    });
+    readers.closeAll();
+  });
+
+  test("a check cut short by a new connection leaves the answer as it was, and the next one comes later", async () => {
+    const engine = fakeEngine();
+    const { decoder, checks, cancelled } = fakeDecoder();
     const clock = { now: 1000 };
     const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, undefined, decoder);
     readers.set(["http://e1/play"]);
@@ -241,30 +344,60 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(1);
     });
-    clock.now = 2000;
-    checks[0]?.end(false);
-    engine.bodies[0]?.enqueue(tsPackets(5));
-    await vi.waitFor(() => {
-      expect(readers.status()[0]).toMatchObject({ lastDataAt: null, error: "ffmpeg decoded no video from it" });
-    });
-    expect(checks).toHaveLength(1);
-
-    // The failed check ended at 2000.
-    clock.now = 2000 + 10_000;
+    // Fails at 1000: the next check comes 10 s later.
+    checks[0]?.end("no-video");
+    await settle();
+    clock.now = 11_000;
     engine.bodies[0]?.enqueue(tsPackets(5));
     await vi.waitFor(() => {
       expect(checks).toHaveLength(2);
     });
-    checks[1]?.end(true);
-    clock.now = 13_000;
-    engine.bodies[0]?.enqueue(tsPackets(5));
+    expect(checks[1]?.urgent).toBe(true);
+
+    // The connection drops mid-check at 11 000: the check stops and says nothing.
+    engine.bodies[0]?.close();
     await vi.waitFor(() => {
-      expect(readers.status()[0]).toMatchObject({ lastDataAt: new Date(13_000).toISOString(), error: null });
+      expect(engine.bodies).toHaveLength(2);
     });
+    expect(checks[1]?.stopped).toBe(true);
+    expect(cancelled).toHaveLength(1);
+    clock.now = 15_000;
+    engine.bodies[1]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({ bytes: 940 * 3, error: "ffmpeg decoded no video from it" });
+    });
+    expect(readers.status()[0]?.lastDataAt).toBe(new Date(1000).toISOString());
+    expect(checks).toHaveLength(2);
+
+    // The next one comes 10 s after the one cut short.
+    clock.now = 21_000;
+    engine.bodies[1]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(checks).toHaveLength(3);
+    });
+    expect(checks[2]?.urgent).toBe(true);
     readers.closeAll();
   });
 
-  test("starts no decode check on data that isn't MPEG-TS, nor while no check is free", async () => {
+  test("stops a running check when ffmpeg takes the standby's source", async () => {
+    const engine = fakeEngine();
+    const { decoder, checks, cancelled } = fakeDecoder();
+    const readers = new StandbyReaders(logger, settings, engine.fetch, () => 1000, undefined, decoder);
+    readers.set(["http://e1/play"]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    engine.bodies[0]?.enqueue(tsPackets(5));
+    await vi.waitFor(() => {
+      expect(checks).toHaveLength(1);
+    });
+    const released = readers.release("http://e1/play");
+    expect(checks[0]?.stopped).toBe(true);
+    expect(cancelled.length).toBeGreaterThanOrEqual(1);
+    expect(await released).toBe(true);
+  });
+
+  test("asks for no decode check on data that isn't MPEG-TS, and waits while none is free", async () => {
     const engine = fakeEngine();
     const zeros = fakeDecoder();
     const busy = fakeDecoder(false);
@@ -277,12 +410,15 @@ describe("StandbyReaders", () => {
     });
     engine.bodies[0]?.enqueue(new Uint8Array(188 * 100));
     engine.bodies[1]?.enqueue(tsPackets(100));
+    engine.bodies[1]?.enqueue(tsPackets(100));
     await vi.waitFor(() => {
       expect(first.status()[0]?.bytes).toBe(188 * 100);
-      expect(second.status()[0]?.bytes).toBe(188 * 100);
+      expect(second.status()[0]?.bytes).toBe(188 * 200);
     });
-    expect(zeros.checks).toHaveLength(0);
-    expect(second.status()[0]?.lastDataAt).toBeNull();
+    expect(zeros.asked).toHaveLength(0);
+    // It keeps its place in line by asking on each chunk, and its data counts meanwhile.
+    expect(busy.asked).toHaveLength(2);
+    expect(second.status()[0]?.lastDataAt).toBe(new Date(1000).toISOString());
     first.closeAll();
     second.closeAll();
   });

@@ -228,7 +228,10 @@ export interface StandbyReaderStatus {
   /** Data arrives, it is connecting, or it waits to connect again after the connection ended. */
   state: "connecting" | "receiving" | "waiting";
   bytes: number;
-  /** The last data that came while the session's live edge moved (any data, without a stat URL). */
+  /**
+   * The last MPEG-TS stream data that came while the session's live edge moved (whenever it came,
+   * without a stat URL). None counts after a decode check found no video, until one passes.
+   */
   lastDataAt: string | null;
   error: string | null;
   liveEdge: LiveEdgeView | null;

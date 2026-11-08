@@ -12,6 +12,15 @@ function count(bytes: Uint8Array, size = bytes.length): number {
   return found;
 }
 
+/** The same packets with an adaptation field (timing, padding) and no payload. */
+function withoutPayload(bytes: Uint8Array): Uint8Array {
+  const packets = new Uint8Array(bytes);
+  for (let at = 0; at < packets.length; at += 188) {
+    packets[at + 3] = 0x20 | ((packets[at + 3] ?? 0) & 0x0f);
+  }
+  return packets;
+}
+
 describe("TsPackets", () => {
   test("counts packets of stream data, whatever the chunk sizes", () => {
     const stream = tsPackets(40);
@@ -25,6 +34,8 @@ describe("TsPackets", () => {
     ["random bytes", noise(188 * 200)],
     ["padding packets only", tsPackets(200, NULL_PID)],
     ["packets flagged with a transport error", tsPackets(200, 0x1_00, 0x80)],
+    ["tables only (PAT, SDT)", concatBytes(tsPackets(100, 0x00), tsPackets(100, 0x11))],
+    ["packets without a payload", withoutPayload(tsPackets(200))],
   ])("never counts %s", (_name, bytes) => {
     expect(count(bytes)).toBe(0);
     expect(count(bytes, 1000)).toBe(0);
@@ -47,8 +58,14 @@ describe("TsPackets", () => {
     expect(count(stream, 300)).toBe(30);
   });
 
-  test("leaves padding in the stream out of the count", () => {
-    const stream = concatBytes(tsPackets(10), tsPackets(5, NULL_PID), tsPackets(10));
+  test("leaves padding, tables and packets without a payload in the stream out of the count", () => {
+    const stream = concatBytes(
+      tsPackets(10),
+      tsPackets(5, NULL_PID),
+      tsPackets(3, 0x00),
+      withoutPayload(tsPackets(4)),
+      tsPackets(10, 0x1_01),
+    );
     expect(count(stream)).toBe(20);
   });
 });
