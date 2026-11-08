@@ -156,7 +156,8 @@ export class StreamFailover {
    */
   async moveTo(engine: EngineHandle, standby: TakenStandby, reason: string): Promise<void> {
     const { path, session } = this.host.playing();
-    this.host.setState("switching", `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
+    const state = this.host.sourceStale() ? "stale-source" : "switching";
+    this.host.setState(state, `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
     const { handoverTimeoutMs, tickMs } = this.host.settings;
     const timeoutMs = standby.hot ? Math.min(handoverTimeoutMs, HOT_HANDOVER_TIMEOUT_MS) : handoverTimeoutMs;
     await this.engines.failover({

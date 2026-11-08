@@ -114,7 +114,9 @@ test.afterAll(async ({ request }) => {
 });
 
 test("keeps a hot standby on the VPN once the stream plays", async ({ request }) => {
-  const [broadcast] = await broadcasts(1);
+  // The third one: the last case stops and starts its input, and the next spec measures how much
+  // an engine of the first one uploads, which a broadcast that just started again can disturb.
+  const broadcast = (await broadcasts(3))[2];
   run.broadcast = broadcast;
   run.streamId = (await addStream(request, broadcast!.infohash, "Standby")).id;
   const playing = await waitForPlaying(request, run.streamId);
