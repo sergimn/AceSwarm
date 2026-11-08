@@ -1,5 +1,6 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, test, vi } from "vitest";
+import type { LiveEdge } from "../src/live-edge.ts";
 import { StandbyReaders } from "../src/standby-readers.ts";
 
 const logger = createLogger("test", "silent");
@@ -29,6 +30,57 @@ function fakeEngine(status = 200) {
 }
 
 describe("StandbyReaders", () => {
+  test("only counts data that comes while the standby's live edge moves", async () => {
+    const engine = fakeEngine();
+    const clock = { now: 1000 };
+    const edges = new Map<string, LiveEdge>();
+    const stopped: string[] = [];
+    const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, {
+      watch: (url, edge) => {
+        edges.set(url, edge);
+        return {
+          edge,
+          stop: () => {
+            stopped.push(url);
+          },
+        };
+      },
+      liveEdge: { staleAfterMs: 60_000, noLiveAfterPolls: 10 },
+    });
+    readers.set([{ source: "http://e1/play", stat: "http://e1/stat" }]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    const edge = edges.get("http://e1/stat");
+    // An engine whose broadcast stopped still serves its old window.
+    edge?.observe({ status: "dl", downloaded: 1_000_000, last: 5000, pos: 5000 });
+    engine.bodies[0]?.enqueue(new Uint8Array(188));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({ bytes: 188, lastDataAt: null, liveEdge: { state: "waiting" } });
+    });
+
+    for (const step of [1, 2, 3]) {
+      clock.now = 1000 + step * 1000;
+      edge?.observe({ status: "dl", downloaded: 1_000_000 + step * 50_000, last: 5000 + step, pos: 5000 + step });
+    }
+    engine.bodies[0]?.enqueue(new Uint8Array(188));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({
+        lastDataAt: new Date(4000).toISOString(),
+        liveEdge: { state: "live" },
+      });
+    });
+
+    clock.now = 70_000;
+    engine.bodies[0]?.enqueue(new Uint8Array(188));
+    await vi.waitFor(() => {
+      expect(readers.status()[0]).toMatchObject({ bytes: 564, lastDataAt: new Date(4000).toISOString() });
+    });
+    expect(readers.status()[0]?.liveEdge?.state).toBe("stale");
+    readers.closeAll();
+    expect(stopped).toEqual(["http://e1/stat"]);
+  });
+
   test("reads a standby session, following its redirect, and reports when data last came", async () => {
     const engine = fakeEngine();
     const clock = { now: 1000 };
@@ -50,6 +102,7 @@ describe("StandbyReaders", () => {
           bytes: 376,
           lastDataAt: new Date(5000).toISOString(),
           error: null,
+          liveEdge: null,
         },
       ]);
     });

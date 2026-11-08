@@ -18,6 +18,7 @@ const running: PipelineStatus = {
   exitCode: null,
   error: null,
   pendingSource: null,
+  liveEdge: null,
 };
 
 /** Waits for a handover to `source` while the transcoder answers with `answers`, one per check. */

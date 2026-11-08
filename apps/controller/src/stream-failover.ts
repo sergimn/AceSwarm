@@ -36,6 +36,8 @@ export interface StreamFailoverHost {
   /** Engine sharing is on. */
   sharing: () => boolean;
   playing: () => PlayingStream;
+  /** The stream waits for its broadcast, which sends nothing new (see `StreamSupervisor`). */
+  sourceStale: () => boolean;
   setState: (state: StreamState, message: string | null) => void;
   /** Counts a recovery step in the stream's view. */
   countRecovery: () => void;
@@ -78,7 +80,12 @@ export class StreamFailover {
       candidates: paths.standbyCandidates(current),
       usable: (path) => paths.allowed(path) && paths.exists(path),
       up: (path) => !paths.isDown(path),
-      active: this.lastVideoAt !== undefined && this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
+      // While the broadcast sends nothing new, standbys would only load the same old window: they
+      // go, and come back once the stream plays again.
+      active:
+        !this.host.sourceStale() &&
+        this.lastVideoAt !== undefined &&
+        this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
       sparePath: this.engines.sparePath,
       transcoderSources: [pipeline?.source, pipeline?.pendingSource].filter(
         (source): source is string => typeof source === "string" && source !== "",
@@ -125,7 +132,8 @@ export class StreamFailover {
     try {
       await this.moveTo(engine, standby, reason);
     } catch (error) {
-      this.host.setState("stalled", `failing over to ${standby.path} failed: ${describeError(error)}`);
+      const state = this.host.sourceStale() ? "stale-source" : "stalled";
+      this.host.setState(state, `failing over to ${standby.path} failed: ${describeError(error)}`);
       this.host.logger.warn({ err: error, path: standby.path }, "could not fail over to the standby");
     }
   }
@@ -149,7 +157,8 @@ export class StreamFailover {
    */
   async moveTo(engine: EngineHandle, standby: TakenStandby, reason: string): Promise<void> {
     const { path, session } = this.host.playing();
-    this.host.setState("switching", `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
+    const state = this.host.sourceStale() ? "stale-source" : "switching";
+    this.host.setState(state, `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
     const { handoverTimeoutMs, tickMs } = this.host.settings;
     const timeoutMs = standby.hot ? Math.min(handoverTimeoutMs, HOT_HANDOVER_TIMEOUT_MS) : handoverTimeoutMs;
     await this.engines.failover({

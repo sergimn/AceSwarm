@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseBindingResponse } from "../stun.ts";
-import { bencode, compactPeers, parseAnnounce, percentDecodeBytes, Swarm } from "../tracker.ts";
+import { bencode, compactPeers, inputCommand, parseAnnounce, percentDecodeBytes, Swarm } from "../tracker.ts";
 
 const MAGIC_COOKIE = 0x21_12_a4_42;
 
@@ -43,6 +43,15 @@ describe("STUN binding responses", () => {
 });
 
 describe("tracker", () => {
+  it("stops and starts a broadcast's input container, and nothing else", () => {
+    expect(inputCommand("POST", "/inputs/bc4/stop")).toEqual(["stop", "aceswarm-broadcast-input-4"]);
+    expect(inputCommand("POST", "/inputs/bc12/start")).toEqual(["start", "aceswarm-broadcast-input-12"]);
+    expect(inputCommand("GET", "/inputs/bc4/stop")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/bc4/rm")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/bc4;rm/stop")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/x/stop")).toBeUndefined();
+  });
+
   const infoHash = Buffer.from("7ff57ff270e8fa6851c61af6765009a93de110ae", "hex");
   const escaped = [...infoHash].map((byte) => `%${byte.toString(16).padStart(2, "0")}`).join("");
 

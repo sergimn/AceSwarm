@@ -52,6 +52,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
     stateSince: "2026-11-06T10:00:00.000Z",
     message: null,
     lastFrameAt: null,
+    liveEdge: null,
     peers: { connected: 5, active: 2, uploading: 1, countries: [] },
     downloadKBps: 500,
     uploadKBps: 20,

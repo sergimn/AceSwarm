@@ -2,14 +2,22 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { PipelineState, PipelineStatus } from "@aceswarm/shared/api-types";
+import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
-import { buildFfmpegArgs, type FfmpegPlan, type FullMode } from "./ffmpeg-args.ts";
-import { parseMediaPlaylist, VirtualPlaylist } from "./playlist.ts";
+import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
+import { Generation, killProcess, lastErrorLine, modifiedAt, VARIANTS, type Variant } from "./generation.ts";
+import {
+  DEFAULT_LIVE_EDGE_SETTINGS,
+  LiveEdge,
+  watchLiveEdge as defaultWatch,
+  type LiveEdgeSeed,
+  type LiveEdgeSettings,
+  type WatchLiveEdge,
+} from "./live-edge.ts";
+import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
 import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
 
-export type Variant = "full" | "preview";
-export const VARIANTS: readonly Variant[] = ["full", "preview"];
+export { VARIANTS, type Variant } from "./generation.ts";
 
 export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode">;
 
@@ -18,6 +26,11 @@ export interface PipelineSettings {
   ffmpegPath: string;
   handoverTimeoutMs: number;
   plan: PlanSettings;
+  /**
+   * When a source's live edge counts as stale (see `LiveEdge`). Published segments older than its
+   * `staleAfterMs` also leave the playlist, so a player never starts on old video.
+   */
+  liveEdge?: LiveEdgeSettings;
 }
 
 export interface PipelineEvents {
@@ -27,67 +40,31 @@ export interface PipelineEvents {
 
 export type Spawner = (command: string, args: string[]) => ChildProcess;
 
+/** What tests replace: how ffmpeg starts, the clock, and how a source's live edge is followed. */
+export interface PipelineOptions {
+  spawner?: Spawner | undefined;
+  now?: () => number;
+  watchLiveEdge?: WatchLiveEdge;
+}
+
 const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 
 /** Browsers only decode H.264 reliably, so other codecs are re-encoded for the full output. */
 const COPYABLE_CODECS = new Set(["h264"]);
 const OLD_GENERATION_TTL_MS = 60_000;
-const KILL_GRACE_MS = 3000;
 /** How long after a run that failed before any video ffmpeg opens its source again (see `start`). */
 const REOPEN_DELAY_MS = 1000;
-
-class Generation {
-  readonly number: number;
-  readonly source: string;
-  readonly directory: string;
-  readonly mode: FullMode;
-  readonly startedAt: number;
-  /** How long ffmpeg waits for data from the source before it gives up. */
-  readonly inputTimeoutSeconds: number;
-  process: ChildProcess | undefined;
-  state: PipelineState = "starting";
-  frames = 0;
-  lastFrameAt: number | undefined;
-  fps: number | undefined;
-  videoCodec: string | undefined;
-  exitCode: number | null = null;
-  error: string | null = null;
-  readonly stderrTail: string[] = [];
-  /** How many more times ffmpeg opens the source again when this run fails before any video. */
-  reopens = 0;
-  /** When the handover this run is for began: the first run's start, for a run that reopened. */
-  handoverSince: number;
-  /** Stopped for good: another generation took its place, or none is needed any more. */
-  retired = false;
-
-  constructor(
-    number: number,
-    source: string,
-    directory: string,
-    mode: FullMode,
-    startedAt: number,
-    inputTimeoutSeconds: number,
-  ) {
-    this.number = number;
-    this.source = source;
-    this.directory = directory;
-    this.mode = mode;
-    this.startedAt = startedAt;
-    this.inputTimeoutSeconds = inputTimeoutSeconds;
-    this.handoverSince = startedAt;
-  }
-
-  /** Whether ffmpeg failed before any video, and opens the source again. */
-  willReopen(): boolean {
-    return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired;
-  }
-}
 
 /**
  * The ffmpeg work of one stream. A new source starts a new generation in its own directory;
  * players see a single continuous playlist because {@link VirtualPlaylist} stitches generations.
  * With handover, the new generation runs next to the old one and only takes over once it has
  * produced its first segment (make-before-break).
+ *
+ * With a source's stat URL, its output is only published while the engine's live edge moves (see
+ * `LiveEdge`): an engine whose broadcast stopped keeps serving the old window it has, and so do
+ * its peers. A new source's segments wait until its edge is seen to move; a source whose edge
+ * stops gets its ffmpeg stopped, and its segments leave the playlist once they are old.
  */
 export class Pipeline {
   readonly id: string;
@@ -96,13 +73,21 @@ export class Pipeline {
   private readonly events: PipelineEvents;
   private readonly spawner: Spawner;
   private readonly now: () => number;
+  private readonly watchLiveEdge: WatchLiveEdge;
+  private readonly liveEdge: LiveEdgeSettings;
   private readonly root: string;
   private readonly playlists: Record<Variant, VirtualPlaylist>;
   private active: Generation | undefined;
   private pending: Generation | undefined;
   private nextNumber = 1;
   private forceTranscode = false;
-  private lastThumbnail: string | undefined;
+  /**
+   * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
+   * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
+   */
+  private lastThumbnail: { path: string; at: number } | undefined;
+  /** The newest live edge of a generation that is gone: the next one starts from it. */
+  private lastEdge: LiveEdgeSeed | undefined;
   private syncTimer: NodeJS.Timeout | undefined;
   private stopped = false;
 
@@ -111,15 +96,16 @@ export class Pipeline {
     settings: PipelineSettings,
     logger: Logger,
     events: PipelineEvents,
-    spawner: Spawner = defaultSpawner,
-    now: () => number = Date.now,
+    options: PipelineOptions = {},
   ) {
     this.id = id;
     this.settings = settings;
     this.logger = logger.child({ stream: id });
     this.events = events;
-    this.spawner = spawner;
-    this.now = now;
+    this.spawner = options.spawner ?? defaultSpawner;
+    this.now = options.now ?? Date.now;
+    this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
+    this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -139,8 +125,10 @@ export class Pipeline {
    * With `reopens`, ffmpeg opens the source again up to that many times when it fails before any
    * video: an engine that has just lost another reader of the session may refuse a new one for a
    * moment (it allows one reader per session).
+   *
+   * With `stat`, the session's stat URL, its output is only published while its live edge moves.
    */
-  async start(source: string, handover: boolean, reopens = 0): Promise<void> {
+  async start(source: string, handover: boolean, reopens = 0, stat?: string): Promise<void> {
     if (this.stopped) {
       return;
     }
@@ -151,13 +139,13 @@ export class Pipeline {
       this.pending = undefined;
     }
     if (canHandOver) {
-      const launched = await this.launch(source, "handover", inputTimeoutSeconds, reopens);
+      const launched = await this.launch(source, "handover", inputTimeoutSeconds, reopens, stat);
       this.replace("pending", launched);
       return;
     }
     const previous = this.active;
     const reason = previous === undefined ? "start" : "restart";
-    const launched = await this.launch(source, reason, inputTimeoutSeconds, reopens);
+    const launched = await this.launch(source, reason, inputTimeoutSeconds, reopens, stat);
     if (previous !== undefined) {
       this.retire(previous);
     }
@@ -193,6 +181,7 @@ export class Pipeline {
         exitCode: null,
         error: "not started",
         pendingSource,
+        liveEdge: null,
       };
     }
     return {
@@ -201,7 +190,9 @@ export class Pipeline {
       state: generation.willReopen() ? "starting" : generation.state,
       source: generation.source,
       startedAt: new Date(generation.startedAt).toISOString(),
-      lastFrameAt: generation.lastFrameAt === undefined ? null : new Date(generation.lastFrameAt).toISOString(),
+      // Only video players could get: none while a new source's live edge hasn't moved yet.
+      lastFrameAt:
+        generation.publishedFrameAt === undefined ? null : new Date(generation.publishedFrameAt).toISOString(),
       frames: generation.frames,
       fps: generation.fps ?? null,
       videoCodec: generation.videoCodec ?? null,
@@ -209,6 +200,7 @@ export class Pipeline {
       exitCode: generation.exitCode,
       error: generation.error,
       pendingSource,
+      liveEdge: generation.watch?.edge.view() ?? null,
     };
   }
 
@@ -217,12 +209,21 @@ export class Pipeline {
     return this.playlists[variant].render();
   }
 
+  /**
+   * The newest thumbnail players may see: one the active source wrote since its output is
+   * published, or else the previous one while it is recent (see `PipelineSettings.liveEdge`).
+   */
   thumbnailPath(): string | undefined {
-    const candidate = this.active === undefined ? undefined : join(this.active.directory, "thumbnail.jpg");
-    if (candidate !== undefined && existsSync(candidate)) {
-      this.lastThumbnail = candidate;
+    const active = this.active;
+    const candidate = active === undefined ? undefined : join(active.directory, "thumbnail.jpg");
+    const since = active?.publishing() === true ? active.publishingSince : undefined;
+    const written = candidate === undefined ? undefined : modifiedAt(candidate);
+    if (candidate !== undefined && since !== undefined && written !== undefined && written >= since) {
+      this.lastThumbnail = { path: candidate, at: written };
     }
-    return this.lastThumbnail !== undefined && existsSync(this.lastThumbnail) ? this.lastThumbnail : undefined;
+    const last = this.lastThumbnail;
+    const recent = last !== undefined && this.now() - last.at <= this.liveEdge.staleAfterMs;
+    return recent && existsSync(last.path) ? last.path : undefined;
   }
 
   /** Resolves a segment request to a file path, rejecting anything outside the pipeline. */
@@ -242,6 +243,7 @@ export class Pipeline {
     for (const generation of [this.active, this.pending]) {
       if (generation !== undefined) {
         killProcess(generation.process);
+        generation.watch?.stop();
       }
     }
     this.active = undefined;
@@ -252,20 +254,94 @@ export class Pipeline {
   /** Copies new segments into the virtual playlists and completes pending handovers. */
   async sync(): Promise<void> {
     await this.syncPending();
+    this.expireOldSegments();
     const active = this.active;
     if (active === undefined) {
       return;
     }
+    this.stopIfStale(active);
     if (this.mayReopenNow(active)) {
       this.reopen(active);
       return;
     }
+    if (!(await this.openGate(active)) || active !== this.active) {
+      return;
+    }
     for (const variant of VARIANTS) {
-      const text = await readFile(join(active.directory, variant, "index.m3u8"), "utf8").catch(() => undefined);
-      if (text !== undefined) {
-        const parsed = parseMediaPlaylist(text);
-        this.playlists[variant].append(active.number, parsed.segments, `../g${String(active.number)}/${variant}/`);
+      const segments = await this.publishableSegments(active, variant);
+      if (segments.length > 0 && active === this.active) {
+        const prefix = `../g${String(active.number)}/${variant}/`;
+        const added = this.playlists[variant].append(active.number, segments, prefix, this.now());
+        if (variant === "full" && added > 0 && !active.published) {
+          // Its video counts from now on: players can get it.
+          active.published = true;
+          active.publishedFrameAt = active.lastFrameAt;
+        }
       }
+    }
+  }
+
+  /**
+   * Whether the generation's output may be published. The first time it may, it notes the last
+   * segment of each variant written until then: those came before its live edge was seen to move.
+   */
+  private async openGate(generation: Generation): Promise<boolean> {
+    if (!generation.publishing()) {
+      return false;
+    }
+    if (generation.publishingSince === undefined) {
+      generation.publishingSince = this.now();
+      for (const variant of VARIANTS) {
+        const written = generation.watch === undefined ? [] : await this.segmentsOf(generation, variant);
+        generation.publishFrom[variant] = Math.max(-1, ...written.map((segment) => segmentIndex(segment.uri)));
+      }
+      if (generation.watch !== undefined) {
+        this.logger.info(
+          { generation: generation.number, liveEdge: generation.watch.edge.view() },
+          "live edge moves; publishing",
+        );
+      }
+    }
+    return true;
+  }
+
+  /** The segments of a variant it wrote since its output may be published. */
+  private async publishableSegments(generation: Generation, variant: Variant): Promise<PlaylistSegment[]> {
+    const from = generation.publishFrom[variant];
+    const written = from === undefined ? [] : await this.segmentsOf(generation, variant);
+    return written.filter((segment) => segmentIndex(segment.uri) > (from ?? Infinity));
+  }
+
+  private async segmentsOf(generation: Generation, variant: Variant): Promise<PlaylistSegment[]> {
+    const text = await readFile(join(generation.directory, variant, "index.m3u8"), "utf8").catch(() => "");
+    return parseMediaPlaylist(text).segments;
+  }
+
+  /**
+   * A source whose live edge stopped: ffmpeg stops reading it, so it can't turn the engine's old
+   * window into segments, and none of it is published from now on. The controller replaces it.
+   * Its live edge is still followed: the engine may notice the broadcast is back before that.
+   */
+  private stopIfStale(generation: Generation): void {
+    if (generation.staleStopped || !generation.stale()) {
+      return;
+    }
+    generation.staleStopped = true;
+    const liveEdge = generation.watch?.edge.view();
+    const seconds = String(Math.round(this.liveEdge.staleAfterMs / 1000));
+    const behind = (liveEdge?.behindSeconds ?? 0) * 1000 > this.liveEdge.staleAfterMs;
+    generation.error = behind
+      ? `stopped reading: the engine serves the broadcast more than ${seconds}s behind its live edge`
+      : `stopped reading: the broadcast's live edge did not move for ${seconds}s`;
+    killProcess(generation.process);
+    this.logger.warn({ generation: generation.number, liveEdge }, "live edge stopped; stopped reading the source");
+  }
+
+  /** Published segments older than the stale threshold leave the playlists. */
+  private expireOldSegments(): void {
+    const before = this.now() - this.liveEdge.staleAfterMs;
+    for (const variant of VARIANTS) {
+      this.playlists[variant].expire(before);
     }
   }
 
@@ -275,14 +351,23 @@ export class Pipeline {
     if (pending === undefined) {
       return;
     }
-    const ready = await this.hasSegment(pending);
+    const publishable = (await this.openGate(pending)) ? await this.publishableSegments(pending, "full") : [];
     if (pending !== this.pending) {
       // Another sync (for a player's playlist request) dealt with it meanwhile.
       return;
     }
     const timedOut = this.now() - pending.handoverSince > this.settings.handoverTimeoutMs;
-    if (ready) {
+    if (publishable.length > 0) {
       this.promote(pending);
+    } else if (pending.stale()) {
+      // Its engine serves an old window: it would never take over.
+      this.logger.warn(
+        { generation: pending.number, liveEdge: pending.watch?.edge.view() },
+        "handover failed: stale source",
+      );
+      this.retire(pending);
+      this.pending = undefined;
+      this.events.handover(this.id, "failed");
     } else if (pending.willReopen() && !timedOut) {
       if (this.mayReopenNow(pending)) {
         this.reopen(pending);
@@ -302,7 +387,12 @@ export class Pipeline {
 
   /** Starts ffmpeg again on the source of a run that failed before any video (see `start`). */
   private reopen(generation: Generation): void {
-    const next = this.prepare(generation.source, generation.inputTimeoutSeconds, generation.reopens - 1);
+    const next = this.prepare(
+      generation.source,
+      generation.inputTimeoutSeconds,
+      generation.reopens - 1,
+      generation.stat,
+    );
     next.handoverSince = generation.handoverSince;
     if (generation === this.pending) {
       this.pending = next;
@@ -331,31 +421,55 @@ export class Pipeline {
     this.events.handover(this.id, "promoted");
   }
 
-  private async hasSegment(generation: Generation): Promise<boolean> {
-    const text = await readFile(join(generation.directory, "full", "index.m3u8"), "utf8").catch(() => "");
-    return parseMediaPlaylist(text).segments.length > 0;
-  }
-
   /** The input timeout of a handover: the usual one, or the handover timeout when that is longer. */
   private handoverInputTimeoutSeconds(): number {
     return Math.max(this.settings.plan.inputTimeoutSeconds, Math.ceil(this.settings.handoverTimeoutMs / 1000));
   }
 
-  private async launch(source: string, reason: string, inputTimeoutSeconds: number, reopens = 0): Promise<Generation> {
-    const generation = this.prepare(source, inputTimeoutSeconds, reopens);
+  private async launch(
+    source: string,
+    reason: string,
+    inputTimeoutSeconds: number,
+    reopens = 0,
+    stat?: string,
+  ): Promise<Generation> {
+    const generation = this.prepare(source, inputTimeoutSeconds, reopens, stat);
     await this.run(generation, reason);
     return generation;
   }
 
   /** A new generation for the source, not running yet. */
-  private prepare(source: string, inputTimeoutSeconds: number, reopens: number): Generation {
+  private prepare(source: string, inputTimeoutSeconds: number, reopens: number, stat: string | undefined): Generation {
     const number = this.nextNumber;
     this.nextNumber += 1;
     const directory = join(this.root, `g${String(number)}`);
     const mode = this.forceTranscode ? "transcode" : "copy";
-    const generation = new Generation(number, source, directory, mode, this.now(), inputTimeoutSeconds);
+    const generation = new Generation({
+      number,
+      source,
+      stat,
+      directory,
+      mode,
+      startedAt: this.now(),
+      inputTimeoutSeconds,
+    });
     generation.reopens = reopens;
+    if (stat !== undefined) {
+      generation.watch = this.watchLiveEdge(stat, new LiveEdge(this.liveEdge, this.now, this.newestEdge()));
+    }
     return generation;
+  }
+
+  /** The newest live edge any of the stream's sources showed so far. */
+  private newestEdge(also?: Generation): LiveEdgeSeed | undefined {
+    let newest = this.lastEdge;
+    for (const generation of [this.active, this.pending, also]) {
+      const seen = generation?.watch?.edge.snapshot();
+      if (seen !== undefined && (newest === undefined || seen.edge >= newest.edge)) {
+        newest = seen;
+      }
+    }
+    return newest;
   }
 
   /** Starts the generation's ffmpeg, unless it was retired or the pipeline stopped meanwhile. */
@@ -387,6 +501,9 @@ export class Pipeline {
           generation.frames = block.frame;
           generation.lastFrameAt = this.now();
           generation.state = "running";
+          if (generation.publishing() && generation.published) {
+            generation.publishedFrameAt = generation.lastFrameAt;
+          }
         }
         generation.fps = block.fps;
       }
@@ -434,38 +551,34 @@ export class Pipeline {
   private async relaunchAsTranscode(generation: Generation): Promise<void> {
     if (generation === this.active) {
       this.retire(generation);
-      this.active = await this.launch(generation.source, "transcode", generation.inputTimeoutSeconds);
+      this.active = await this.launch(
+        generation.source,
+        "transcode",
+        generation.inputTimeoutSeconds,
+        0,
+        generation.stat,
+      );
     } else if (generation === this.pending) {
       this.retire(generation);
-      this.pending = await this.launch(generation.source, "transcode", generation.inputTimeoutSeconds);
+      this.pending = await this.launch(
+        generation.source,
+        "transcode",
+        generation.inputTimeoutSeconds,
+        0,
+        generation.stat,
+      );
     }
   }
 
   /** Stops a generation and removes its files once players can no longer reference them. */
   private retire(generation: Generation): void {
     generation.retired = true;
+    this.lastEdge = this.newestEdge(generation);
+    generation.watch?.stop();
     killProcess(generation.process);
     const timer = setTimeout(() => {
       void rm(generation.directory, { recursive: true, force: true });
     }, OLD_GENERATION_TTL_MS);
     timer.unref();
   }
-}
-
-function killProcess(child: ChildProcess | undefined): void {
-  if (child?.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  child.kill("SIGTERM");
-  const timer = setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
-    }
-  }, KILL_GRACE_MS);
-  timer.unref();
-}
-
-function lastErrorLine(lines: string[], code: number | null): string {
-  const interesting = lines.findLast((line) => /error|failed|invalid|timed out|refused/i.test(line));
-  return interesting ?? `ffmpeg exited with code ${String(code)}`;
 }

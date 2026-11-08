@@ -31,9 +31,11 @@ interface VirtualSegment {
   uri: string;
   duration: number;
   discontinuity: boolean;
+  /** When it was added: a segment's video is about as old as that. */
+  addedAt: number;
 }
 
-function segmentIndex(uri: string): number {
+export function segmentIndex(uri: string): number {
   const match = /(\d+)\.ts$/.exec(uri);
   return match?.[1] === undefined ? -1 : Number.parseInt(match[1], 10);
 }
@@ -62,32 +64,62 @@ export class VirtualPlaylist {
 
   /**
    * Adds the segments a generation currently lists. Segments already added are skipped, and
-   * an older generation can never append after a newer one.
+   * an older generation can never append after a newer one. Returns how many it added.
    */
-  append(generation: number, segments: PlaylistSegment[], uriPrefix: string): void {
+  append(generation: number, segments: PlaylistSegment[], uriPrefix: string, now = Date.now()): number {
     if (this.lastGeneration !== undefined && generation < this.lastGeneration) {
-      return;
+      return 0;
     }
+    let added = 0;
     for (const segment of segments) {
       const index = segmentIndex(segment.uri);
       if (generation === this.lastGeneration && index <= this.lastIndex) {
         continue;
       }
       const discontinuity = this.lastGeneration !== undefined && generation !== this.lastGeneration;
-      this.segments.push({ uri: `${uriPrefix}${segment.uri}`, duration: segment.duration, discontinuity });
+      this.segments.push({
+        uri: `${uriPrefix}${segment.uri}`,
+        duration: segment.duration,
+        discontinuity,
+        addedAt: now,
+      });
       this.lastGeneration = generation;
       this.lastIndex = index;
+      added += 1;
     }
     while (this.segments.length > this.windowSize) {
-      this.segments.shift();
-      this.mediaSequence += 1;
-      if (this.segments[0]?.discontinuity !== true) {
-        continue;
-      }
-      // The tag at the new head is dropped from the output (see render), so count it here.
-      this.discontinuitySequence += 1;
-      this.segments[0] = { ...this.segments[0], discontinuity: false };
+      this.dropHead();
     }
+    return added;
+  }
+
+  /**
+   * Drops the segments added before `before`: when no new video came for that long, what is left
+   * is old, and a player that opens the stream now must not start on it. The media sequence keeps
+   * counting, so players that keep polling go on with the next segments.
+   */
+  expire(before: number): void {
+    while (this.segments[0] !== undefined && this.segments[0].addedAt < before) {
+      this.dropHead();
+    }
+  }
+
+  private dropHead(): void {
+    const dropped = this.segments.shift();
+    if (dropped === undefined) {
+      return;
+    }
+    this.mediaSequence += 1;
+    if (dropped.discontinuity) {
+      // It was the head with its own tag (added to an empty playlist): the tag leaves with it.
+      this.discontinuitySequence += 1;
+    }
+    if (this.segments[0]?.discontinuity !== true) {
+      return;
+    }
+    // The tag at the new head is dropped from the output (see render), so count it here.
+    this.discontinuitySequence += 1;
+    this.segments[0] = { ...this.segments[0], discontinuity: false };
   }
 
   render(): string | undefined {

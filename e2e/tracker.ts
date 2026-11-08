@@ -3,13 +3,18 @@
  * source's built-in tracker refuses announces ("Requested download is not authorized for use with
  * this tracker"), so the source announces to this one instead and players find it here.
  *
- *   node e2e/tracker.ts --port 7700 [--host 0.0.0.0]
+ *   node e2e/tracker.ts --port 7700 [--host 0.0.0.0] [--inputs]
  *
  * It keeps the peers of every info hash in memory and answers with compact peer lists. A peer's
  * address is the connection's source address, which on the mesh is the runner's mesh address.
  * `GET /stats` lists every address that announced, so the tests can tell which runner an engine's
  * traffic came out of (the AceSwarm runner itself, or the WireGuard server's runner).
+ *
+ * With `--inputs`, `POST /inputs/bcN/stop` and `POST /inputs/bcN/start` stop and start broadcast
+ * N's input (its ffmpeg container, see e2e/broadcast.sh): its source then sends nothing new while
+ * it keeps its peers and the window it has, as a broadcast that stops does.
  */
+import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { parseArgs } from "node:util";
 
@@ -150,8 +155,29 @@ export function compactPeers(peers: Peer[]): Buffer {
   );
 }
 
-function handle(swarm: Swarm, request: IncomingMessage, response: ServerResponse): void {
+/** The input container of broadcast `bcN` and what to do with it, for `POST /inputs/bcN/stop|start`. */
+export function inputCommand(method: string | undefined, path: string): string[] | undefined {
+  const match = /^\/inputs\/bc(\d{1,2})\/(stop|start)$/.exec(path);
+  return method === "POST" && match !== null
+    ? [match[2] ?? "", `aceswarm-broadcast-input-${match[1] ?? ""}`]
+    : undefined;
+}
+
+function controlInput(command: string[], response: ServerResponse): void {
+  execFile("docker", command, { timeout: 30_000 }, (error) => {
+    process.stdout.write(`${new Date().toISOString()} input ${command.join(" ")}: ${error?.message ?? "done"}\n`);
+    response.writeHead(error === null ? 204 : 500);
+    response.end(error === null ? undefined : error.message);
+  });
+}
+
+function handle(swarm: Swarm, request: IncomingMessage, response: ServerResponse, inputs: boolean): void {
   const [path = "", query = ""] = (request.url ?? "").split("?", 2);
+  const input = inputs ? inputCommand(request.method, path) : undefined;
+  if (input !== undefined) {
+    controlInput(input, response);
+    return;
+  }
   if (path === "/stats") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(swarm.stats()));
@@ -180,11 +206,15 @@ function handle(swarm: Swarm, request: IncomingMessage, response: ServerResponse
 
 function main(): void {
   const { values } = parseArgs({
-    options: { port: { type: "string", default: "7700" }, host: { type: "string", default: "0.0.0.0" } },
+    options: {
+      port: { type: "string", default: "7700" },
+      host: { type: "string", default: "0.0.0.0" },
+      inputs: { type: "boolean", default: false },
+    },
   });
   const swarm = new Swarm();
   const server = createServer((request, response) => {
-    handle(swarm, request, response);
+    handle(swarm, request, response, values.inputs);
   });
   server.listen(Number.parseInt(values.port, 10), values.host, () => {
     process.stdout.write(`tracker listening on ${values.host}:${values.port}\n`);

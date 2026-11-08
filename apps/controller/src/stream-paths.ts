@@ -1,5 +1,6 @@
 import type { PathStatus, PathStrategyName } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
+import type { Health } from "./health.ts";
 import { initialPath, pathScore, rememberHealth, switchTarget, type PathMemory } from "./path-selector.ts";
 
 export interface StreamPathsDeps {
@@ -55,6 +56,17 @@ export class StreamPaths {
   /** Records one health observation of the stream on its current path. */
   remember(path: string, healthy: boolean): void {
     rememberHealth(this.memory, path, healthy);
+  }
+
+  /**
+   * Records the stream's health on its path, when it says something about the path: not while it
+   * starts, and not while its broadcast sends nothing new (that is the same on every path).
+   */
+  rememberHealth(path: string | null, health: Health): void {
+    const says = health.state !== "starting" && health.state !== "buffering" && health.state !== "stale-source";
+    if (path !== null && says) {
+      this.remember(path, health.healthy);
+    }
   }
 
   /** The gateway has the path (a WireGuard path goes once its profile is removed). */

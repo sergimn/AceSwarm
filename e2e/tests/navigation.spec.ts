@@ -99,6 +99,9 @@ test("serves previews and thumbnails for the grid", async ({ request }) => {
   const playlist = await request.get(first.hls.preview);
   expect(playlist.ok()).toBe(true);
   expect(await playlist.text()).toContain("#EXTINF");
-  const thumbnail = await request.get(first.hls.thumbnail);
-  expect(thumbnail.headers()["content-type"]).toContain("image/jpeg");
+  // The first thumbnail is one ffmpeg writes once the stream's output is published, at most one
+  // THUMBNAIL_INTERVAL_SECONDS (10) after its video started.
+  await expect
+    .poll(async () => (await request.get(first.hls.thumbnail)).headers()["content-type"], { timeout: 15_000 })
+    .toContain("image/jpeg");
 });

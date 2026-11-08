@@ -33,6 +33,12 @@ const schema = z.object({
    * HANDOVER_TIMEOUT_SECONDS: a new engine on a slow swarm can take longer than this to deliver.
    */
   INPUT_TIMEOUT_SECONDS: envInt(60),
+  /**
+   * A source whose live edge (the engine's newest data of the broadcast) did not move for this
+   * long is stale: ffmpeg stops reading it, and nothing from it is published. A new source is only
+   * published once its live edge moves. Published video older than this leaves the playlist.
+   */
+  STALE_SOURCE_SECONDS: z.coerce.number().int().min(10).default(60),
 });
 
 export type Config = z.infer<typeof schema>;

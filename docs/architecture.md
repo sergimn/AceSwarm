@@ -46,7 +46,7 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 2. **Pick a network path** and tell the gateway.
 3. **Open a session.** It calls `/ace/getstream`. A pasted value is a content ID or an infohash, and both are 40 hex characters. If the input doesn't say which (a magnet link does), the controller tries one kind, then the other, and saves the kind that worked.
 4. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
-5. **Check health every tick.** A stream is healthy only while new video frames arrive.
+5. **Check health every tick.** A stream is healthy only while new video frames arrive, and only frames from a source whose live edge moves count (see [stale sources](#stale-sources)).
 
 ### Recovery ladder
 
@@ -60,6 +60,16 @@ When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over 
 | 4, 6, …  | restart the engine                     |
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this. On a [shared engine](#shared-engines), the engine restart steps only restart the stream's session.
+
+### Stale sources
+
+A broadcast that stops doesn't look like a stall to the engine. The engine keeps its peers, keeps answering, and keeps serving the window it already has, and so do peers that have the same window. A new session gets that old window too: it plays for a few seconds, then stops. Restarting on every stall therefore loops forever and shows old video each time. Only the engine's **live edge** tells: `livepos.last` in the session's stats, the newest data of the broadcast the engine knows of.
+
+- **The transcoder follows each source's live edge.** The controller sends the session's stat URL with its playback URL (and with each standby's). The transcoder polls it every second. Times are its own: `livepos` is stamped by the broadcaster's clock, which can be off by minutes, so its values are only compared with each other.
+- **A new source is published once its edge moves.** Its segments wait until the session downloaded and its own live edge kept moving past the newest edge the stream's previous session saw, at about the broadcast's pace: two rises at least 1.5 s apart by our clock, by no more than that time plus 3 s. Only segments written after that are published. Moving once is not enough: for a broadcast that stopped, a peer can know of a slightly later end of the old window. Moving fast is not enough either: an engine catching up on an old window sees its edge rise faster than time passes, then stop. Its frames don't count as video (`lastFrameAt`) before that, so the stream still starts, and a handover doesn't take over. For every source, with a live position or not, frames only count once a segment of it is in the playlist, so "playing" always means players can get video. A source without a live position (stats that show none, or don't answer, for 10 polls) is published as before.
+- **A source whose edge stops is stale.** Once the edge didn't move for `STALE_SOURCE_SECONDS` (60), or the engine serves the stream that far behind it, the transcoder stops its ffmpeg and publishes nothing more from it. Stats that stop answering for that long count the same way. A new session of the same stream starts from what the previous one saw: one that only has the same old window is stale at once. Published segments older than the threshold leave the playlist, and the thumbnail goes too, so a player that opens the stream never starts on old video. A standby only counts as hot while its own live edge moves.
+- **The stream waits for its source.** The controller shows `stale-source` ("Waiting for source" in the UI, which hides the last picture). The ladder goes on with longer waits: `STALE_SOURCE_RETRY_SECONDS` (30), doubling up to `RECOVERY_MAX_DELAY_SECONDS` (300). Every step replaces the engine, so the one whose edge stopped can't keep serving its old window, and every second step does that on another path when there is one. On a [shared engine](#shared-engines), other streams play from it, so only the stream's session starts again. It never gives up. Restart stream in the UI acts at once and starts the waits over, here and on the usual ladder. The stale session's live edge is still followed: when it moves before the next step, the next step comes at once. While it waits, the stream's standbys go, the shared engine isn't blamed, and the path's health record is left alone.
+- **Metrics.** `aceswarm_stream_live_edge_unchanged_seconds` (since the edge last moved) and `aceswarm_stream_live_edge_age_seconds` (`livepos.last` against our clock) are on the dashboard's "Stream stability" row. Its "Delivering new frames" timeline shows a stopped broadcast as one outage: red, then dark red ("Waiting for source") while the stream is `stale-source`. Old video never counts as delivering, so there are no green gaps in it.
 
 ### Path selection
 
@@ -152,7 +162,7 @@ The player reports the stream it shows full screen (`POST /api/viewers/<viewer>`
 
 ### HLS continuity
 
-Every ffmpeg run writes its segments into a new "generation" directory. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves.
+Every ffmpeg run writes its segments into a new "generation" directory. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves. Segments leave the playlist once they are older than `STALE_SOURCE_SECONDS`, so after a long gap the playlist is empty (404) until new video comes, and its sequence goes on from there.
 
 ## Network gateway (netgw)
 

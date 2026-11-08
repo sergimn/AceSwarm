@@ -117,6 +117,7 @@ const orchestrator: Orchestrator = new Orchestrator({
     startupGraceMs: config.STARTUP_GRACE_SECONDS * 1000,
     recoveryBaseDelayMs: config.RECOVERY_BASE_DELAY_SECONDS * 1000,
     recoveryMaxDelayMs: config.RECOVERY_MAX_DELAY_SECONDS * 1000,
+    staleSourceRetryMs: config.STALE_SOURCE_RETRY_SECONDS * 1000,
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
     pathStrategy: config.PATH_STRATEGY,
     pathMinDwellMs: config.PATH_MIN_DWELL_SECONDS * 1000,

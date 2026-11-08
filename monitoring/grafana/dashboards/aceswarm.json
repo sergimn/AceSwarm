@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_stream_up * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "(aceswarm_stream_up + on (stream) 2 * aceswarm_stream_state{state=\"stale-source\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
           "legendFormat": "{{name}}",
@@ -526,6 +526,10 @@
                 "1": {
                   "text": "Up",
                   "color": "green"
+                },
+                "2": {
+                  "text": "Waiting for source",
+                  "color": "dark-red"
                 }
               }
             }
@@ -543,6 +547,10 @@
               {
                 "color": "green",
                 "value": 1
+              },
+              {
+                "color": "dark-red",
+                "value": 2
               }
             ]
           }
@@ -554,7 +562,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "Green while the stream produces new video frames (aceswarm_stream_up)."
+      "description": "Green while the stream produces new video frames (aceswarm_stream_up). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red at first, then dark red, \"Waiting for source\", once its live edge has not moved for STALE_SOURCE_SECONDS (the stream's stale-source state), until the broadcast is back."
     },
     {
       "type": "bargauge",
@@ -734,6 +742,78 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Live edge unchanged for",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_live_edge_unchanged_seconds * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Seconds since the live edge of the engine session each stream plays from last moved (the newest data of the broadcast the engine knows of). Past STALE_SOURCE_SECONDS (60 by default) the broadcast counts as stopped: the stream shows 'Waiting for source', nothing old is published, and it tries a new session from time to time."
+    },
+    {
+      "type": "timeseries",
+      "title": "Live edge age (broadcaster's clock)",
+      "id": 43,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_live_edge_age_seconds * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Age of the newest data of each stream's broadcast that its engine knows of (livepos.last). It is stamped by the broadcaster's clock, which can be off, so a steady offset is no problem; one that keeps growing is a broadcast that stopped."
+    },
+    {
       "type": "row",
       "title": "Peers",
       "id": 12,
@@ -742,7 +822,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 56
       },
       "panels": []
     },
@@ -758,7 +838,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "targets": [
         {
@@ -794,7 +874,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 57
       },
       "targets": [
         {
@@ -829,7 +909,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "targets": [
         {
@@ -874,7 +954,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 57
+        "y": 65
       },
       "targets": [
         {
@@ -910,7 +990,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -947,7 +1027,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -980,7 +1060,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "panels": []
     },
@@ -997,7 +1077,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1081,7 +1161,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1151,7 +1231,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1210,7 +1290,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "targets": [
         {
@@ -1248,7 +1328,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 82
+        "y": 90
       },
       "targets": [
         {
@@ -1285,7 +1365,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 98
       },
       "targets": [
         {
@@ -1370,7 +1450,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 98
       },
       "targets": [
         {
@@ -1415,7 +1495,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 106
       },
       "panels": []
     },
@@ -1431,7 +1511,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 107
       },
       "targets": [
         {
@@ -1499,7 +1579,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 105
+        "y": 113
       },
       "targets": [
         {
@@ -1534,7 +1614,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 105
+        "y": 113
       },
       "targets": [
         {
@@ -1569,7 +1649,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 105
+        "y": 113
       },
       "targets": [
         {
@@ -1606,7 +1686,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 113
+        "y": 121
       },
       "targets": [
         {
@@ -1647,7 +1727,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 113
+        "y": 121
       },
       "targets": [
         {
@@ -1683,7 +1763,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 121
+        "y": 129
       },
       "panels": []
     },
@@ -1699,7 +1779,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 122
+        "y": 130
       },
       "targets": [
         {
@@ -1733,7 +1813,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 140
       },
       "targets": [
         {
