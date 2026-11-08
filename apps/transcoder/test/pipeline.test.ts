@@ -337,13 +337,12 @@ describe("Pipeline with a source's live edge", () => {
     return text?.split("\n").filter((line) => line.length > 0 && !line.startsWith("#"));
   }
 
-  /** The session's live edge moves twice, as a live broadcast's does, and it downloads. */
+  /** The session's live edge moves a second each second, as a live broadcast's does, and it downloads. */
   function live(run: number, from: number): void {
-    stat(run, from, 100);
-    clock.now += 1000;
-    stat(run, from + 1, 200);
-    clock.now += 1000;
-    stat(run, from + 2, 300);
+    for (let step = 0; step <= 3; step += 1) {
+      clock.now += step === 0 ? 0 : 1000;
+      stat(run, from + step, 100 + step * 100);
+    }
   }
 
   it("publishes a new source only once its live edge moves, and only what it wrote after that", async () => {
@@ -363,7 +362,9 @@ describe("Pipeline with a source's live edge", () => {
     stat(0, 5001, 400);
     expect(await playlist(instance)).toBeUndefined();
     clock.now += 1000;
-    stat(0, 5002, 500);
+    stat(0, 5002, 450);
+    clock.now += 1000;
+    stat(0, 5003, 500);
     // What it wrote before its edge was seen to move is not published.
     expect(await playlist(instance)).toBeUndefined();
     await wrote(1, 3);
@@ -395,7 +396,7 @@ describe("Pipeline with a source's live edge", () => {
 
     // The broadcast stops: the engine keeps answering, with the same live edge.
     clock.now += 30_000;
-    stat(0, 5002, 300);
+    stat(0, 5003, 400);
     await instance.sync();
     expect(children[0]?.killed).toBe(false);
     expect(await playlist(instance)).toHaveLength(2);
@@ -415,9 +416,9 @@ describe("Pipeline with a source's live edge", () => {
     // tells the controller to try again now. This one stays stopped.
     expect(edges[0]?.stopped).toBe(false);
     clock.now += 1000;
-    stat(0, 5003, 400);
+    stat(0, 5004, 500);
     await instance.sync();
-    expect(instance.status().liveEdge).toMatchObject({ state: "live", edgeAt: new Date(5_003_000).toISOString() });
+    expect(instance.status().liveEdge).toMatchObject({ state: "live", edgeAt: new Date(5_004_000).toISOString() });
     expect(await playlist(instance)).toBeUndefined();
   });
 
@@ -432,7 +433,7 @@ describe("Pipeline with a source's live edge", () => {
 
     // A new session gets the old window from peers that still have it.
     await instance.start("http://e1/play-2", false, 0, "http://e1/stat-2");
-    stat(1, 5002, 2_000_000);
+    stat(1, 5003, 2_000_000);
     await wrote(2, 3);
     await instance.sync();
     expect(instance.status().liveEdge?.state).toBe("stale");
@@ -459,10 +460,10 @@ describe("Pipeline with a source's live edge", () => {
     // Another engine had a few more seconds of the window, and it serves them: its edge is newer
     // than the stream's and it downloads, but the edge never moves again.
     await instance.start("http://e2/play", false, 0, "http://e2/stat");
-    stat(1, 5005, 100);
+    stat(1, 5006, 100);
     for (let poll = 1; poll <= 61; poll += 1) {
       clock.now += 1000;
-      stat(1, 5005, 100 + poll * 10_000);
+      stat(1, 5006, 100 + poll * 10_000);
       await instance.sync();
       if (poll === 30) {
         await wrote(2, 3);
@@ -484,7 +485,7 @@ describe("Pipeline with a source's live edge", () => {
     await wrote(2, 3);
     for (let step = 0; step < 6; step += 1) {
       clock.now += 10_000;
-      stat(0, 5003 + step * 10, 400 + step);
+      stat(0, 5004 + step * 10, 500 + step);
       await instance.sync();
     }
     expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
@@ -505,12 +506,12 @@ describe("Pipeline with a source's live edge", () => {
     await instance.sync();
 
     await instance.start("http://e2/play", true, 0, "http://e2/stat");
-    stat(1, 5002, 100);
+    stat(1, 5003, 100);
     await wrote(2, 1);
-    clock.now += 1000;
-    stat(1, 5003, 200);
-    clock.now += 1000;
-    stat(1, 5004, 300);
+    for (const last of [5004, 5005, 5006]) {
+      clock.now += 1000;
+      stat(1, last, last - 4900);
+    }
     await instance.sync();
     expect(instance.status().pendingSource).toBe("http://e2/play");
     await wrote(2, 2);
@@ -533,10 +534,10 @@ describe("Pipeline with a source's live edge", () => {
     stat(0, 5000, 100);
     expect(instance.thumbnailPath()).toBeUndefined();
 
-    clock.now += 1000;
-    stat(0, 5001, 200);
-    clock.now += 1000;
-    stat(0, 5002, 300);
+    for (const last of [5001, 5002, 5003]) {
+      clock.now += 1000;
+      stat(0, last, last - 4900);
+    }
     await instance.sync();
     expect(instance.thumbnailPath()).toBeUndefined();
     clock.now += 1000;

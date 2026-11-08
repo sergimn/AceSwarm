@@ -28,6 +28,12 @@ export interface LiveEdgeSeed {
   since: number;
 }
 
+/** Rises of a new session's edge compared, by our clock (see `LiveEdge`). */
+const RISE_WINDOW_MS = 10_000;
+const MIN_RISE_SPAN_MS = 1500;
+/** How much faster than our clock an edge may have risen between two rises compared. */
+const RISE_SLACK_SECONDS = 3;
+
 export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_000, noLiveAfterPolls: 10 };
 
 /**
@@ -43,10 +49,12 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  * that only has the same old window is no newer, and the time since the edge last moved goes on,
  * so it is stale at once rather than after another `staleAfterMs`.
  *
- * - waiting: no new data seen yet. A new session counts once its own edge moved twice, past the
- *   newest edge the stream's previous session saw, and it downloaded. Once is not enough: for a
- *   broadcast that stopped, a peer can know of a slightly later end of the old window than the
- *   previous session did, and an engine catching up on that window sees its edge rise to it.
+ * - waiting: no new data seen yet. A new session counts once it downloaded and its own edge kept
+ *   moving past the newest edge the stream's previous session saw, at about the broadcast's pace:
+ *   two rises at least 1.5 s apart by our clock, by no more than that time plus 3 s. Moving once
+ *   is not enough: for a broadcast that stopped, a peer can know of a slightly later end of the
+ *   old window than the previous session did. Nor is moving fast: an engine catching up on an old
+ *   window sees its edge rise faster than time passes, and then stop.
  * - live: the edge moved within `staleAfterMs`, and the engine serves close to it.
  * - stale: the edge did not move for `staleAfterMs` (counted from when it was first seen), or the
  *   engine serves more than `staleAfterMs` behind it.
@@ -59,9 +67,9 @@ export class LiveEdge {
   /** The newest `livepos.last` seen, and when it last moved (or was first seen). */
   private edge: number | undefined;
   private edgeSince: number | undefined;
-  /** This session's own newest `livepos.last`, and how often it rose since the session opened. */
+  /** This session's own newest `livepos.last`, and its recent rises past `baseline` (our clock). */
   private own: number | undefined;
-  private advances = 0;
+  private rises: { at: number; edge: number }[] = [];
   /** The previous session's edge this one has to get past: the same old window is no news. */
   private baseline: number | undefined;
   private pos: number | undefined;
@@ -105,14 +113,24 @@ export class LiveEdge {
       // Only an edge newer than any this session saw counts: values going back and forth are no
       // new data.
       this.own = sample.last;
-      this.advances += 1;
       if (sample.last > (this.edge ?? -Infinity)) {
         this.edge = sample.last;
         this.edgeSince = now;
       }
+      if (sample.last > (this.baseline ?? -Infinity)) {
+        this.rose(sample.last, now);
+      }
     }
-    const pastBaseline = this.baseline === undefined || (this.edge ?? -Infinity) > this.baseline;
-    if (this.advances >= 2 && pastBaseline && this.downloaded > this.firstDownloaded) {
+  }
+
+  /** Its edge rose past the previous session's: it is live once it does so at the broadcast's pace. */
+  private rose(edge: number, now: number): void {
+    this.rises = this.rises.filter((rise) => now - rise.at <= RISE_WINDOW_MS);
+    const paced = this.rises.some(
+      (rise) => now - rise.at >= MIN_RISE_SPAN_MS && edge - rise.edge <= (now - rise.at) / 1000 + RISE_SLACK_SECONDS,
+    );
+    this.rises.push({ at: now, edge });
+    if (paced && this.downloaded > (this.firstDownloaded ?? Infinity)) {
       this.verified = true;
     }
   }

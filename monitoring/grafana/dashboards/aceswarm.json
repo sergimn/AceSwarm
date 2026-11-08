@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_stream_up * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "(aceswarm_stream_up + on (stream) 2 * aceswarm_stream_state{state=\"stale-source\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
           "legendFormat": "{{name}}",
@@ -526,6 +526,10 @@
                 "1": {
                   "text": "Up",
                   "color": "green"
+                },
+                "2": {
+                  "text": "Waiting for source",
+                  "color": "dark-red"
                 }
               }
             }
@@ -543,6 +547,10 @@
               {
                 "color": "green",
                 "value": 1
+              },
+              {
+                "color": "dark-red",
+                "value": 2
               }
             ]
           }
@@ -554,7 +562,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "Green while the stream produces new video frames (aceswarm_stream_up)."
+      "description": "Green while the stream produces new video frames (aceswarm_stream_up). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red at first, then dark red, \"Waiting for source\", once its live edge has not moved for STALE_SOURCE_SECONDS (the stream's stale-source state), until the broadcast is back."
     },
     {
       "type": "bargauge",

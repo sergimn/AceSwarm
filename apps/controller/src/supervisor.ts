@@ -319,7 +319,7 @@ export class StreamSupervisor {
 
   private async bootstrap(): Promise<void> {
     if (this.recovery.lastActionAt !== undefined) {
-      const { notBefore } = nextRecovery(this.recovery, this.policy, false);
+      const { notBefore } = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), false);
       if (this.now() < notBefore) {
         return;
       }
@@ -334,7 +334,7 @@ export class StreamSupervisor {
         await this.bootstrapShared();
         return;
       }
-      this.setState("starting", "starting engine");
+      this.setState(this.sourceWait.state("starting"), "starting engine");
       this.engine = await this.engines.startOwn(this.engine, async (starting) => {
         await this.assignStartPath(starting);
       });
@@ -342,11 +342,11 @@ export class StreamSupervisor {
         // The gateway's paths were not known yet while it started, or the assignment failed.
         await this.assignStartPath(this.engine);
       }
-      this.setState("starting", "opening stream");
+      this.setState(this.sourceWait.state("starting"), "opening stream");
       await this.startPlayback(this.engine);
     } catch (error) {
       this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
-      this.setState("error", describeError(error));
+      this.setState(this.sourceWait.state("error"), describeError(error));
       this.logger.warn({ err: error }, "could not start stream");
     } finally {
       this.bootstrapped = true;
