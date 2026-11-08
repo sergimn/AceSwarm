@@ -270,8 +270,9 @@ export class Pipeline {
     for (const variant of VARIANTS) {
       const segments = await this.publishableSegments(active, variant);
       if (segments.length > 0 && active === this.active) {
-        this.playlists[variant].append(active.number, segments, `../g${String(active.number)}/${variant}/`, this.now());
-        if (variant === "full" && !active.published) {
+        const prefix = `../g${String(active.number)}/${variant}/`;
+        const added = this.playlists[variant].append(active.number, segments, prefix, this.now());
+        if (variant === "full" && added > 0 && !active.published) {
           // Its video counts from now on: players can get it.
           active.published = true;
           active.publishedFrameAt = active.lastFrameAt;

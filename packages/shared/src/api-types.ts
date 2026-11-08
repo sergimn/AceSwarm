@@ -216,7 +216,8 @@ export interface PipelineStatus {
   pendingSource: string | null;
   /**
    * The live edge of the session `source` reads; null without a stat URL. `lastFrameAt` only
-   * counts video the pipeline published, so it stays null while this waits and stops while stale.
+   * counts video the pipeline published: none before a segment of the source is in the playlist,
+   * none while this waits, and none once it is stale.
    */
   liveEdge: LiveEdgeView | null;
 }

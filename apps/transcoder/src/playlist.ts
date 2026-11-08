@@ -64,12 +64,13 @@ export class VirtualPlaylist {
 
   /**
    * Adds the segments a generation currently lists. Segments already added are skipped, and
-   * an older generation can never append after a newer one.
+   * an older generation can never append after a newer one. Returns how many it added.
    */
-  append(generation: number, segments: PlaylistSegment[], uriPrefix: string, now = Date.now()): void {
+  append(generation: number, segments: PlaylistSegment[], uriPrefix: string, now = Date.now()): number {
     if (this.lastGeneration !== undefined && generation < this.lastGeneration) {
-      return;
+      return 0;
     }
+    let added = 0;
     for (const segment of segments) {
       const index = segmentIndex(segment.uri);
       if (generation === this.lastGeneration && index <= this.lastIndex) {
@@ -84,10 +85,12 @@ export class VirtualPlaylist {
       });
       this.lastGeneration = generation;
       this.lastIndex = index;
+      added += 1;
     }
     while (this.segments.length > this.windowSize) {
       this.dropHead();
     }
+    return added;
   }
 
   /**

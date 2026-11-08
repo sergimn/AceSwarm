@@ -132,7 +132,8 @@ export class StreamFailover {
     try {
       await this.moveTo(engine, standby, reason);
     } catch (error) {
-      this.host.setState("stalled", `failing over to ${standby.path} failed: ${describeError(error)}`);
+      const state = this.host.sourceStale() ? "stale-source" : "stalled";
+      this.host.setState(state, `failing over to ${standby.path} failed: ${describeError(error)}`);
       this.host.logger.warn({ err: error, path: standby.path }, "could not fail over to the standby");
     }
   }

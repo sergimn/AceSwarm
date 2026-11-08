@@ -327,9 +327,9 @@ describe("Pipeline with a source's live edge", () => {
     }
   }
 
-  /** The first ffmpeg run reports its progress. */
-  function frames(frame: number): void {
-    (children[0]?.stdout as PassThrough).write(`frame=${String(frame)}\nfps=25\nprogress=continue\n`);
+  /** An ffmpeg run (the first by default) reports its progress. */
+  function frames(frame: number, run = 0): void {
+    (children[run]?.stdout as PassThrough).write(`frame=${String(frame)}\nfps=25\nprogress=continue\n`);
   }
 
   async function playlist(instance: Pipeline): Promise<string[] | undefined> {
@@ -383,11 +383,22 @@ describe("Pipeline with a source's live edge", () => {
     expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
   });
 
-  it("publishes a source without a stat URL as before", async () => {
+  it("publishes a source without a stat URL as before, and counts its video once it has a segment", async () => {
     const instance = start();
     await instance.start("http://e1/play", false);
+    frames(25);
+    await nextTurn();
+    expect(instance.status().lastFrameAt).toBeNull();
+    // A preview segment alone gives players of the full stream nothing.
+    const preview = join(hlsDir, "s1", "g1", "preview");
+    await mkdir(preview, { recursive: true });
+    await writeFile(join(preview, "index.m3u8"), "#EXTM3U\n#EXTINF:2.000,\nseg_000000.ts\n");
+    await instance.sync();
+    expect(instance.status().lastFrameAt).toBeNull();
+
     await wrote(1, 2);
     expect(await playlist(instance)).toEqual(["../g1/full/seg_000000.ts", "../g1/full/seg_000001.ts"]);
+    expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
     expect(edges).toHaveLength(0);
     expect(instance.status().liveEdge).toBeNull();
   });
@@ -520,9 +531,16 @@ describe("Pipeline with a source's live edge", () => {
     }
     await instance.sync();
     expect(instance.status().pendingSource).toBe("http://e2/play");
+    frames(40, 1);
+    await nextTurn();
     await wrote(2, 2);
     await instance.sync();
-    expect(instance.status()).toMatchObject({ source: "http://e2/play", pendingSource: null });
+    // The controller's handover waits for video from the new source: it counts at once.
+    expect(instance.status()).toMatchObject({
+      source: "http://e2/play",
+      pendingSource: null,
+      lastFrameAt: new Date(clock.now).toISOString(),
+    });
     expect(await playlist(instance)).toEqual([
       "../g1/full/seg_000000.ts",
       "../g1/full/seg_000001.ts",
