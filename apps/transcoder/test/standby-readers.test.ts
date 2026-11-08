@@ -6,6 +6,7 @@ import {
   type CheckPriority,
   type DecodeCheck,
   type DecodeChecker,
+  type DecodeCheckSettings,
   type DecodeResult,
 } from "../src/decode-check.ts";
 import type { LiveEdge } from "../src/live-edge.ts";
@@ -39,7 +40,7 @@ function fakeEngine(status = 200) {
 }
 
 /** Decode checks that each test ends by hand. */
-function fakeDecoder(free = true) {
+function fakeDecoder(free = true, overrides: Partial<DecodeCheckSettings> = {}) {
   const checks: {
     fed: Uint8Array[];
     priority: CheckPriority;
@@ -49,7 +50,13 @@ function fakeDecoder(free = true) {
   const asked: { who: object; priority: CheckPriority }[] = [];
   const cancelled: object[] = [];
   const decoder: DecodeChecker = {
-    settings: { ...DEFAULT_DECODE_CHECK_SETTINGS, intervalMs: 60_000, retryMs: 10_000, maxRetryMs: 30_000 },
+    settings: {
+      ...DEFAULT_DECODE_CHECK_SETTINGS,
+      intervalMs: 60_000,
+      retryMs: 10_000,
+      maxRetryMs: 30_000,
+      ...overrides,
+    },
     start: (who, priority): DecodeCheck | undefined => {
       asked.push({ who, priority });
       if (!free) {
@@ -406,6 +413,68 @@ describe("StandbyReaders", () => {
     await vi.waitFor(() => {
       expect(checks).toHaveLength(4);
     });
+    readers.closeAll();
+  });
+
+  test("checks cut short wait longer each time, within what the last answer allows", async () => {
+    const engine = fakeEngine();
+    const { decoder, checks } = fakeDecoder(true, { intervalMs: 15_000 });
+    const clock = { now: 0 };
+    const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, undefined, decoder);
+    readers.set(["http://e1/play"]);
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    let bytes = 0;
+    /** Data at `at`, and whether it started a check. */
+    const dataAt = async (at: number): Promise<boolean> => {
+      const before = checks.length;
+      clock.now = at;
+      engine.bodies.at(-1)?.enqueue(tsPackets(5));
+      bytes += 940;
+      await vi.waitFor(() => {
+        expect(readers.status()[0]?.bytes).toBe(bytes);
+      });
+      return checks.length > before;
+    };
+    const end = async (result: DecodeResult): Promise<void> => {
+      checks.at(-1)?.end(result);
+      await settle();
+    };
+    /** The connection drops mid-check, which ends it as saying nothing. */
+    const cutShort = async (): Promise<void> => {
+      const connections = engine.bodies.length;
+      engine.bodies.at(-1)?.close();
+      await vi.waitFor(() => {
+        expect(engine.bodies).toHaveLength(connections + 1);
+      });
+      await settle();
+    };
+    /** The next check comes `wait` after `from`, not before. */
+    const nextAfter = async (from: number, wait: number): Promise<void> => {
+      expect(await dataAt(from + wait - 1)).toBe(false);
+      expect(await dataAt(from + wait)).toBe(true);
+    };
+
+    // Three failures: 10 s, 20 s, then 30 s (maxRetryMs) between checks.
+    expect(await dataAt(1000)).toBe(true);
+    await end("no-video");
+    await nextAfter(1000, 10_000);
+    await end("no-video");
+    await nextAfter(11_000, 20_000);
+    await end("no-video");
+    await nextAfter(31_000, 30_000);
+    // Cut short at 61 000: the next waits as long as after the failures, 30 s, not 10 s.
+    await cutShort();
+    await nextAfter(61_000, 30_000);
+    // A pass at 91 000 ends the streak of checks cut short: the next quiet one waits 10 s again.
+    await end("decoded");
+    await nextAfter(91_000, 15_000);
+    await cutShort();
+    await nextAfter(106_000, 10_000);
+    // Video that decodes is checked again at least every 15 s (intervalMs), however many are cut short.
+    await cutShort();
+    await nextAfter(116_000, 15_000);
     readers.closeAll();
   });
 

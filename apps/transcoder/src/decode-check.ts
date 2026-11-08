@@ -5,7 +5,10 @@ export interface DecodeCheckSettings {
   ffmpegPath: string;
   /** A standby whose video decoded is checked again after this long. */
   intervalMs: number;
-  /** A standby whose video didn't decode is checked again after this long, doubling up to `maxRetryMs`. */
+  /**
+   * A standby whose video didn't decode, or whose check said nothing, is checked again after this
+   * long, doubling up to `maxRetryMs` while that goes on.
+   */
   retryMs: number;
   maxRetryMs: number;
   /** A check passes once ffmpeg decoded this many video frames... */
@@ -76,7 +79,10 @@ export interface DecodeCheckerOptions {
 
 const defaultSpawner: DecodeSpawner = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "ignore"] });
 
-/** Data that waits for ffmpeg past this is dropped: a check only needs a few seconds of video. */
+/**
+ * Data that waits for ffmpeg past this is dropped: a check only needs a few seconds of video. An
+ * ffmpeg that stops reading so gets nothing more, and its check ends as inconclusive once quiet.
+ */
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
 /** A reader that didn't ask again for this long lost its place: its data stopped coming. */
 const LINE_TIMEOUT_MS = 5000;

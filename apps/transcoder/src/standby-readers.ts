@@ -249,11 +249,16 @@ class StandbyReader {
     const backoff = (tries: number): number => Math.min(settings.retryMs * 2 ** (tries - 1), settings.maxRetryMs);
     // A check that says nothing (stopped with its connection, data that stopped coming, ffmpeg
     // that couldn't start) leaves the answer as it was. The next one comes a little later, later
-    // each time in a row, and never sooner than after the failures before it.
+    // each time in a row: at most a minute later for a standby whose video decodes, and never
+    // sooner than the failures before it allow for one whose video didn't.
     if (result === "inconclusive") {
       this.quietChecks += 1;
+      const wait = backoff(this.quietChecks);
       this.nextCheckAt =
-        this.now() + Math.max(backoff(this.quietChecks), this.failedChecks > 0 ? backoff(this.failedChecks) : 0);
+        this.now() +
+        (this.decodes === true
+          ? Math.min(wait, settings.intervalMs)
+          : Math.max(wait, this.failedChecks > 0 ? backoff(this.failedChecks) : 0));
       return;
     }
     const decoded = result === "decoded";

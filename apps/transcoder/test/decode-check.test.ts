@@ -182,7 +182,7 @@ describe("createDecodeChecker", () => {
     expect(checker.start(asking, CHECK_PRIORITY.first)).toBeDefined();
   });
 
-  test("finds no video when ffmpeg stops reading its input", async () => {
+  test("finds no video when ffmpeg closes its input", async () => {
     const ffmpeg = fakeSpawner();
     const check = createDecodeChecker(settings, { spawner: ffmpeg.spawner }).start({}, CHECK_PRIORITY.first);
     ffmpeg.runs[0]?.stdin.emit("error", new Error("write EPIPE"));
@@ -214,18 +214,29 @@ describe("createDecodeChecker", () => {
     check?.stop();
   });
 
-  test("says once when ffmpeg can't start", async () => {
+  test("says once when ffmpeg can't start, whether spawning throws or the process reports it", async () => {
     const errors: unknown[] = [];
-    const checker = createDecodeChecker(settings, {
+    const onCannotStart = (error: unknown): void => {
+      errors.push(error);
+    };
+    const throws = createDecodeChecker(settings, {
       spawner: () => {
         throw new Error("spawn ffmpeg ENOENT");
       },
-      onCannotStart: (error) => {
-        errors.push(error);
-      },
+      onCannotStart,
     });
-    expect(await checker.start({}, CHECK_PRIORITY.first)?.result).toBe("inconclusive");
-    expect(await checker.start({}, CHECK_PRIORITY.first)?.result).toBe("inconclusive");
+    expect(await throws.start({}, CHECK_PRIORITY.first)?.result).toBe("inconclusive");
+    expect(await throws.start({}, CHECK_PRIORITY.first)?.result).toBe("inconclusive");
     expect(errors).toHaveLength(1);
+
+    // Node reports a missing or unrunnable ffmpeg through the process's error event.
+    const ffmpeg = fakeSpawner();
+    const reports = createDecodeChecker(settings, { spawner: ffmpeg.spawner, onCannotStart });
+    for (let run = 0; run < 2; run += 1) {
+      const check = reports.start({}, CHECK_PRIORITY.first);
+      ffmpeg.runs[run]?.child.emit("error", new Error("spawn ffmpeg EACCES"));
+      expect(await check?.result).toBe("inconclusive");
+    }
+    expect(errors).toHaveLength(2);
   });
 });
