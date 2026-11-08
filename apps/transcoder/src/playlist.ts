@@ -107,6 +107,10 @@ export class VirtualPlaylist {
       return;
     }
     this.mediaSequence += 1;
+    if (dropped.discontinuity) {
+      // It was the head with its own tag (added to an empty playlist): the tag leaves with it.
+      this.discontinuitySequence += 1;
+    }
     if (this.segments[0]?.discontinuity !== true) {
       return;
     }

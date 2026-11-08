@@ -81,7 +81,11 @@ export class Pipeline {
   private pending: Generation | undefined;
   private nextNumber = 1;
   private forceTranscode = false;
-  private lastThumbnail: string | undefined;
+  /**
+   * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
+   * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
+   */
+  private lastThumbnail: { path: string; at: number } | undefined;
   /** The newest live edge of a generation that is gone: the next one starts from it. */
   private lastEdge: LiveEdgeSeed | undefined;
   private syncTimer: NodeJS.Timeout | undefined;
@@ -213,11 +217,13 @@ export class Pipeline {
     const active = this.active;
     const candidate = active === undefined ? undefined : join(active.directory, "thumbnail.jpg");
     const since = active?.publishing() === true ? active.publishingSince : undefined;
-    if (candidate !== undefined && since !== undefined && (modifiedAt(candidate) ?? -Infinity) >= since) {
-      this.lastThumbnail = candidate;
+    const written = candidate === undefined ? undefined : modifiedAt(candidate);
+    if (candidate !== undefined && since !== undefined && written !== undefined && written >= since) {
+      this.lastThumbnail = { path: candidate, at: written };
     }
-    const last = this.lastThumbnail === undefined ? undefined : modifiedAt(this.lastThumbnail);
-    return last !== undefined && this.now() - last <= this.liveEdge.staleAfterMs ? this.lastThumbnail : undefined;
+    const last = this.lastThumbnail;
+    const recent = last !== undefined && this.now() - last.at <= this.liveEdge.staleAfterMs;
+    return recent && existsSync(last.path) ? last.path : undefined;
   }
 
   /** Resolves a segment request to a file path, rejecting anything outside the pipeline. */
@@ -317,7 +323,10 @@ export class Pipeline {
     generation.staleStopped = true;
     const liveEdge = generation.watch?.edge.view();
     const seconds = String(Math.round(this.liveEdge.staleAfterMs / 1000));
-    generation.error = `stopped reading: the broadcast's live edge did not move for ${seconds}s`;
+    const behind = (liveEdge?.behindSeconds ?? 0) * 1000 > this.liveEdge.staleAfterMs;
+    generation.error = behind
+      ? `stopped reading: the engine serves the broadcast more than ${seconds}s behind its live edge`
+      : `stopped reading: the broadcast's live edge did not move for ${seconds}s`;
     killProcess(generation.process);
     this.logger.warn({ generation: generation.number, liveEdge }, "live edge stopped; stopped reading the source");
   }

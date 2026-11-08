@@ -59,8 +59,10 @@ describe("StandbyReaders", () => {
       expect(readers.status()[0]).toMatchObject({ bytes: 188, lastDataAt: null, liveEdge: { state: "waiting" } });
     });
 
+    clock.now = 1500;
+    edge?.observe({ status: "dl", downloaded: 1_050_000, last: 5001, pos: 5001 });
     clock.now = 2000;
-    edge?.observe({ status: "dl", downloaded: 1_100_000, last: 5001, pos: 5001 });
+    edge?.observe({ status: "dl", downloaded: 1_100_000, last: 5002, pos: 5002 });
     engine.bodies[0]?.enqueue(new Uint8Array(188));
     await vi.waitFor(() => {
       expect(readers.status()[0]).toMatchObject({

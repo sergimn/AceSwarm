@@ -43,7 +43,10 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  * that only has the same old window is no newer, and the time since the edge last moved goes on,
  * so it is stale at once rather than after another `staleAfterMs`.
  *
- * - waiting: no new data seen yet. A new session counts once its edge moved and it downloaded.
+ * - waiting: no new data seen yet. A new session counts once its own edge moved twice, past the
+ *   newest edge the stream's previous session saw, and it downloaded. Once is not enough: for a
+ *   broadcast that stopped, a peer can know of a slightly later end of the old window than the
+ *   previous session did, and an engine catching up on that window sees its edge rise to it.
  * - live: the edge moved within `staleAfterMs`, and the engine serves close to it.
  * - stale: the edge did not move for `staleAfterMs` (counted from when it was first seen), or the
  *   engine serves more than `staleAfterMs` behind it.
@@ -56,8 +59,11 @@ export class LiveEdge {
   /** The newest `livepos.last` seen, and when it last moved (or was first seen). */
   private edge: number | undefined;
   private edgeSince: number | undefined;
-  /** It moved since this session opened. */
-  private moved = false;
+  /** This session's own newest `livepos.last`, and how often it rose since the session opened. */
+  private own: number | undefined;
+  private advances = 0;
+  /** The previous session's edge this one has to get past: the same old window is no news. */
+  private baseline: number | undefined;
   private pos: number | undefined;
   private firstDownloaded: number | undefined;
   private downloaded = 0;
@@ -93,15 +99,20 @@ export class LiveEdge {
     }
     this.polls.withoutLivePos = 0;
     this.pos = sample.pos;
-    if (this.edge === undefined) {
+    if (this.own === undefined) {
       this.first(sample.last, now);
-    } else if (sample.last > this.edge) {
-      // Only an edge newer than any seen counts: values going back and forth are no new data.
-      this.edge = sample.last;
-      this.edgeSince = now;
-      this.moved = true;
+    } else if (sample.last > this.own) {
+      // Only an edge newer than any this session saw counts: values going back and forth are no
+      // new data.
+      this.own = sample.last;
+      this.advances += 1;
+      if (sample.last > (this.edge ?? -Infinity)) {
+        this.edge = sample.last;
+        this.edgeSince = now;
+      }
     }
-    if (this.moved && this.downloaded > this.firstDownloaded) {
+    const pastBaseline = this.baseline === undefined || (this.edge ?? -Infinity) > this.baseline;
+    if (this.advances >= 2 && pastBaseline && this.downloaded > this.firstDownloaded) {
       this.verified = true;
     }
   }
@@ -110,17 +121,19 @@ export class LiveEdge {
   private first(last: number, now: number): void {
     const seed = this.seed;
     const window = this.settings.staleAfterMs / 1000;
+    this.own = last;
     if (seed !== undefined && last <= seed.edge && last >= seed.edge - window) {
       // The same window the previous session had: no newer, and its clock goes on.
       this.edge = seed.edge;
       this.edgeSince = seed.since;
+      this.baseline = seed.edge;
       return;
     }
     this.edge = last;
     this.edgeSince = now;
-    // Newer than anything the stream had: the broadcast moved. Anything else (no seed, or one
-    // far behind, as after the broadcaster's clock jumped back) has to move by itself.
-    this.moved = seed !== undefined && last > seed.edge;
+    // Newer than the previous session's edge, it still has to get past it by moving. One far
+    // behind it (as after the broadcaster's clock jumped back) only has to move by itself.
+    this.baseline = seed !== undefined && last > seed.edge ? seed.edge : undefined;
   }
 
   /** The stat URL did not answer. */

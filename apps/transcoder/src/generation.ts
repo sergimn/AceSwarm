@@ -83,7 +83,8 @@ export class Generation {
 
   /** Whether ffmpeg failed before any video, and opens the source again. */
   willReopen(): boolean {
-    return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired;
+    // A stale source is not opened again: it would only serve the same old window.
+    return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired && !this.staleStopped;
   }
 }
 

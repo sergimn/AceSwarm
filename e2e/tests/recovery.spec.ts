@@ -88,9 +88,10 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
       .toBe("stale-source");
     // Nothing older than the threshold stays published: no playlist, no thumbnail.
     await expect.poll(async () => (await request.get(playlist)).status(), { timeout: 45_000 }).toBe(404);
+    // Its tries show as waiting for the broadcast too (each one is a new engine).
     const waiting = await streamById(request, stream.id);
-    expect(waiting?.liveEdge?.state).toBe("stale");
-    expect(waiting?.message).toContain("no new data from the broadcast");
+    expect(waiting?.state).toBe("stale-source");
+    expect(waiting?.message).toContain("broadcast");
 
     // While it waits, new sessions bring the old window: none of it is published, and it doesn't
     // restart on every stall (a new session every 10 s here, STALE_SOURCE_RETRY_SECONDS).

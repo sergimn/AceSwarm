@@ -1072,6 +1072,37 @@ describe("a broadcast that sends nothing new (stale source)", () => {
     );
   });
 
+  test("restarts at once by hand while it waits, and its waits start over from there", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    // Three tries already, the last one a minute ago: the next one would come in a minute.
+    for (const step of [0, 30, 60]) {
+      fake.clock.now += step * 1000 + 1;
+      liveEdge.value = stale(fake.clock.now);
+      await fake.instance.tick();
+    }
+    expect(fake.restarted).toHaveLength(3);
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().message).toMatch(/trying a new engine in \d+s$/);
+
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(4);
+    expect(fake.instance.view()).toMatchObject({ state: "stale-source", message: "manual restart; restart engine" });
+    // The next try comes after the first wait again (30 s), not after the longer one it was at.
+    fake.clock.now += 29_000;
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(4);
+    fake.clock.now += 2000;
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(5);
+  });
+
   test("plays again once a new session's live edge moves, and waits as usual after that", async () => {
     const video = { on: true };
     const liveEdge: { value: LiveEdgeView | null } = { value: null };

@@ -282,6 +282,9 @@ export class StreamSupervisor {
     if (engine.sharedPath !== null) {
       this.deps.shared?.restart(engine);
     }
+    // Someone stepped in: it acts now, and the ladder's waits start over from this step.
+    this.recovery = { failures: 0, lastActionAt: undefined };
+    this.sourceWait.due();
     await this.runAction("restart-engine", "manual restart");
   }
 
@@ -505,7 +508,7 @@ export class StreamSupervisor {
         await this.switchPath(engine);
       }
     } catch (error) {
-      this.setState("stalled", `${action.replace("-", " ")} failed: ${describeError(error)}`);
+      this.setState(this.sourceWait.state("stalled"), `${action.replace("-", " ")} failed: ${describeError(error)}`);
       this.logger.warn({ err: error, action }, "recovery action failed");
     }
   }
@@ -533,7 +536,7 @@ export class StreamSupervisor {
       await this.runRestartInPlace(engine);
       return;
     }
-    this.setState("switching", `moving from ${from} to ${target}`);
+    this.setState(this.sourceWait.state("switching"), `moving from ${from} to ${target}`);
     await this.moveTo(engine, target, { switchingPath: true, handover: true });
   }
 

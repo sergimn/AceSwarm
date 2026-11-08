@@ -13,7 +13,7 @@ function edgeWithClock(seed?: { edge: number; since: number }): { edge: LiveEdge
 }
 
 describe("LiveEdge", () => {
-  it("counts a new session once its edge moved and it downloaded", () => {
+  it("counts a new session once its edge moved twice and it downloaded", () => {
     const { edge, clock } = edgeWithClock();
     expect(edge.state()).toBe("waiting");
     edge.observe(sample(5000, 100));
@@ -33,18 +33,21 @@ describe("LiveEdge", () => {
     edge.observe(sample(5000, 100));
     clock.now += 1000;
     edge.observe(sample(5001, 200));
+    expect(edge.state()).toBe("waiting");
+    clock.now += 1000;
+    edge.observe(sample(5002, 300));
     expect(edge.state()).toBe("live");
     // The broadcaster's clock is far ahead of ours: only whether the edge moves counts.
     clock.now += 60_000;
-    edge.observe(sample(5001, 200));
+    edge.observe(sample(5002, 300));
     expect(edge.state()).toBe("live");
     clock.now += 1;
     expect(edge.state()).toBe("stale");
     expect(edge.publishable()).toBe(false);
     expect(edge.view()).toMatchObject({
       state: "stale",
-      edgeAt: new Date(5_001_000).toISOString(),
-      advancedAt: new Date(1_001_000).toISOString(),
+      edgeAt: new Date(5_002_000).toISOString(),
+      advancedAt: new Date(1_002_000).toISOString(),
     });
   });
 
@@ -75,9 +78,11 @@ describe("LiveEdge", () => {
     edge.observe(sample(5000, 100, 4999));
     clock.now += 1000;
     edge.observe(sample(5001, 200, 5000));
+    clock.now += 1000;
+    edge.observe(sample(5002, 300, 5001));
     expect(edge.state()).toBe("live");
     clock.now += 1000;
-    edge.observe(sample(5002, 300, 4941));
+    edge.observe(sample(5003, 400, 4942));
     expect(edge.state()).toBe("stale");
     expect(edge.view().behindSeconds).toBe(61);
   });
@@ -91,13 +96,42 @@ describe("LiveEdge", () => {
     expect(edge.state()).toBe("stale");
   });
 
-  it("starts from the stream's previous session: a newer edge has moved", () => {
+  it("starts from the stream's previous session: a newer edge still has to move", () => {
     const { edge, clock } = edgeWithClock({ edge: 5000, since: 1_000_000 - 600_000 });
     edge.observe(sample(5400, 100));
     expect(edge.state()).toBe("waiting");
     clock.now += 1000;
     edge.observe(sample(5400, 200));
+    expect(edge.state()).toBe("waiting");
+    for (const last of [5401, 5402]) {
+      clock.now += 1000;
+      edge.observe(sample(last, 200 + last));
+    }
     expect(edge.state()).toBe("live");
+  });
+
+  it("does not count a slightly later end of the old window as the broadcast moving", () => {
+    // Another engine knew of a few more seconds of the window than the previous session did.
+    const { edge, clock } = edgeWithClock({ edge: 5000, since: 1_000_000 - 50_000 });
+    edge.observe(sample(5003, 100));
+    for (let poll = 1; poll <= 60; poll += 1) {
+      clock.now += 1000;
+      edge.observe(sample(5003, 100 + poll * 10_000));
+      expect(edge.state()).toBe("waiting");
+    }
+    clock.now += 1;
+    expect(edge.state()).toBe("stale");
+  });
+
+  it("does not count catching up on the old window as the broadcast moving", () => {
+    const { edge, clock } = edgeWithClock({ edge: 5000, since: 1_000_000 - 10_000 });
+    for (const last of [4990, 4995, 5000]) {
+      edge.observe(sample(last, last * 100));
+      clock.now += 1000;
+    }
+    expect(edge.state()).toBe("waiting");
+    clock.now += 48_000;
+    expect(edge.state()).toBe("stale");
   });
 
   it("does not hold a session to an edge far ahead of it, as after the broadcaster's clock jumped back", () => {
@@ -106,6 +140,8 @@ describe("LiveEdge", () => {
     expect(edge.state()).toBe("waiting");
     clock.now += 1000;
     edge.observe(sample(5001, 200));
+    clock.now += 1000;
+    edge.observe(sample(5002, 300));
     expect(edge.state()).toBe("live");
   });
 
