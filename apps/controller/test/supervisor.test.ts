@@ -1,6 +1,12 @@
 import { setImmediate } from "node:timers/promises";
 import { Registry } from "@prometheus-io/client";
-import type { PathAssignment, PathStatus, PipelineStatus } from "@aceswarm/shared/api-types";
+import type {
+  LiveEdgeView,
+  PathAssignment,
+  PathStatus,
+  PipelineStatus,
+  StandbySource,
+} from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
 import { describe, expect, test } from "vitest";
 import type { AcestreamClient, EngineSession } from "../src/acestream.ts";
@@ -66,6 +72,7 @@ const pipeline: PipelineStatus = {
   exitCode: null,
   error: null,
   pendingSource: null,
+  liveEdge: null,
 };
 
 const stream: StreamConfig = {
@@ -132,6 +139,8 @@ interface Fakes {
   standbyData?: Set<string>;
   /** While on, the transcoder can't be reached. */
   transcoderDown?: { on: boolean };
+  /** The live edge the transcoder reports for the source it reads (none by default). */
+  liveEdge?: { value: LiveEdgeView | null };
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -278,15 +287,19 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
         // A handover that brings no video fails, and the transcoder drops it.
         pending = undefined;
       }
+      const liveEdge = fakes.liveEdge?.value ?? null;
       return Promise.resolve(
-        delivers ? { ...pipeline, source, lastFrameAt: new Date(clock.now).toISOString() } : { ...pipeline, source },
+        delivers
+          ? { ...pipeline, source, liveEdge, lastFrameAt: new Date(clock.now).toISOString() }
+          : { ...pipeline, source, liveEdge },
       );
     },
     stop: () => Promise.resolve(),
-    setStandbys: (_id: string, sources: string[]) => {
+    setStandbys: (_id: string, standbys: StandbySource[]) => {
       if (fakes.transcoderDown?.on === true) {
         return Promise.reject(new Error("transcoder unreachable"));
       }
+      const sources = standbys.map((standby) => standby.source);
       readers.push(sources);
       if (fakes.sources === undefined || real.active === undefined) {
         return Promise.resolve(undefined);
@@ -299,6 +312,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
           bytes: 0,
           lastDataAt: data.has(source) ? new Date(clock.now).toISOString() : null,
           error: null,
+          liveEdge: null,
         })),
       );
     },
@@ -1005,6 +1019,96 @@ async function stallAndRecover(fake: ReturnType<typeof supervisor>, steps: numbe
   }
 }
 
+/** A live edge the transcoder found stale: it last moved 61 s ago, and it is the same since. */
+function stale(now: number): LiveEdgeView {
+  return {
+    state: "stale",
+    edgeAt: new Date(0).toISOString(),
+    advancedAt: new Date(now - 61_000).toISOString(),
+    behindSeconds: 0,
+  };
+}
+
+describe("a broadcast that sends nothing new (stale source)", () => {
+  test("waits for the broadcast with growing waits instead of restarting on every stall", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    const opened = fake.sessions();
+
+    // The transcoder found the source's live edge stale: it stopped reading it.
+    video.on = false;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(opened + 1);
+    expect(fake.instance.view()).toMatchObject({
+      state: "stale-source",
+      message: "no new data from the broadcast for 61s; restart pipeline",
+    });
+
+    // The new session only has the old window too.
+    const states = new Set<string>();
+    const actions: number[] = [];
+    for (let second = 1; second <= 240; second += 1) {
+      fake.clock.now += 1000;
+      liveEdge.value = stale(fake.clock.now);
+      const before = fake.sessions() + fake.restarted.length;
+      await fake.instance.tick();
+      states.add(fake.instance.view().state);
+      if (fake.sessions() + fake.restarted.length > before) {
+        actions.push(second);
+      }
+    }
+    // 30 s, then 60 s (the stale waits double, up to RECOVERY_MAX_DELAY_SECONDS: 60 s here).
+    expect(actions).toEqual([30, 90, 150, 210]);
+    // Every other try is a new engine: a new session first (with the one at the start).
+    expect(fake.restarted).toHaveLength(2);
+    expect([...states]).toEqual(["stale-source"]);
+    expect(fake.instance.view().message).toMatch(
+      /^no new data from the broadcast for 61s; trying a new session in \d+s$/,
+    );
+  });
+
+  test("plays again once a new session's live edge moves, and waits as usual after that", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("stale-source");
+
+    // A try while it waits shows as waiting for the broadcast, not as a start.
+    liveEdge.value = { state: "waiting", edgeAt: null, advancedAt: null, behindSeconds: null };
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({
+      state: "stale-source",
+      message: "waiting for the broadcast; waiting for video",
+    });
+
+    liveEdge.value = { state: "live", edgeAt: null, advancedAt: null, behindSeconds: 0 };
+    video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", message: null });
+
+    // A stall after that is an ordinary one again.
+    video.on = false;
+    fake.clock.now += settings.startupGraceMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({
+      state: "recovering",
+      message: "no video after 63s; restart pipeline",
+    });
+  });
+});
+
 describe("sharing one engine per path", () => {
   const sharedEngine: EngineHandle = {
     ...engine,
@@ -1088,6 +1192,22 @@ describe("sharing one engine per path", () => {
     await stallAndRecover(fake, 1);
     expect(pool.reports).toEqual([{ watched: true, wantsRestart: false, hadVideo: true }]);
     expect(fake.instance.view().message).toContain("replacing the shared engine");
+  });
+
+  test("doesn't blame the shared engine for a broadcast that sends nothing new", async () => {
+    const pool = sharedEngines();
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, viewers: 1, liveEdge });
+    await fake.instance.tick();
+    liveEdge.value = {
+      state: "stale",
+      edgeAt: null,
+      advancedAt: new Date(fake.clock.now - 61_000).toISOString(),
+      behindSeconds: 0,
+    };
+    await stallAndRecover(fake, 3);
+    expect(pool.reports).toEqual([]);
+    expect(fake.instance.view().state).toBe("stale-source");
   });
 
   test("doesn't blame the shared engine while its path is down", async () => {

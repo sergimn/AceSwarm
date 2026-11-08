@@ -36,6 +36,8 @@ export interface StreamFailoverHost {
   /** Engine sharing is on. */
   sharing: () => boolean;
   playing: () => PlayingStream;
+  /** The stream waits for its broadcast, which sends nothing new (see `StreamSupervisor`). */
+  sourceStale: () => boolean;
   setState: (state: StreamState, message: string | null) => void;
   /** Counts a recovery step in the stream's view. */
   countRecovery: () => void;
@@ -78,7 +80,12 @@ export class StreamFailover {
       candidates: paths.standbyCandidates(current),
       usable: (path) => paths.allowed(path) && paths.exists(path),
       up: (path) => !paths.isDown(path),
-      active: this.lastVideoAt !== undefined && this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
+      // While the broadcast sends nothing new, standbys would only load the same old window: they
+      // go, and come back once the stream plays again.
+      active:
+        !this.host.sourceStale() &&
+        this.lastVideoAt !== undefined &&
+        this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
       sparePath: this.engines.sparePath,
       transcoderSources: [pipeline?.source, pipeline?.pendingSource].filter(
         (source): source is string => typeof source === "string" && source !== "",

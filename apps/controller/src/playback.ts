@@ -107,6 +107,6 @@ export async function handOverTo(
       }
     }
   }
-  await transcoder.start(id, { source }, true);
+  await transcoder.start(id, { source, stat: session.statUrl }, true);
   return waitForHandover(transcoder, id, source, timing);
 }

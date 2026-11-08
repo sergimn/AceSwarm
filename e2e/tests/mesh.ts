@@ -127,6 +127,19 @@ export function setBroadcastBlocked(broadcast: Broadcast, blocked: boolean): voi
 }
 
 /**
+ * Stops or starts a broadcast's input on the broadcast runner (through its tracker): its source
+ * engine then sends nothing new, while it keeps its peers and the old window it has, as a
+ * broadcast that stops does. Playing engines keep their connections and their live edge stops.
+ */
+export async function setBroadcastInput(broadcast: Broadcast, on: boolean): Promise<void> {
+  const url = `http://${MESH.source}:7700/inputs/${broadcast.name}/${on ? "start" : "stop"}`;
+  const response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(40_000) });
+  if (!response.ok) {
+    throw new Error(`${url}: HTTP ${String(response.status)} ${await response.text()}`);
+  }
+}
+
+/**
  * Drops the gateway's WireGuard packets to the WireGuard server, like a VPN provider that went
  * away: the tunnel stops working and its path goes down. The direct path keeps working.
  */

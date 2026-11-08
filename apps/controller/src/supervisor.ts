@@ -11,9 +11,11 @@ import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
-import { evaluateHealth } from "./health.ts";
+import { duration, evaluateHealth } from "./health.ts";
 import { sleep } from "./playback.ts";
+import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
+import { SourceWait } from "./source-wait.ts";
 import { StreamEngines, type MovedStream, type StreamEnginesDeps } from "./stream-engines.ts";
 import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
@@ -27,6 +29,11 @@ export interface SupervisorSettings {
   startupGraceMs: number;
   recoveryBaseDelayMs: number;
   recoveryMaxDelayMs: number;
+  /**
+   * The first wait between tries while the broadcast sends nothing new (stale source); it doubles
+   * up to `recoveryMaxDelayMs`. 30 s when not given.
+   */
+  staleSourceRetryMs?: number;
   handoverTimeoutMs: number;
   pathStrategy: PathStrategyName;
   pathMinDwellMs: number;
@@ -63,6 +70,8 @@ export class StreamSupervisor {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly policy: RecoveryPolicy;
+  /** Waiting for its broadcast while that sends nothing new. */
+  private readonly sourceWait: SourceWait;
 
   private engine: EngineHandle | undefined;
   private session: EngineSession | undefined;
@@ -104,6 +113,7 @@ export class StreamSupervisor {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? sleep;
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
+    this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
     this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
       ...deps,
@@ -113,6 +123,7 @@ export class StreamSupervisor {
       enabled: () => deps.hotStandby?.() === true,
       sharing: () => this.sharing,
       playing: () => this.playing(),
+      sourceStale: () => this.sourceWait.waiting,
       setState: this.setState,
       countRecovery: () => {
         this.recoveries += 1;
@@ -225,6 +236,11 @@ export class StreamSupervisor {
     if (await this.moveToWantedEngine(this.engine)) {
       return;
     }
+    await this.check(this.engine);
+  }
+
+  /** Acts on the stream's health: it plays, it still starts, or it recovers. */
+  private async check(engine: EngineHandle): Promise<void> {
     const health = evaluateHealth({
       now: this.now(),
       attemptStartedAt: this.attemptStartedAt,
@@ -233,18 +249,14 @@ export class StreamSupervisor {
       stallAfterMs: this.deps.settings.stallAfterMs,
       startupGraceMs: this.deps.settings.startupGraceMs,
     });
-    if (this.stream.path !== null && health.state !== "starting" && health.state !== "buffering") {
-      this.paths.remember(this.stream.path, health.healthy);
-    }
+    this.paths.rememberHealth(this.stream.path, health);
     if (health.healthy) {
-      await this.onVideo(this.engine);
-      return;
+      await this.onVideo(engine);
+    } else if (health.state === "starting" || health.state === "buffering") {
+      this.setState(this.sourceWait.state(health.state), this.sourceWait.starting(health.reason));
+    } else {
+      await this.recover(health.reason, health.state === "stale-source");
     }
-    if (health.state === "starting" || health.state === "buffering") {
-      this.setState(health.state, health.reason);
-      return;
-    }
-    await this.recover(health.reason);
   }
 
   /** Video arrives: the stream plays, unless it has been quiet long enough to fail over to a hot standby. */
@@ -254,9 +266,10 @@ export class StreamSupervisor {
     }
     await this.engines.played(engine, this.sharing);
     if (this.recovery.failures > 0) {
-      this.logger.info({ failures: this.recovery.failures }, "stream recovered");
+      this.logger.info({ failures: this.recovery.failures, sourceStale: this.sourceWait.waiting }, "stream recovered");
     }
     this.recovery = { failures: 0, lastActionAt: undefined };
+    this.sourceWait.end();
     this.setState("playing", null);
   }
 
@@ -384,61 +397,54 @@ export class StreamSupervisor {
     this.peers = polled.peers;
   }
 
-  /**
-   * The stream uses a path the policy no longer allows: WireGuard only was turned on while it was
-   * on the direct path. The gateway has already cut its engine off, so it moves now rather than
-   * once the stall is noticed. This is not a recovery: the stream was healthy. Failed moves wait
-   * like recovery steps do, so a VPN that can't carry the stream doesn't churn engines, and only a
-   * few streams move at once, because each move starts a second engine.
-   */
+  /** It is on a path the policy turned off (see `leaveDisallowedPath`). */
   private async leaveDisallowedPath(engine: EngineHandle): Promise<void> {
-    if (!this.paths.known || this.paths.noneUsable()) {
-      // While the gateway is unreachable its paths are unknown: nothing to move to yet.
-      this.setState("stalled", this.paths.known ? this.paths.waitingMessage() : "waiting for the network gateway");
-      return;
-    }
-    const from = this.stream.path ?? "?";
-    const wait = nextRecovery(this.recovery, this.policy, true).notBefore - this.now();
-    const slots = this.deps.policyMoves;
-    if (wait > 0 || slots?.tryTake() === false) {
-      const reason = wait > 0 ? `moving again in ${String(Math.ceil(wait / 1000))}s` : "other streams move first";
-      this.setState("stalled", `path ${from} is off; ${reason}`);
-      return;
-    }
-    this.logger.info({ path: from }, "path is off (WireGuard only); moving the stream");
-    try {
-      await this.switchPath(engine);
-      // Video arrived on the new path.
-      this.recovery = { failures: 0, lastActionAt: undefined };
-    } catch (error) {
-      // The wait counts from the failure: a move can take until the handover timeout to fail.
-      this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
-      this.setState("stalled", `moving off ${from} failed: ${describeError(error)}`);
-      this.logger.warn({ err: error, path: from }, "could not move the stream off a path that is off");
-    } finally {
-      slots?.release();
-    }
+    this.recovery = await leaveDisallowedPath({
+      paths: this.paths,
+      from: this.stream.path,
+      recovery: this.recovery,
+      policy: this.policy,
+      slots: this.deps.policyMoves,
+      now: this.now,
+      logger: this.logger,
+      setState: this.setState,
+      switchPath: async () => this.switchPath(engine),
+    });
   }
 
   private canSwitchPath(): boolean {
     return this.paths.canSwitch(this.stream.path, this.now() - this.lastSwitchAt, this.deps.settings.pathMinDwellMs);
   }
 
-  private async recover(why: string): Promise<void> {
+  /**
+   * Walks the recovery ladder. With a `staleSource` (its broadcast sends nothing new, see
+   * `evaluateHealth`), the transcoder already stopped reading it and publishes none of it, and the
+   * steps wait longer: each new session or engine is a try to find the broadcast moving again,
+   * which only it coming back can make work. A hot standby still takes over, since a standby only
+   * counts as hot while its own live edge moves: the broadcast is fine there.
+   */
+  private async recover(why: string, staleSource = false): Promise<void> {
     let reason = why;
+    if (staleSource) {
+      this.sourceWait.begin(reason, this.pipeline?.liveEdge);
+    }
+    const waiting = this.sourceWait.waiting;
     // A hot standby takes over at once, before the ladder: it already pulls the stream.
     if (this.failover.hasHot()) {
-      this.reportToSharedEngine({ wantsRestart: false });
+      if (!waiting) {
+        this.reportToSharedEngine({ wantsRestart: false });
+      }
       await this.failover.failOver(`${reason}; failing over to a standby`);
       return;
     }
-    const decision = nextRecovery(this.recovery, this.policy, this.canSwitchPath());
-    const wait = decision.notBefore - this.now();
+    const decision = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), this.canSwitchPath(), waiting);
+    const wait = this.sourceWait.until(decision.notBefore, this.now(), this.pipeline?.liveEdge);
     if (wait > 0) {
-      this.setState("stalled", `${reason}; retrying in ${String(Math.ceil(wait / 1000))}s`);
+      this.setState(this.sourceWait.state("stalled"), `${reason}; ${this.sourceWait.next} in ${duration(wait)}`);
       return;
     }
-    if (this.reportToSharedEngine({ wantsRestart: decision.action === "restart-engine" })) {
+    // A broadcast that stopped is not the shared engine's fault: the other streams on it play on.
+    if (!waiting && this.reportToSharedEngine({ wantsRestart: decision.action === "restart-engine" })) {
       reason += "; replacing the shared engine";
     }
     // A dead path cannot be fixed by restarting things locally: leave it, without waiting for the
@@ -488,7 +494,7 @@ export class StreamSupervisor {
     this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
     this.deps.metrics.recoveries.inc({ stream: this.stream.id, action });
     this.logger.warn({ action, reason, failures: this.recovery.failures }, "recovering stream");
-    this.setState("recovering", `${reason}; ${action.replace("-", " ")}`);
+    this.setState(this.sourceWait.state("recovering"), `${reason}; ${action.replace("-", " ")}`);
     try {
       if (action === "restart-pipeline") {
         await this.stopSessionQuietly();
@@ -585,7 +591,8 @@ export class StreamSupervisor {
     this.session = session;
     this.attemptStartedAt = this.now();
     this.stats = undefined;
-    this.pipeline = await this.deps.transcoder.start(this.stream.id, { source: session.playbackUrl });
+    const { playbackUrl: source, statUrl: stat } = session;
+    this.pipeline = await this.deps.transcoder.start(this.stream.id, { source, stat });
   }
 
   /** Gives the engine the path for a start attempt, once the gateway's paths are known. */

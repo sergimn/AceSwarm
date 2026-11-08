@@ -3,10 +3,10 @@ import { nextRecovery } from "../src/recovery.ts";
 
 const POLICY = { baseDelayMs: 1000, maxDelayMs: 8000 };
 
-function actions(count: number, canSwitchPath: boolean): string[] {
+function actions(count: number, canSwitchPath: boolean, staleSource = false): string[] {
   return Array.from(
     { length: count },
-    (_, failures) => nextRecovery({ failures, lastActionAt: 0 }, POLICY, canSwitchPath).action,
+    (_, failures) => nextRecovery({ failures, lastActionAt: 0 }, POLICY, canSwitchPath, staleSource).action,
   );
 }
 
@@ -19,6 +19,25 @@ describe("nextRecovery", () => {
       "switch-path",
       "restart-engine",
       "switch-path",
+      "restart-engine",
+    ]);
+  });
+
+  it("alternates a new session and a new engine while the broadcast sends nothing new", () => {
+    expect(actions(8, true, true)).toEqual([
+      "restart-pipeline",
+      "restart-engine",
+      "restart-pipeline",
+      "switch-path",
+      "restart-pipeline",
+      "restart-engine",
+      "restart-pipeline",
+      "switch-path",
+    ]);
+    expect(actions(4, false, true)).toEqual([
+      "restart-pipeline",
+      "restart-engine",
+      "restart-pipeline",
       "restart-engine",
     ]);
   });

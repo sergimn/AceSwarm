@@ -10,13 +10,14 @@ export type { NetworkPolicy } from "./network-policy.ts";
 
 /** Lifecycle of a stream as seen by the controller. */
 export type StreamState =
-  "starting" | "buffering" | "playing" | "stalled" | "recovering" | "switching" | "stopped" | "error";
+  "starting" | "buffering" | "playing" | "stalled" | "stale-source" | "recovering" | "switching" | "stopped" | "error";
 
 export const STREAM_STATES: readonly StreamState[] = [
   "starting",
   "buffering",
   "playing",
   "stalled",
+  "stale-source",
   "recovering",
   "switching",
   "stopped",
@@ -52,8 +53,13 @@ export interface StreamView {
   state: StreamState;
   stateSince: string;
   message: string | null;
-  /** Last time the pipeline produced a new video frame. */
+  /** Last time the pipeline produced a new video frame players could get. */
   lastFrameAt: string | null;
+  /**
+   * The live edge of the session the stream plays from (see `LiveEdgeView`): whether its broadcast
+   * sends new data. Null while there is no session, or without its stats.
+   */
+  liveEdge: LiveEdgeView | null;
   peers: PeerSummary;
   downloadKBps: number | null;
   uploadKBps: number | null;
@@ -166,6 +172,32 @@ export type PipelineState = "starting" | "running" | "exited";
 export interface PipelineRequest {
   /** HTTP URL of the MPEG-TS stream to read (the engine's playback URL). */
   source: string;
+  /**
+   * The session's stat URL. With it, the transcoder follows the engine's live edge and only
+   * publishes video while the broadcast's newest data keeps moving (see `LiveEdgeView`).
+   */
+  stat?: string | undefined;
+}
+
+/**
+ * Whether an engine session serves new data, from its live edge (`livepos.last` in its stats):
+ * - waiting: no new data seen yet; a new session counts once its edge moved and it downloaded.
+ * - live: the edge moves, and the engine serves close to it.
+ * - stale: the edge did not move for the stale threshold, or the engine serves that far behind it.
+ *   The engine still serves the old window it has, and so do peers that have it.
+ * - none: the session has no live position (not a live broadcast, or no stats); its output is
+ *   published as it comes.
+ */
+export type LiveEdgeState = "waiting" | "live" | "stale" | "none";
+
+export interface LiveEdgeView {
+  state: LiveEdgeState;
+  /** The broadcast's newest data the engine knows of, by the broadcaster's clock (can be off). */
+  edgeAt: string | null;
+  /** When that edge last moved (or was first seen), by the transcoder's clock. */
+  advancedAt: string | null;
+  /** How far behind its live edge the engine serves the stream, in seconds. */
+  behindSeconds: number | null;
 }
 
 export interface PipelineStatus {
@@ -182,6 +214,11 @@ export interface PipelineStatus {
   error: string | null;
   /** Source waiting to take over (make-before-break handover), if any. */
   pendingSource: string | null;
+  /**
+   * The live edge of the session `source` reads; null without a stat URL. `lastFrameAt` only
+   * counts video the pipeline published, so it stays null while this waits and stops while stale.
+   */
+  liveEdge: LiveEdgeView | null;
 }
 
 /** One standby session the transcoder reads to keep it pulling the stream (`PUT /standbys/:id`). */
@@ -190,8 +227,16 @@ export interface StandbyReaderStatus {
   /** Data arrives, it is connecting, or it waits to connect again after the connection ended. */
   state: "connecting" | "receiving" | "waiting";
   bytes: number;
+  /** The last data that came while the session's live edge moved (any data, without a stat URL). */
   lastDataAt: string | null;
   error: string | null;
+  liveEdge: LiveEdgeView | null;
+}
+
+/** A standby session for the transcoder to read: its playback URL, and its stat URL. */
+export interface StandbySource {
+  source: string;
+  stat?: string | undefined;
 }
 
 // ---- Network gateway API --------------------------------------------------------------------

@@ -65,6 +65,7 @@ export const STATE_LABELS: Record<StreamState, string> = {
   buffering: "Buffering",
   playing: "Live",
   stalled: "Stalled",
+  "stale-source": "Waiting for source",
   recovering: "Recovering",
   switching: "Switching path",
   stopped: "Off",

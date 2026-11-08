@@ -1,4 +1,4 @@
-import type { PathAssignment, StandbyReaderStatus, StandbyView } from "@aceswarm/shared/api-types";
+import type { PathAssignment, StandbyReaderStatus, StandbySource, StandbyView } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { AcestreamClient, EngineSession } from "./acestream.ts";
@@ -544,9 +544,12 @@ export class StreamStandbys {
   /** Has the transcoder read every open standby session, and learns when each one last brought data. */
   private async syncReaders(): Promise<void> {
     const sessions = new Map<string, StandbyEngine>();
+    const stats: StandbySource[] = [];
     for (const standby of this.standbys.values()) {
       if (standby.session !== undefined && !standby.busy) {
         sessions.set(standby.session.playbackUrl, standby);
+        // With its stat URL, only data that comes while its live edge moves counts.
+        stats.push({ source: standby.session.playbackUrl, stat: standby.session.statUrl });
       }
     }
     const sources = sessions.keys().toArray();
@@ -556,7 +559,7 @@ export class StreamStandbys {
     }
     let status: StandbyReaderStatus[] | undefined;
     try {
-      status = await this.deps.transcoder.setStandbys(this.deps.streamId, sources);
+      status = await this.deps.transcoder.setStandbys(this.deps.streamId, stats);
     } catch (error) {
       this.logger.debug({ err: describeError(error) }, "could not reach the transcoder for the standbys");
       return;

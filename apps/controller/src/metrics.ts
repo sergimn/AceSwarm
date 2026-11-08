@@ -30,6 +30,22 @@ function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: Str
   }
 }
 
+/** The live edge of the session a stream plays from: how old its newest data is, and since when it is the same. */
+function setLiveEdgeGauges(
+  gauges: Record<"age" | "unchanged", Gauge<"stream">>,
+  stream: StreamView,
+  now: number,
+): void {
+  const edgeAt = stream.liveEdge?.edgeAt ?? null;
+  const advancedAt = stream.liveEdge?.advancedAt ?? null;
+  if (edgeAt !== null) {
+    gauges.age.set({ stream: stream.id }, (now - Date.parse(edgeAt)) / 1000);
+  }
+  if (advancedAt !== null) {
+    gauges.unchanged.set({ stream: stream.id }, Math.max(0, (now - Date.parse(advancedAt)) / 1000));
+  }
+}
+
 type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<"stream" | "engine">>;
 
 function setEngineGauges(gauges: EngineGauges, engines: EngineMemory[]): void {
@@ -103,8 +119,9 @@ export class ControllerMetrics {
       registers,
       collect: () => {
         const current = snapshot();
-        const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
-        for (const gauge of [...gauges, cache, cacheLimit, watching, sharedStreams, sharedStandbys, standbys]) {
+        const gauges = [info, state, up, frameAge, liveEdgeAge, liveEdgeStill, peers, countries, speed, path];
+        const others = [memory, memoryLimit, viewers, cache, cacheLimit, watching, sharedStreams, sharedStandbys];
+        for (const gauge of [...gauges, ...others, standbys]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -118,6 +135,7 @@ export class ControllerMetrics {
           if (stream.lastFrameAt !== null) {
             frameAge.set(labels, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
           }
+          setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
           if (stream.peers.connected !== null) {
             peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
           }
@@ -181,6 +199,18 @@ export class ControllerMetrics {
     const frameAge = new Gauge({
       name: "aceswarm_stream_last_frame_age_seconds",
       help: "Seconds since the stream produced its last video frame",
+      labelNames: ["stream"],
+      registers,
+    });
+    const liveEdgeAge = new Gauge({
+      name: "aceswarm_stream_live_edge_age_seconds",
+      help: "Age of the newest data of the broadcast the stream's engine knows of (livepos.last), by the broadcaster's clock, which can be off",
+      labelNames: ["stream"],
+      registers,
+    });
+    const liveEdgeStill = new Gauge({
+      name: "aceswarm_stream_live_edge_unchanged_seconds",
+      help: "Seconds since the live edge of the stream's engine session last moved, by our clock; past STALE_SOURCE_SECONDS the stream is stale-source",
       labelNames: ["stream"],
       registers,
     });
