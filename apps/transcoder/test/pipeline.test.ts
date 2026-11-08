@@ -367,14 +367,20 @@ describe("Pipeline with a source's live edge", () => {
     stat(0, 5003, 500);
     // What it wrote before its edge was seen to move is not published.
     expect(await playlist(instance)).toBeUndefined();
-    await wrote(1, 3);
     frames(100);
     await nextTurn();
+    // Its video only counts once players can get some of it.
+    expect(instance.status().lastFrameAt).toBeNull();
+    await wrote(1, 3);
     expect(await playlist(instance)).toEqual(["../g1/full/seg_000002.ts"]);
     expect(instance.status()).toMatchObject({
       lastFrameAt: new Date(clock.now).toISOString(),
       liveEdge: { state: "live" },
     });
+    clock.now += 500;
+    frames(110);
+    await nextTurn();
+    expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
   });
 
   it("publishes a source without a stat URL as before", async () => {

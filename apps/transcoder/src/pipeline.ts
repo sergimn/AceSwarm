@@ -271,6 +271,11 @@ export class Pipeline {
       const segments = await this.publishableSegments(active, variant);
       if (segments.length > 0 && active === this.active) {
         this.playlists[variant].append(active.number, segments, `../g${String(active.number)}/${variant}/`, this.now());
+        if (variant === "full" && !active.published) {
+          // Its video counts from now on: players can get it.
+          active.published = true;
+          active.publishedFrameAt = active.lastFrameAt;
+        }
       }
     }
   }
@@ -495,7 +500,7 @@ export class Pipeline {
           generation.frames = block.frame;
           generation.lastFrameAt = this.now();
           generation.state = "running";
-          if (generation.publishing()) {
+          if (generation.publishing() && generation.published) {
             generation.publishedFrameAt = generation.lastFrameAt;
           }
         }

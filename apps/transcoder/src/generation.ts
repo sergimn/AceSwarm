@@ -38,6 +38,8 @@ export class Generation {
   publishingSince: number | undefined;
   /** The last video frame while its output could be published. */
   publishedFrameAt: number | undefined;
+  /** A segment of it is in the playlist: until then its frames don't count, players have nothing. */
+  published = false;
   /** Its live edge went stale: ffmpeg was stopped, and nothing more of it is published. */
   staleStopped = false;
   readonly directory: string;

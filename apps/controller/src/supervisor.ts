@@ -357,18 +357,18 @@ export class StreamSupervisor {
   private async bootstrapShared(): Promise<void> {
     if (!this.paths.known) {
       // The shared engine to use depends on the path.
-      this.setState("starting", "waiting for the network gateway");
+      this.setState(this.sourceWait.state("starting"), "waiting for the network gateway");
       return;
     }
     const path = this.paths.forStart(this.stream.path, this.recovery.failures);
     if (path === undefined) {
-      this.setState("stalled", this.paths.waitingMessage());
+      this.setState(this.sourceWait.state("stalled"), this.paths.waitingMessage());
       return;
     }
-    this.setState("starting", "starting engine");
+    this.setState(this.sourceWait.state("starting"), "starting engine");
     this.engine = await this.engines.startShared(path, this.engine);
     await this.record.persistPath(path);
-    this.setState("starting", "opening stream");
+    this.setState(this.sourceWait.state("starting"), "opening stream");
     await this.startPlayback(this.engine);
   }
 
