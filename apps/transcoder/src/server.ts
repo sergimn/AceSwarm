@@ -8,6 +8,7 @@ import { z } from "zod";
 import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
+import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
 
 const idParams = z.object({ id: z.string().regex(/^[a-z0-9]{6,32}$/) });
 const httpUrl = z.url({ protocol: /^https?$/ });
@@ -31,6 +32,8 @@ export class PipelineManager {
   private readonly spawner: Spawner | undefined;
   private readonly standbySettings: StandbyReaderSettings | undefined;
   private readonly watchLiveEdge: WatchLiveEdge;
+  /** Shared by every stream's standby readers, so that few decode checks run at once. */
+  private readonly decoder: DecodeChecker;
   readonly generations: Counter<"stream" | "reason">;
   readonly handovers: Counter<"stream" | "result">;
 
@@ -40,13 +43,15 @@ export class PipelineManager {
     logger: Logger,
     spawner?: Spawner,
     standbySettings?: StandbyReaderSettings,
-    watchLive: WatchLiveEdge = watchLiveEdge,
+    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker } = {},
   ) {
     this.settings = settings;
     this.logger = logger;
     this.spawner = spawner;
     this.standbySettings = standbySettings;
-    this.watchLiveEdge = watchLive;
+    this.watchLiveEdge = options.watchLiveEdge ?? watchLiveEdge;
+    this.decoder =
+      options.decoder ?? createDecodeChecker({ ...DEFAULT_DECODE_CHECK_SETTINGS, ffmpegPath: settings.ffmpegPath });
     const registers = [service.registry];
     this.generations = new Counter({
       name: "aceswarm_pipeline_starts_total",
@@ -168,10 +173,14 @@ export class PipelineManager {
       if (wanted.length === 0) {
         return [];
       }
-      readers = new StandbyReaders(this.logger.child({ stream: id }), this.standbySettings, fetch, Date.now, {
-        watch: this.watchLiveEdge,
-        liveEdge: this.settings.liveEdge,
-      });
+      readers = new StandbyReaders(
+        this.logger.child({ stream: id }),
+        this.standbySettings,
+        fetch,
+        Date.now,
+        { watch: this.watchLiveEdge, liveEdge: this.settings.liveEdge },
+        this.decoder,
+      );
       this.standbys.set(id, readers);
     }
     const result = readers.set(wanted);

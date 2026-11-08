@@ -2,7 +2,9 @@ import { setTimeout as wait } from "node:timers/promises";
 import type { StandbyReaderStatus, StandbySource } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
+import type { DecodeCheck, DecodeChecker } from "./decode-check.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS, LiveEdge, type LiveEdgeSettings, type WatchLiveEdge } from "./live-edge.ts";
+import { TsPackets } from "./ts-packets.ts";
 
 export interface StandbyReaderSettings {
   /** A connection that brings no data for this long is dropped and opened again. */
@@ -24,6 +26,17 @@ export const DEFAULT_STANDBY_READER_SETTINGS: StandbyReaderSettings = {
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/** What a reader works with besides its settings. */
+interface ReaderDeps {
+  fetch: Fetch;
+  now: () => number;
+  liveEdge: StandbyLiveEdge | undefined;
+  decoder: DecodeChecker | undefined;
+}
+
+/** A connection that brought this much without one MPEG-TS packet of stream data gets a warning. */
+const NOT_VIDEO_WARN_BYTES = 1024 * 1024;
+
 /** How standby readers follow their sessions' live edges (see `LiveEdge`). */
 export interface StandbyLiveEdge {
   watch: WatchLiveEdge;
@@ -35,6 +48,12 @@ export interface StandbyLiveEdge {
  * the stream from its peers as if a player were watching. Video goes nowhere: only the time of the
  * last data counts, which tells the controller that the standby is hot. A connection that ends,
  * fails or goes quiet is opened again.
+ *
+ * Only MPEG-TS packets that carry stream data count as data (see `TsPackets`): an engine can
+ * send bytes that aren't video, such as zeros, and a standby that only has those can't take over.
+ * With a decode checker, ffmpeg also has to decode video from the data (see `createDecodeChecker`):
+ * when the data starts to come, and again every so often. Until a check passes, or once one fails,
+ * the data doesn't count.
  *
  * With the session's stat URL, only data that comes while its live edge moves counts: an engine
  * whose broadcast stopped still serves the old window it has, which would make it look hot.
@@ -54,20 +73,20 @@ class StandbyReader {
   private bytes = 0;
   private lastDataAt: number | undefined;
   private error: string | null = null;
+  private readonly decoder: DecodeChecker | undefined;
+  /** Whether the last decode check found video; undefined before the first one ended. */
+  private decodes: boolean | undefined;
+  private check: DecodeCheck | undefined;
+  private nextCheckAt = 0;
 
-  constructor(
-    source: StandbySource,
-    settings: StandbyReaderSettings,
-    logger: Logger,
-    fetch: Fetch,
-    now: () => number,
-    liveEdge: StandbyLiveEdge | undefined,
-  ) {
+  constructor(source: StandbySource, settings: StandbyReaderSettings, logger: Logger, deps: ReaderDeps) {
+    const { liveEdge, now } = deps;
     this.source = source.source;
     this.settings = settings;
     this.logger = logger;
-    this.fetch = fetch;
+    this.fetch = deps.fetch;
     this.now = now;
+    this.decoder = deps.decoder;
     this.watch =
       source.stat === undefined || liveEdge === undefined
         ? undefined
@@ -94,6 +113,7 @@ class StandbyReader {
     this.closed.abort();
     this.attempt?.abort();
     this.watch?.stop();
+    this.check?.stop();
     await this.done;
   }
 
@@ -134,6 +154,8 @@ class StandbyReader {
       timer.unref();
     };
     arm();
+    const packets = new TsPackets();
+    let withoutVideo = 0;
     try {
       // The playback URL redirects to the stream itself.
       const response = await this.fetch(this.source, { signal: attempt.signal, redirect: "follow" });
@@ -143,11 +165,27 @@ class StandbyReader {
       }
       for await (const chunk of response.body) {
         this.bytes += (chunk as Uint8Array).byteLength;
-        if (this.watch === undefined || this.watch.edge.publishable()) {
+        const video = packets.push(chunk as Uint8Array) > 0;
+        if (video) {
+          this.decodeCheck(chunk as Uint8Array);
+        }
+        const decodes = this.decoder === undefined || this.decodes === true;
+        if (video && decodes && (this.watch === undefined || this.watch.edge.publishable())) {
           this.lastDataAt = this.now();
         }
         this.state = "receiving";
-        this.error = null;
+        this.error = this.decodes === false ? "ffmpeg decoded no video from it" : null;
+        const before = withoutVideo;
+        withoutVideo = video ? 0 : withoutVideo + (chunk as Uint8Array).byteLength;
+        if (withoutVideo >= NOT_VIDEO_WARN_BYTES) {
+          this.error = "the engine sends data that isn't MPEG-TS video";
+          if (before < NOT_VIDEO_WARN_BYTES) {
+            this.logger.warn(
+              { source: this.source, bytes: withoutVideo },
+              "standby gets data that isn't MPEG-TS video",
+            );
+          }
+        }
         arm();
       }
     } catch (error) {
@@ -155,7 +193,47 @@ class StandbyReader {
     } finally {
       clearTimeout(timer);
       attempt.abort();
+      // A check needs data that follows on; the next connection starts one of its own.
+      this.check?.stop();
     }
+  }
+
+  /** Feeds the running decode check, or starts one when it is time and a check is free. */
+  private decodeCheck(chunk: Uint8Array): void {
+    if (this.decoder === undefined) {
+      return;
+    }
+    if (this.check === undefined && this.now() >= this.nextCheckAt) {
+      const check = this.decoder.start();
+      if (check !== undefined) {
+        this.check = check;
+        void check.result.then((decoded) => {
+          this.checked(check, decoded);
+        });
+      }
+    }
+    this.check?.feed(chunk);
+  }
+
+  private checked(check: DecodeCheck, decoded: boolean): void {
+    if (this.check !== check) {
+      return;
+    }
+    this.check = undefined;
+    // A check stopped with its connection, or by close(), says nothing about the video.
+    if (this.isClosed() || this.attempt?.signal.aborted !== false) {
+      return;
+    }
+    const settings = this.decoder?.settings;
+    this.nextCheckAt = this.now() + (decoded ? (settings?.intervalMs ?? 0) : (settings?.retryMs ?? 0));
+    if (this.decodes !== decoded) {
+      if (decoded) {
+        this.logger.info({ source: this.source }, "standby video decodes");
+      } else {
+        this.logger.warn({ source: this.source }, "ffmpeg decoded no video from the standby");
+      }
+    }
+    this.decodes = decoded;
   }
 }
 
@@ -185,6 +263,7 @@ export class StandbyReaders {
   private readonly fetch: Fetch;
   private readonly now: () => number;
   private readonly liveEdge: StandbyLiveEdge | undefined;
+  private readonly decoder: DecodeChecker | undefined;
 
   constructor(
     logger: Logger,
@@ -192,12 +271,14 @@ export class StandbyReaders {
     fetchImpl: Fetch = fetch,
     now: () => number = Date.now,
     liveEdge?: StandbyLiveEdge,
+    decoder?: DecodeChecker,
   ) {
     this.logger = logger;
     this.settings = settings;
     this.fetch = fetchImpl;
     this.now = now;
     this.liveEdge = liveEdge;
+    this.decoder = decoder;
   }
 
   /** Reads exactly these sources from now on (a bare URL is a source without a stat URL). */
@@ -211,7 +292,12 @@ export class StandbyReaders {
     }
     for (const source of wanted) {
       if (!this.readers.has(source.source)) {
-        const reader = new StandbyReader(source, this.settings, this.logger, this.fetch, this.now, this.liveEdge);
+        const reader = new StandbyReader(source, this.settings, this.logger, {
+          fetch: this.fetch,
+          now: this.now,
+          liveEdge: this.liveEdge,
+          decoder: this.decoder,
+        });
         this.readers.set(source.source, reader);
       }
     }
