@@ -70,9 +70,9 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
   expect(cache).toBeGreaterThanOrEqual(0);
   expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
-  // The broadcast runner is the only peer and needs nothing from us: what the engine sends back while
-  // it downloads (acknowledgements and requests) doesn't count as uploads, in any of six gateway
-  // samples in a row soon after playback starts, when it downloads fastest.
+  // The broadcast runner is the only peer and needs nothing from us, so the engine reports no upload
+  // and no peer counts as uploading, in any of six gateway samples in a row soon after playback
+  // starts. The gateway alone sometimes counted the engine's other traffic to it as an upload.
   const uploading = String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`;
   await expect.poll(() => value(uploading)).toBeDefined();
   for (let sample = 0; sample < 6; sample++) {
@@ -84,6 +84,7 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
         .attach("gateway flows of the engine", { body: engineFlows(stream!.id), contentType: "text/plain" });
     }
     expect(count, `sample ${String(sample)}`).toBe(0);
+    expect((await streamById(request, stream!.id))?.uploadKBps, `sample ${String(sample)}`).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 });
