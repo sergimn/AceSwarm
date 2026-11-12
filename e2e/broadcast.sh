@@ -8,7 +8,8 @@
 #    P2P port 776(3+N). It reads its stream and writes the transport file bcN.acelive. Players find
 #    a broadcast by its infohash or its content ID.
 #  - The sources' built-in tracker refuses every announce ("not authorized"), so the sources and
-#    the players announce to e2e/tracker.ts (port 7700) instead.
+#    the players announce to e2e/tracker.ts (port 7700) instead. The tests also stop and start a
+#    broadcast's input through it (POST /inputs/bcN/stop|start), for a broadcast that stops.
 #
 #   broadcast.sh start HOST [COUNT]   HOST: the address players reach this machine on (its mesh
 #                                     address). COUNT broadcasts, 3 by default.
@@ -36,7 +37,7 @@ start() {
   local host="$1" total="${2:-3}" n
   mkdir -p "$BC_DIR"
   echo "$total" >"$BC_DIR/count"
-  nohup node "$here/tracker.ts" --port 7700 --host "$host" >"$BC_DIR/tracker.log" 2>&1 &
+  nohup node "$here/tracker.ts" --port 7700 --host "$host" --inputs >"$BC_DIR/tracker.log" 2>&1 &
   echo $! >"$BC_DIR/tracker.pid"
   for n in $(seq 1 "$total"); do
     start_one "$host" "$n"

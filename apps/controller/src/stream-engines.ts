@@ -358,7 +358,7 @@ export class StreamEngines {
       opened = session;
       const pipeline =
         move.handover === undefined
-          ? await this.deps.transcoder.start(this.streamId, { source: session.playbackUrl })
+          ? await this.deps.transcoder.start(this.streamId, { source: session.playbackUrl, stat: session.statUrl })
           : await handOverTo(this.deps.transcoder, this.streamId, session, reused !== undefined, move.handover);
       // The move is done: a later failure must not remove the engine the stream now plays from.
       starting.engine = undefined;

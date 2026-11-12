@@ -70,4 +70,27 @@ describe("VirtualPlaylist", () => {
     playlist.append(1, segments(5, 6), "1/");
     expect(playlist.length).toBe(1);
   });
+
+  it("drops segments older than a time, and keeps both sequences counting across the gap", () => {
+    const playlist = new VirtualPlaylist(6);
+    playlist.append(1, segments(0, 2), "1/", 1000);
+    playlist.append(1, segments(3, 3), "1/", 5000);
+    playlist.expire(2000);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:3\n");
+    playlist.expire(6000);
+    expect(playlist.render()).toBeUndefined();
+
+    // The next source comes after the gap: its first segment carries the tag at the head.
+    playlist.append(2, segments(0, 1), "2/", 7000);
+    const first = playlist.render()!;
+    expect(first).toContain("#EXT-X-MEDIA-SEQUENCE:4\n");
+    expect(first).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:0\n");
+    expect(first).toContain("#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\n2/seg_000000.ts");
+    // Once that segment leaves, the tag left with it: the discontinuity sequence counts it.
+    playlist.append(2, segments(2, 6), "2/", 8000);
+    const later = playlist.render()!;
+    expect(later).toContain("#EXT-X-MEDIA-SEQUENCE:5\n");
+    expect(later).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:1\n");
+    expect(later).not.toContain("#EXT-X-DISCONTINUITY\n");
+  });
 });

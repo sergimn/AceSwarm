@@ -369,7 +369,8 @@ a {
   color: var(--blue);
 }
 
-.state-stalled {
+.state-stalled,
+.state-stale-source {
   color: var(--amber);
 }
 
@@ -705,6 +706,36 @@ p.form-error {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.player.waiting-for-source .player-video {
+  visibility: hidden;
+}
+
+.player-waiting {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.player-waiting[hidden] {
+  display: none;
+}
+
+.player-waiting-title {
+  margin: 0;
+  font-size: 1.6em;
+}
+
+.player-waiting-reason {
+  max-width: 40em;
+  margin: 8px 0 0;
+  color: var(--muted);
 }
 
 .player-overlay {

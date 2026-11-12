@@ -1,6 +1,7 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService, runService } from "@aceswarm/shared/service";
 import { loadConfig } from "./config.ts";
+import { DEFAULT_LIVE_EDGE_SETTINGS } from "./live-edge.ts";
 import { PipelineManager, registerRoutes } from "./server.ts";
 
 const config = loadConfig();
@@ -13,6 +14,7 @@ const manager = new PipelineManager(
     hlsDir: config.HLS_DIR,
     ffmpegPath: config.FFMPEG_PATH,
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
+    liveEdge: { ...DEFAULT_LIVE_EDGE_SETTINGS, staleAfterMs: config.STALE_SOURCE_SECONDS * 1000 },
     plan: {
       previewMode: config.PREVIEW_MODE,
       previewHeight: config.PREVIEW_HEIGHT,

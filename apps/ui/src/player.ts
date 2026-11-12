@@ -14,6 +14,9 @@ export class Player {
   private readonly video: HTMLVideoElement;
   private readonly title: HTMLElement;
   private readonly details: HTMLElement;
+  /** Shown instead of the picture while the stream waits for its broadcast (stale source). */
+  private readonly waiting: HTMLElement;
+  private readonly waitingReason: HTMLElement;
   private readonly navigator: Navigator;
   private readonly watch: WatchReporter;
   private readonly backButton: HTMLButtonElement;
@@ -27,6 +30,11 @@ export class Player {
     this.video = h("video", { className: "player-video", attrs: { playsinline: true, autoplay: true } });
     this.title = h("h2", { className: "player-title" });
     this.details = h("p", { className: "player-details" });
+    this.waitingReason = h("p", { className: "player-waiting-reason" });
+    this.waiting = h("div", { className: "player-waiting", attrs: { hidden: true, role: "status" } }, [
+      h("p", { className: "player-waiting-title", text: "Waiting for the live broadcast" }),
+      this.waitingReason,
+    ]);
     const backButton = h("button", { className: "button", attrs: { type: "button" } }, [icon("back"), "Back"]);
     this.backButton = backButton;
     backButton.addEventListener("click", () => {
@@ -41,6 +49,7 @@ export class Player {
     });
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
+      this.waiting,
       h("div", { className: "player-overlay" }, [
         h("div", { className: "player-info" }, [this.title, this.details]),
         h("div", { className: "player-actions" }, [backButton, restartButton]),
@@ -92,6 +101,11 @@ export class Player {
       return;
     }
     this.title.textContent = stream.name;
+    // Its broadcast sends nothing new: the last picture would be old, so it doesn't show.
+    const waiting = stream.state === "stale-source";
+    this.root.classList.toggle("waiting-for-source", waiting);
+    this.waiting.hidden = !waiting;
+    this.waitingReason.textContent = waiting ? (stream.message ?? "") : "";
     this.details.textContent = [
       STATE_LABELS[stream.state],
       `Last frame: ${formatFreshness(stream.lastFrameAt, Date.now())}`,

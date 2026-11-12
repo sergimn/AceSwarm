@@ -1,11 +1,13 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LiveEdge } from "../src/live-edge.ts";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 
 /** An ffmpeg process that never delivers anything, as with an engine still looking for peers. */
@@ -85,19 +87,15 @@ describe("Pipeline", () => {
     };
     const events = { generationStarted: () => undefined, handover: () => undefined };
     const logger = createLogger("test", "silent");
-    pipeline = new Pipeline(
-      "s1",
-      settings,
-      logger,
-      events,
-      (_command, args) => {
+    pipeline = new Pipeline("s1", settings, logger, events, {
+      spawner: (_command, args) => {
         runs.push(args);
         const child = silentProcess();
         children.push(child);
         return child;
       },
       now,
-    );
+    });
     return pipeline;
   }
 
@@ -247,5 +245,334 @@ describe("Pipeline", () => {
     await instance.sync();
     expect(runs).toHaveLength(3);
     expect(instance.status().pendingSource).toBeNull();
+  });
+});
+
+describe("Pipeline with a source's live edge", () => {
+  let hlsDir: string;
+  let pipeline: Pipeline | undefined;
+  const children: ChildProcess[] = [];
+  /** The live edge each run follows, in order. */
+  const edges: { url: string; edge: LiveEdge; stopped: boolean }[] = [];
+  const clock = { now: 1_000_000 };
+
+  beforeEach(async () => {
+    hlsDir = await mkdtemp(join(tmpdir(), "pipeline-edge-test-"));
+    children.length = 0;
+    edges.length = 0;
+    clock.now = 1_000_000;
+  });
+
+  afterEach(async () => {
+    await pipeline?.stop();
+    await rm(hlsDir, { recursive: true, force: true });
+  });
+
+  function start(): Pipeline {
+    const settings: PipelineSettings = {
+      hlsDir,
+      ffmpegPath: "ffmpeg",
+      handoverTimeoutMs: 120_000,
+      plan: {
+        previewMode: "video",
+        previewHeight: 270,
+        previewFps: 15,
+        previewBitrateKbps: 400,
+        fullTranscodeMaxHeight: 1080,
+        audioBitrateKbps: 128,
+        segmentSeconds: 2,
+        playlistSize: 6,
+        thumbnailIntervalSeconds: 10,
+        inputTimeoutSeconds: 60,
+      },
+      liveEdge: { staleAfterMs: 60_000, noLiveAfterPolls: 10 },
+    };
+    const events = { generationStarted: () => undefined, handover: () => undefined };
+    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
+      spawner: () => {
+        const child = silentProcess();
+        children.push(child);
+        return child;
+      },
+      now: () => clock.now,
+      watchLiveEdge: (url, edge) => {
+        const watch = { url, edge, stopped: false };
+        edges.push(watch);
+        return {
+          edge,
+          stop: () => {
+            watch.stopped = true;
+          },
+        };
+      },
+    });
+    return pipeline;
+  }
+
+  /** What the engine's stats say: its live edge `last`, and how much it downloaded. */
+  function stat(run: number, last: number, downloaded: number): void {
+    edges[run]?.edge.observe({ status: "dl", downloaded, last, pos: last });
+  }
+
+  /** ffmpeg of generation `generation` wrote `count` segments of each variant so far. */
+  async function wrote(generation: number, count: number): Promise<void> {
+    for (const variant of ["full", "preview"]) {
+      const directory = join(hlsDir, "s1", `g${String(generation)}`, variant);
+      await mkdir(directory, { recursive: true });
+      const lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0"];
+      for (let index = 0; index < count; index += 1) {
+        lines.push("#EXTINF:2.000,", `seg_${String(index).padStart(6, "0")}.ts`);
+      }
+      await writeFile(join(directory, "index.m3u8"), `${lines.join("\n")}\n`);
+    }
+  }
+
+  /** An ffmpeg run (the first by default) reports its progress. */
+  function frames(frame: number, run = 0): void {
+    (children[run]?.stdout as PassThrough).write(`frame=${String(frame)}\nfps=25\nprogress=continue\n`);
+  }
+
+  async function playlist(instance: Pipeline): Promise<string[] | undefined> {
+    const text = await instance.playlist("full");
+    return text?.split("\n").filter((line) => line.length > 0 && !line.startsWith("#"));
+  }
+
+  /** The session's live edge moves a second each second, as a live broadcast's does, and it downloads. */
+  function live(run: number, from: number): void {
+    for (let step = 0; step <= 3; step += 1) {
+      clock.now += step === 0 ? 0 : 1000;
+      stat(run, from + step, 100 + step * 100);
+    }
+  }
+
+  it("publishes a new source only once its live edge moves, and only what it wrote after that", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    expect(edges.map((watch) => watch.url)).toEqual(["http://e1/stat"]);
+    // The engine serves what it has, but its live edge has not moved yet.
+    stat(0, 5000, 100);
+    await wrote(1, 2);
+    frames(50);
+    await nextTurn();
+    expect(await playlist(instance)).toBeUndefined();
+    expect(instance.status()).toMatchObject({ state: "running", lastFrameAt: null, liveEdge: { state: "waiting" } });
+
+    // Moving once is not enough: an engine can learn of a later end of an old window once.
+    clock.now += 1000;
+    stat(0, 5001, 400);
+    expect(await playlist(instance)).toBeUndefined();
+    clock.now += 1000;
+    stat(0, 5002, 450);
+    clock.now += 1000;
+    stat(0, 5003, 500);
+    // What it wrote before its edge was seen to move is not published.
+    expect(await playlist(instance)).toBeUndefined();
+    frames(100);
+    await nextTurn();
+    // Its video only counts once players can get some of it.
+    expect(instance.status().lastFrameAt).toBeNull();
+    await wrote(1, 3);
+    expect(await playlist(instance)).toEqual(["../g1/full/seg_000002.ts"]);
+    expect(instance.status()).toMatchObject({
+      lastFrameAt: new Date(clock.now).toISOString(),
+      liveEdge: { state: "live" },
+    });
+    clock.now += 500;
+    frames(110);
+    await nextTurn();
+    expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
+  });
+
+  it("publishes a source without a stat URL as before, and counts its video once it has a segment", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    frames(25);
+    await nextTurn();
+    expect(instance.status().lastFrameAt).toBeNull();
+    // A preview segment alone gives players of the full stream nothing.
+    const preview = join(hlsDir, "s1", "g1", "preview");
+    await mkdir(preview, { recursive: true });
+    await writeFile(join(preview, "index.m3u8"), "#EXTM3U\n#EXTINF:2.000,\nseg_000000.ts\n");
+    await instance.sync();
+    expect(instance.status().lastFrameAt).toBeNull();
+
+    await wrote(1, 2);
+    expect(await playlist(instance)).toEqual(["../g1/full/seg_000000.ts", "../g1/full/seg_000001.ts"]);
+    expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
+    expect(edges).toHaveLength(0);
+    expect(instance.status().liveEdge).toBeNull();
+  });
+
+  it("stops reading a source whose live edge stops, and drops its segments once they are old", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    await instance.sync();
+    await wrote(1, 2);
+    expect(await playlist(instance)).toEqual(["../g1/full/seg_000000.ts", "../g1/full/seg_000001.ts"]);
+
+    // The broadcast stops: the engine keeps answering, with the same live edge.
+    clock.now += 30_000;
+    stat(0, 5003, 400);
+    await instance.sync();
+    expect(children[0]?.killed).toBe(false);
+    expect(await playlist(instance)).toHaveLength(2);
+
+    clock.now += 31_000;
+    await instance.sync();
+    expect(children[0]?.killed).toBe(true);
+    // Nothing of it is published from now on, and what was is older than the threshold.
+    await wrote(1, 4);
+    expect(await playlist(instance)).toBeUndefined();
+    expect(instance.status()).toMatchObject({
+      liveEdge: { state: "stale" },
+      error: "stopped reading: the broadcast's live edge did not move for 60s",
+    });
+
+    // Its live edge is still followed: the engine may see the broadcast come back first, which
+    // tells the controller to try again now. This one stays stopped.
+    expect(edges[0]?.stopped).toBe(false);
+    clock.now += 1000;
+    stat(0, 5004, 500);
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "live", edgeAt: new Date(5_004_000).toISOString() });
+    expect(await playlist(instance)).toBeUndefined();
+  });
+
+  it("finds a new session that only has the same old window stale at once", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    await instance.sync();
+    clock.now += 61_000;
+    await instance.sync();
+    expect(instance.status().liveEdge?.state).toBe("stale");
+
+    // A new session gets the old window from peers that still have it.
+    await instance.start("http://e1/play-2", false, 0, "http://e1/stat-2");
+    stat(1, 5003, 2_000_000);
+    await wrote(2, 3);
+    await instance.sync();
+    expect(instance.status().liveEdge?.state).toBe("stale");
+    expect(children[1]?.killed).toBe(true);
+    expect(await playlist(instance)).toBeUndefined();
+
+    // The broadcast is back: the next session's edge is newer than any the stream had, and moves.
+    await instance.start("http://e1/play-3", false, 0, "http://e1/stat-3");
+    live(2, 5400);
+    await instance.sync();
+    await wrote(3, 1);
+    expect(await playlist(instance)).toEqual(["../g3/full/seg_000000.ts"]);
+    expect(instance.status().liveEdge?.state).toBe("live");
+  });
+
+  it("does not publish a new session that only knows of a slightly later end of the old window", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    await instance.sync();
+    clock.now += 61_000;
+    await instance.sync();
+
+    // Another engine had a few more seconds of the window, and it serves them: its edge is newer
+    // than the stream's and it downloads, but the edge never moves again.
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    stat(1, 5006, 100);
+    for (let poll = 1; poll <= 61; poll += 1) {
+      clock.now += 1000;
+      stat(1, 5006, 100 + poll * 10_000);
+      await instance.sync();
+      if (poll === 30) {
+        await wrote(2, 3);
+      }
+      expect(await playlist(instance)).toBeUndefined();
+    }
+    expect(instance.status()).toMatchObject({ lastFrameAt: null, liveEdge: { state: "stale" } });
+  });
+
+  it("does not hand over to a source whose live edge does not move, and gives up once it is stale", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    await wrote(1, 1);
+    await instance.sync();
+
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
+    stat(1, 4990, 1_000_000);
+    await wrote(2, 3);
+    for (let step = 0; step < 6; step += 1) {
+      clock.now += 10_000;
+      stat(0, 5004 + step * 10, 500 + step);
+      await instance.sync();
+    }
+    expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
+
+    clock.now += 1;
+    stat(0, 5100, 500);
+    await instance.sync();
+    expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: null });
+    expect(children[1]?.killed).toBe(true);
+  });
+
+  it("hands over once the new source's live edge moves and it wrote a segment since", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    await instance.sync();
+    await wrote(1, 2);
+    await instance.sync();
+
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
+    stat(1, 5003, 100);
+    await wrote(2, 1);
+    for (const last of [5004, 5005, 5006]) {
+      clock.now += 1000;
+      stat(1, last, last - 4900);
+    }
+    await instance.sync();
+    expect(instance.status().pendingSource).toBe("http://e2/play");
+    frames(40, 1);
+    await nextTurn();
+    await wrote(2, 2);
+    await instance.sync();
+    // The controller's handover waits for video from the new source: it counts at once.
+    expect(instance.status()).toMatchObject({
+      source: "http://e2/play",
+      pendingSource: null,
+      lastFrameAt: new Date(clock.now).toISOString(),
+    });
+    expect(await playlist(instance)).toEqual([
+      "../g1/full/seg_000000.ts",
+      "../g1/full/seg_000001.ts",
+      "../g2/full/seg_000001.ts",
+    ]);
+  });
+
+  it("only shows a thumbnail written while the source's output is published, and only while recent", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    const thumbnail = join(hlsDir, "s1", "g1", "thumbnail.jpg");
+    await mkdir(join(hlsDir, "s1", "g1"), { recursive: true });
+    await writeFile(thumbnail, "old window");
+    await utimes(thumbnail, new Date(clock.now), new Date(clock.now));
+    stat(0, 5000, 100);
+    expect(instance.thumbnailPath()).toBeUndefined();
+
+    for (const last of [5001, 5002, 5003]) {
+      clock.now += 1000;
+      stat(0, last, last - 4900);
+    }
+    await instance.sync();
+    expect(instance.thumbnailPath()).toBeUndefined();
+    clock.now += 1000;
+    await utimes(thumbnail, new Date(clock.now), new Date(clock.now));
+    expect(instance.thumbnailPath()).toBe(thumbnail);
+
+    // The source goes stale; its ffmpeg writes one more picture as it stops, which is no newer.
+    clock.now += 61_000;
+    await instance.sync();
+    expect(children[0]?.killed).toBe(true);
+    await utimes(thumbnail, new Date(clock.now), new Date(clock.now));
+    expect(instance.thumbnailPath()).toBeUndefined();
   });
 });

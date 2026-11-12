@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { addStream, compose, engineContainers, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
+import {
+  addStream,
+  compose,
+  docker,
+  engineContainers,
+  resetStack,
+  snapshot,
+  streamById,
+  waitForPlaying,
+} from "./helpers.ts";
 import { broadcasts, type Broadcast } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -67,11 +76,28 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   const uploading = String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`;
   await expect.poll(() => value(uploading)).toBeDefined();
   for (let sample = 0; sample < 6; sample++) {
-    expect(await value(uploading)).toBe(0);
-    expect((await streamById(request, stream!.id))?.uploadKBps).toBe(0);
+    const count = await value(uploading);
+    if (count !== 0) {
+      // Which remote it was: the gateway's connections of the engine, with their byte counters.
+      await test
+        .info()
+        .attach("gateway flows of the engine", { body: engineFlows(stream!.id), contentType: "text/plain" });
+    }
+    expect(count, `sample ${String(sample)}`).toBe(0);
+    expect((await streamById(request, stream!.id))?.uploadKBps, `sample ${String(sample)}`).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 });
+
+/** The gateway's tracked connections of the stream's engines, as `conntrack -L` prints them. */
+function engineFlows(streamId: string): string {
+  const ips = engineContainers(streamId).map((name) =>
+    docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name).trim(),
+  );
+  const flows = compose("exec", "-T", "netgw", "conntrack", "-L");
+  const lines = flows.split("\n").filter((line) => ips.some((ip) => ip !== "" && line.includes(`src=${ip} `)));
+  return `engines: ${ips.join(", ")}\n${lines.join("\n")}\n`;
+}
 
 test("detects infohashes without being told", async ({ page, request }) => {
   // A bare value is tried as a content ID first; the engine rejects it, so it must fall back.

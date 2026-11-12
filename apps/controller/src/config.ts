@@ -80,6 +80,12 @@ const schema = z
     STARTUP_GRACE_SECONDS: envInt(90),
     RECOVERY_BASE_DELAY_SECONDS: envInt(5),
     RECOVERY_MAX_DELAY_SECONDS: envInt(300),
+    /**
+     * While a stream's broadcast sends nothing new (the transcoder found its live edge stale, see
+     * STALE_SOURCE_SECONDS there), the first wait before the next new engine. It doubles
+     * up to RECOVERY_MAX_DELAY_SECONDS, and the stream keeps trying until the broadcast is back.
+     */
+    STALE_SOURCE_RETRY_SECONDS: z.coerce.number().int().min(1).default(30),
     HANDOVER_TIMEOUT_SECONDS: envInt(120),
     /**
      * How many streams at once may keep the new engine of a failed move, to try again on it rather

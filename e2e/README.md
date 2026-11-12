@@ -52,7 +52,7 @@ flowchart TB
 | every runner                     | TCP 18999         | files shared on the mesh (`mesh.sh share`) |
 | `192.0.2.1`                      | UDP 51820         | WireGuard server under test                |
 | `192.0.2.2`                      | TCP+UDP 7764-7769 | broadcast sources (P2P)                    |
-| `192.0.2.2`                      | TCP 7700          | tracker (`/announce`, `/stats`)            |
+| `192.0.2.2`                      | TCP 7700          | tracker (`/announce`, `/stats`, `/inputs`) |
 | `127.0.0.1` on the source runner | TCP 18001-18006   | ffmpeg's HTTP MPEG-TS inputs               |
 | `127.0.0.1` on a stack runner    | TCP 18080         | AceSwarm UI and API                        |
 
@@ -68,13 +68,14 @@ flowchart LR
   FW -- "to one broadcast's P2P port<br/>setBroadcastBlocked" --x S
 ```
 
-| Condition                          | How the tests make it                                                                      | Used by                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| a swarm that dries up              | `setDirectPathBlocked(true)` while there is no WireGuard profile, so no path can help      | stall recovery                                         |
-| an ISP that blocks Acestream peers | `setDirectPathBlocked(true)` with a WireGuard path up                                      | moving to the VPN, fail closed after a gateway restart |
-| a VPN provider that went away      | `setVpnServerUnreachable(true)`: the tunnel stops carrying anything and its path goes down | WireGuard only: streams wait instead of going direct   |
-| an engine that crashes             | `docker restart` of one engine container                                                   | the other streams are left alone                       |
-| one swarm that dries up            | `setBroadcastBlocked(broadcast, true)`: only that broadcast's P2P port on `192.0.2.2`      | one engine per path: the other stream keeps playing    |
+| Condition                          | How the tests make it                                                                      | Used by                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| a swarm that dries up              | `setDirectPathBlocked(true)` while there is no WireGuard profile, so no path can help      | stall recovery                                          |
+| a broadcast that stops             | `setBroadcastInput(broadcast, false)`: the tracker stops that broadcast's ffmpeg input     | waiting for the source, never publishing its old window |
+| an ISP that blocks Acestream peers | `setDirectPathBlocked(true)` with a WireGuard path up                                      | moving to the VPN, fail closed after a gateway restart  |
+| a VPN provider that went away      | `setVpnServerUnreachable(true)`: the tunnel stops carrying anything and its path goes down | WireGuard only: streams wait instead of going direct    |
+| an engine that crashes             | `docker restart` of one engine container                                                   | the other streams are left alone                        |
+| one swarm that dries up            | `setBroadcastBlocked(broadcast, true)`: only that broadcast's P2P port on `192.0.2.2`      | one engine per path: the other stream keeps playing     |
 
 The direct-path block only drops traffic to the broadcast runner, so the direct path keeps answering the gateway's pings (they go to the WireGuard server's runner) and keeps its better probe score. That is what a connection that blocks Acestream peers looks like, and a stream still has to leave it.
 
@@ -145,7 +146,10 @@ flowchart TB
 
 - **Sharing files.** Each runner serves `$RUNNER_TEMP/mesh/share` on its mesh address, port 18999. `mesh.sh share` publishes a file, and `mesh.sh wait-file` polls a peer for one.
 - **Finishing.** Each stack job shares `done` even when it fails. The WireGuard and broadcast jobs wait for it from every stack runner that joined (`mesh.sh wait-all`), so one stack finishing early never takes the VPN or the broadcasts away from the other. A stack job keeps serving `done` until both have fetched it (`mesh.sh wait-fetched`, at most two minutes), because its file server stops with the job. If a stack runner disappears (cancelled or crashed), they stop waiting for it after it hasn't answered pings for about five minutes.
-- **A stack runner that is late or never shows up** holds nobody up: the WireGuard and broadcast jobs join the stacks as optional peers (`stack?` in `mesh.sh join`) and add each one as soon as its artifact appears, while the other stack's handshakes already get answers. A stack that hasn't appeared after ten minutes is left out, and until then the shared runners don't start their servers, so its absence delays the other stack by up to ten minutes but doesn't fail it.
+- **A stack runner that is late or never shows up** holds nobody up: the WireGuard and broadcast jobs join the stacks as optional peers (`stack?` in `mesh.sh join`) and add each one as soon as its artifact appears, while the other stack's handshakes already get answers. A stack that hasn't appeared after ten minutes, or whose job ended without publishing its address, is left out, and until then the shared runners don't start their servers, so its absence delays the other stack by up to ten minutes but doesn't fail it.
+- **Time limits.** Every setup and test step has a limit of a few times its usual length, so a step that hangs fails within minutes instead of at the job's limit (50 minutes for a stack job, 60 for the two that serve them, which wait for both stacks). The tests usually take about 14 minutes; in CI Playwright stops them at 30 (`globalTimeout`), before the step's 35-minute limit, so the report still gets uploaded.
+- **Slow setup.** `mesh.sh prepare` usually takes 10-15 s, but apt once hung for a whole one-hour job while installing wireguard-tools. Installing now gets three tries of at most a minute each (`MESH_TRIES`, `MESH_APT_SECONDS`), and STUN gets three tries of at most 20 s.
+- **A runner that fails early.** While `mesh.sh join` waits for a peer's artifact, it also checks every 15 s or so whether that peer's job has ended. If it has, a required peer fails the join at once and an optional one is left out, instead of waiting out ten minutes for a runner that will never publish its address. A stack job that fails before joining doesn't wait for anyone to fetch its `done`.
 - **Re-runs.** Use "Re-run all jobs". Re-running a single job can't work, because it would wait for runners that are gone.
 
 ## The broadcasts
@@ -177,16 +181,16 @@ flowchart LR
   I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
 ```
 
-| Spec                     | Engines | Checks                                                                                                                                                                                              |
-| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                           |
-| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                       |
-| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                      |
-| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone                                                                                                        |
-| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids             |
-| `standby.spec.ts`        | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off |
-| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                   |
-| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                   |
+| Spec                     | Engines | Checks                                                                                                                                                                                                                                                                 |
+| ------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isolation.spec.ts`      | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                                                                                              |
+| `navigation.spec.ts`     | 3       | arrow key navigation for TV remotes, the full screen player and Back, previews and thumbnails                                                                                                                                                                          |
+| `paths.spec.ts`          | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                                                                                         |
+| `recovery.spec.ts`       | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone, a broadcast that stops and comes back: "stale-source", nothing old published, slow retries, fresh video after                                                            |
+| `shared-engines.spec.ts` | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids                                                                                |
+| `standby.spec.ts`        | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off, a broadcast that stops while both its engines hold its old window |
+| `streams.spec.ts`        | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, removal                                                                                                                                      |
+| `wireguard-only.spec.ts` | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                                                                                      |
 
 ### Content IDs and infohashes
 
@@ -230,6 +234,26 @@ sequenceDiagram
   T->>FW: remove the DROP rule
   AS->>SRC: the next recovery step plays again
   T->>AS: playing on the direct path
+```
+
+### A broadcast that stops
+
+The tracker on the broadcast runner stops and starts a broadcast's ffmpeg input (`POST /inputs/bcN/stop|start`). Its source engine keeps running with the window it has, so the stream's engine keeps its connection and its peers, and each new session still gets that old window: data comes, but the live edge stops. That is what a broadcast that stops looks like, and what a firewall rule can't make.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Playwright
+  participant SRC as broadcast runner (tracker)
+  participant AS as AceSwarm
+  T->>AS: add a broadcast, playing, live edge "live"
+  T->>SRC: POST /inputs/bcN/stop
+  AS->>AS: no new video: restart the session, which only gets the old window
+  AS->>AS: live edge unchanged for STALE_SOURCE_SECONDS (30): "stale-source"
+  T->>AS: playlist and thumbnail 404 for 30 s, never "playing", at most a few tries
+  T->>SRC: POST /inputs/bcN/start
+  AS->>AS: the next new session's live edge moves
+  T->>AS: playing, live edge "live" and moving, newest segment is MPEG-TS
 ```
 
 ### Network paths
@@ -316,6 +340,10 @@ sequenceDiagram
   T->>AS: pause the VPN's shared engine, then unpause it
   AS->>AS: fail over to the direct path's shared engine
   T->>AS: turn "Hot standby on other paths" off in the Streams dialog: standbys go
+  T->>AS: turn it on again, without engine sharing: two engines of its own, one standby "hot"
+  T->>AS: stop the broadcast's input: both engines keep its old window and peer with each other
+  AS->>AS: "stale-source", the standby goes, no segment listed or "playing" after the threshold
+  T->>AS: start the input: it plays from new data, and its standby gets hot again
 ```
 
 The faults are engines that hang, not paths that lose the broadcast. With a standby running, cutting the direct path off does not stall the stream: its engine keeps getting the broadcast from the standby, over the engines' network.
