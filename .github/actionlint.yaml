@@ -3,3 +3,5 @@ self-hosted-runner:
   labels:
     # Ubuntu 26.04 image (public preview), used by the Podman E2E leg.
     - ubuntu-26.04
+    # 1 vCPU container runner, used by the lint and pre-commit jobs in CI.
+    - ubuntu-slim
