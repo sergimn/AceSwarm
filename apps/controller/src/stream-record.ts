@@ -1,13 +1,16 @@
 import type { Logger } from "@aceswarm/shared/logger";
 import type { AcestreamClient, EngineSession } from "./acestream.ts";
+import type { TranscoderClient } from "./clients.ts";
 import type { EnginePaths } from "./engine-paths.ts";
 import type { EngineHandle } from "./engines.ts";
 import { startSessionOfAnyKind } from "./playback.ts";
+import { SavedPlayback } from "./saved-playback.ts";
 import type { StreamConfig, StreamStore } from "./stream-store.ts";
 
 export interface StreamRecordDeps {
   ace: AcestreamClient;
   store: StreamStore;
+  transcoder: TranscoderClient;
   logger: Logger;
   /** The gateway paths of the stream's own engines. */
   gateway: EnginePaths;
@@ -15,15 +18,19 @@ export interface StreamRecordDeps {
 
 /**
  * A stream's config as its supervisor knows it. What the supervisor learns about the stream (the
- * path it plays on, the kind of identifier the engine accepted) is saved in the stream store.
+ * path it plays on, the kind of identifier the engine accepted, the session it plays from) is saved
+ * in the stream store.
  */
 export class StreamRecord {
   config: StreamConfig;
+  /** The session the stream plays from, which a restarted controller takes over. */
+  readonly playback: SavedPlayback;
   private readonly deps: StreamRecordDeps;
 
   constructor(config: StreamConfig, deps: StreamRecordDeps) {
     this.config = config;
     this.deps = deps;
+    this.playback = new SavedPlayback(config.id, deps, deps.logger);
   }
 
   /** Starts an engine session and remembers which kind of identifier the engine accepted. */

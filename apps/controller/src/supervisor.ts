@@ -12,7 +12,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { duration, evaluateHealth } from "./health.ts";
-import { sleep } from "./playback.ts";
+import { sleep, waitAtMost } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { SourceWait } from "./source-wait.ts";
@@ -164,13 +164,16 @@ export class StreamSupervisor {
     this.schedule(0);
   }
 
-  /** Stops supervising. With `teardown`, also removes the engine and pipeline. */
-  async stop(teardown: boolean): Promise<void> {
+  /**
+   * Stops supervising. With `teardown`, also removes the engine and pipeline, once the step in
+   * progress is done. Without, it waits at most `waitMs` for that step: opening a session or a
+   * handover can take minutes, and the controller only stops this way to shut down. What the step
+   * leaves, the next run takes over.
+   */
+  async stop(teardown: boolean, waitMs = Infinity): Promise<void> {
     this.running = false;
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer);
-    }
-    await this.current;
+    clearTimeout(this.timer);
+    await waitAtMost(this.current, teardown ? Infinity : waitMs);
     if (teardown) {
       await this.teardown();
     }
@@ -479,6 +482,7 @@ export class StreamSupervisor {
     this.engine = moved.engine;
     this.session = moved.session;
     this.pipeline = moved.pipeline;
+    await this.record.playback.save(moved.session);
     this.attemptStartedAt = this.now();
     await this.record.persistPath(target);
     if (switchingPath) {
@@ -589,13 +593,21 @@ export class StreamSupervisor {
     await this.startPlayback(restarted);
   }
 
+  /**
+   * Opens a session on the engine and has the transcoder read it. The stream's first start after a
+   * controller restart takes over the playback the previous run left instead, when there is one
+   * (see `SavedPlayback`): nothing starts then, and health counts from when its ffmpeg started.
+   */
   private async startPlayback(engine: EngineHandle): Promise<void> {
-    const session = await this.record.openSession(engine.baseUrl);
+    const running = await this.record.playback.takeOver(engine, this.now());
+    const session = running?.session ?? (await this.record.openSession(engine.baseUrl));
     this.session = session;
-    this.attemptStartedAt = this.now();
-    this.stats = undefined;
+    this.attemptStartedAt = running?.startedAt ?? this.now();
+    this.stats = running?.stats;
     const { playbackUrl: source, statUrl: stat } = session;
-    this.pipeline = await this.deps.transcoder.start(this.stream.id, { source, stat });
+    this.pipeline = running?.pipeline ?? (await this.deps.transcoder.start(this.stream.id, { source, stat }));
+    // Once the transcoder reads it.
+    await this.record.playback.save(session);
   }
 
   /** Gives the engine the path for a start attempt, once the gateway's paths are known. */
@@ -607,11 +619,7 @@ export class StreamSupervisor {
   }
 
   private async stopSessionQuietly(): Promise<void> {
-    if (this.session === undefined) {
-      return;
-    }
-
-    await this.deps.ace.stopSession(this.session.commandUrl).catch(() => undefined);
+    await this.record.playback.stop(this.session);
     this.session = undefined;
   }
 

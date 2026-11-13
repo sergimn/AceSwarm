@@ -84,6 +84,7 @@ const stream: StreamConfig = {
   createdAt: new Date(0).toISOString(),
   path: null,
   ownEngine: null,
+  session: null,
 };
 
 interface Fakes {
@@ -130,6 +131,10 @@ interface Fakes {
   arrives?: Map<string, number>;
   /** Playback URLs whose current ffmpeg exits at a time on the fake clock; a new start clears it. */
   exits?: Map<string, number>;
+  /** The session the stream played from before the controller restarted. */
+  savedSession?: EngineSession;
+  /** While on, opening a session never finishes. */
+  hangSessions?: boolean;
   /** While on, the stream keeps hot standbys on the other paths (off by default). */
   hotStandby?: { on: boolean };
   standby?: Partial<StandbySettings>;
@@ -192,6 +197,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const stopped: string[] = [];
   const ace = {
     startSession: (baseUrl: string) => {
+      if (fakes.hangSessions === true) {
+        return new Promise(() => undefined);
+      }
       sessions += 1;
       return fakes.failFirstSession === true && sessions === 1
         ? Promise.reject(new Error("engine died"))
@@ -249,8 +257,10 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     const source = real.active;
     return { ...pipeline, state, source, pendingSource: real.pending ?? null, lastFrameAt: real.lastFrameAt };
   };
+  const transcoderStarts: string[] = [];
   const transcoder = {
     start: (_id: string, input: { source: string }, handover?: boolean) => {
+      transcoderStarts.push(input.source);
       pending = handover === true ? input.source : undefined;
       if (handover === true) {
         handovers.push(input.source);
@@ -329,7 +339,11 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     peers: () => Promise.reject(new Error("no peers")),
   } as unknown as NetgwClient;
   const updates: Record<string, unknown>[] = [];
-  let saved: StreamConfig = fakes.ownEngine === undefined ? stream : { ...stream, ownEngine: fakes.ownEngine };
+  let saved: StreamConfig = {
+    ...stream,
+    ...(fakes.ownEngine !== undefined && { ownEngine: fakes.ownEngine }),
+    ...(fakes.savedSession !== undefined && { session: fakes.savedSession }),
+  };
   const store = {
     get: () => saved,
     update: (_id: string, patch: Partial<StreamConfig>) => {
@@ -377,9 +391,11 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     stopped,
     handovers,
     sessions: () => sessions,
+    transcoderStarts,
     creates: () => creates,
     readers,
     updates,
+    saved: () => saved,
     real,
   };
 }
@@ -475,6 +491,128 @@ describe("taking over engines after a controller restart", () => {
     expect(fake.removed).toEqual([engine.containerId]);
     expect(fake.updates).toContainEqual({ ownEngine: newer.name });
   });
+});
+
+describe("taking over the playback after a controller restart", () => {
+  const restarted = { found: [engine], ownEngine: engine.name, savedSession: session };
+
+  test("takes over the session and the ffmpeg reading it, so the picture never stops", async () => {
+    const fake = supervisor([direct], { ...restarted, video: { on: true } });
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+    expect(fake.stopped).toEqual([]);
+    expect(fake.saved().session).toEqual(session);
+
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(fake.sessions()).toBe(0);
+  });
+
+  test("on a shared engine too", async () => {
+    const shared: EngineHandle = { ...engine, containerId: "shared-1", streamId: "", sharedPath: "direct" };
+    const pool = {
+      acquire: () => Promise.resolve(shared),
+      isCurrent: () => true,
+      release: () => Promise.resolve(),
+    } as unknown as SharedEngines;
+    const fake = supervisor([direct], { savedSession: session, shared: pool, sharing: { on: true } });
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+  });
+
+  test("counts health from when that playback started, without a new startup grace", async () => {
+    // The ffmpeg it took over never showed video.
+    const fake = supervisor([direct], restarted);
+    fake.clock.now = Date.parse(pipeline.startedAt) + settings.startupGraceMs + 1000;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("recovering");
+  });
+
+  test("starts the stream when the transcoder reads another source, and stops the old session", async () => {
+    const old = { ...session, playbackUrl: `${engine.baseUrl}/old`, commandUrl: `${engine.baseUrl}/old-cmd` };
+    const fake = supervisor([direct], { ...restarted, savedSession: old });
+    await fake.instance.tick();
+    expect(fake.stopped).toEqual([old.commandUrl]);
+    expect(fake.sessions()).toBe(1);
+    expect(fake.transcoderStarts).toEqual([`${engine.baseUrl}/play`]);
+    expect(fake.saved().session?.playbackUrl).toBe(`${engine.baseUrl}/play`);
+  });
+
+  test("starts the stream when the previous run stopped in the middle of a move", async () => {
+    const old = { ...session, playbackUrl: `${engine.baseUrl}/old`, commandUrl: `${engine.baseUrl}/old-cmd` };
+    const fake = supervisor([direct], { ...restarted, savedSession: old, sources: new Set([old.playbackUrl]) });
+    // The transcoder plays from the saved session, and still waits for video from another engine,
+    // which it would cut over to.
+    fake.real.active = old.playbackUrl;
+    fake.real.pending = "http://172.31.250.77:6878/play";
+    fake.real.since = fake.clock.now;
+    await fake.instance.tick();
+    expect(fake.stopped).toEqual([old.commandUrl]);
+    expect(fake.sessions()).toBe(1);
+    expect(fake.transcoderStarts).toEqual([`${engine.baseUrl}/play`]);
+    expect(fake.real.pending).toBeUndefined();
+  });
+
+  test("tries again once the transcoder answers, rather than starting the stream while it can't be reached", async () => {
+    const transcoderDown = { on: true };
+    const fake = supervisor([direct], { ...restarted, video: { on: true }, transcoderDown });
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("error");
+    expect(fake.sessions()).toBe(0);
+    expect(fake.stopped).toEqual([]);
+    expect(fake.saved().session).toEqual(session);
+
+    transcoderDown.on = false;
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(fake.sessions()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+    expect(fake.stopped).toEqual([]);
+  });
+
+  test("starts the stream when the engine no longer knows the session", async () => {
+    const fake = supervisor([direct], { ...restarted, sessionsForgotten: { on: true } });
+    await fake.instance.tick();
+    expect(fake.stopped).toEqual([]);
+    expect(fake.sessions()).toBe(1);
+    expect(fake.transcoderStarts).toHaveLength(1);
+  });
+
+  test("starts the stream when the engine came back on another address", async () => {
+    const moved: EngineHandle = { ...engine, ip: "172.31.250.99", baseUrl: "http://172.31.250.99:6878" };
+    const fake = supervisor([direct], { ...restarted, reviveAs: new Map([[engine.containerId, moved]]) });
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(1);
+    expect(fake.transcoderStarts).toEqual([`${moved.baseUrl}/play`]);
+    // Whatever engine has its old address now, it shouldn't pull the stream for nobody.
+    expect(fake.stopped).toEqual([session.commandUrl]);
+    expect(fake.saved().session?.playbackUrl).toBe(`${moved.baseUrl}/play`);
+  });
+
+  test("forgets the session once it stops, and remembers the next one", async () => {
+    const fake = supervisor([direct], { ...restarted, video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.updates).toContainEqual({ session: null });
+    expect(fake.saved().session).toEqual(session);
+    expect(fake.sessions()).toBe(1);
+  });
+});
+
+test("shutting down waits only a moment for a step in progress", async () => {
+  const fake = supervisor([direct], { hangSessions: true });
+  fake.instance.start();
+  // The first tick starts the engine, then waits forever for its session.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const started = Date.now();
+  await fake.instance.stop(false, 50);
+  expect(Date.now() - started).toBeLessThan(1000);
 });
 
 describe("moving a stream to another path", () => {
@@ -1470,6 +1608,50 @@ describe("hot standby on the other paths", () => {
     // It opened a new session there, which the transcoder reads.
     await fake.instance.tick();
     expect(fake.readers.at(-1)).toEqual([play(main)]);
+  });
+
+  test("remembers the engine and session it failed over to, for a restarted controller", async () => {
+    const fake = await withStandby();
+    expect(fake.saved()).toMatchObject({ ownEngine: main.name, session: { playbackUrl: play(main) } });
+    fake.sources.delete(play(main));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.saved()).toMatchObject({
+      ownEngine: standbyEngine.name,
+      path: "wg:a",
+      session: { playbackUrl: play(standbyEngine), commandUrl: `${standbyEngine.baseUrl}/cmd` },
+    });
+  });
+
+  test("a restarted controller takes over the playback, removes the standby it finds and starts a new one", async () => {
+    const saved = { playbackUrl: play(main), statUrl: `${main.baseUrl}/stat`, commandUrl: `${main.baseUrl}/cmd` };
+    const next = own(3);
+    const fake = supervisor([direct, vpn], {
+      found: [standbyEngine, main],
+      ownEngine: main.name,
+      savedSession: saved,
+      created: [next],
+      sources: new Set([play(main), play(next)]),
+      hotStandby: { on: true },
+    });
+    // The previous run's ffmpeg still reads the stream's session.
+    fake.real.active = play(main);
+    await fake.instance.tick();
+    expect(fake.removed).toEqual([standbyEngine.containerId]);
+    expect(fake.sessions()).toBe(0);
+
+    await fake.instance.tick();
+    await settle();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0, engine: { name: main.name } });
+    expect(fake.instance.view().standbys).toEqual([
+      { path: "wg:a", state: "hot", engine: { name: next.name, shared: false } },
+    ]);
+    // Only the new standby opened a session, and no ffmpeg started: the stream's own went on.
+    expect(fake.sessions()).toBe(1);
+    expect(fake.transcoderStarts).toEqual([]);
+    // The first check stops the readers the previous run left at the transcoder.
+    expect(fake.readers[0]).toEqual([]);
   });
 
   test("fails over to the hot standby before any other recovery step", async () => {

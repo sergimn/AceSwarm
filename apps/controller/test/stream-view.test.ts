@@ -13,6 +13,7 @@ const stream: StreamConfig = {
   createdAt: "2026-11-07T15:00:00.000Z",
   path: "direct",
   ownEngine: null,
+  session: null,
 };
 
 const peers: PeerStats = {

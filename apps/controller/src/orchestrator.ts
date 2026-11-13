@@ -55,6 +55,8 @@ export interface OrchestratorDeps {
   /** Hot standbys on the other paths (see `StreamStandbys`). */
   standby?: StandbySettings;
   pathPollMs?: number;
+  /** How long shutting down waits for each stream's step in progress (see `stop`). */
+  stopWaitMs?: number;
 }
 
 /** Owns one supervisor per enabled stream and applies changes coming from the API. */
@@ -128,12 +130,17 @@ export class Orchestrator {
     this.launched = true;
   }
 
-  /** Stops supervision but leaves engines running so a restarted controller can adopt them. */
+  /**
+   * Stops supervision but leaves engines, sessions and pipelines running, so that a restarted
+   * controller takes them over and players see no gap. It waits at most `stopWaitMs` for steps in
+   * progress: Docker and Podman kill a container that hasn't stopped after 10 seconds.
+   */
   async stop(): Promise<void> {
     if (this.pathTimer !== undefined) {
       clearInterval(this.pathTimer);
     }
-    await Promise.all(this.supervisors.values().map((supervisor) => supervisor.stop(false)));
+    const waitMs = this.deps.stopWaitMs ?? 2000;
+    await Promise.all(this.supervisors.values().map((supervisor) => supervisor.stop(false, waitMs)));
     this.supervisors.clear();
   }
 

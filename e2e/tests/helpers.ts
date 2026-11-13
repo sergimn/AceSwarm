@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import type { PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
@@ -111,6 +112,17 @@ export function docker(...args: string[]): string {
 
 export function compose(...args: string[]): string {
   return docker("compose", "-p", PROJECT, ...args);
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * `compose`, without blocking: the spec's own polling (of a playlist, say) goes on while it runs.
+ * `compose` blocks the whole worker until the command exits.
+ */
+export async function composeAsync(...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], { encoding: "utf8" });
+  return stdout;
 }
 
 /** Names of the engine containers the controller created for a stream. */

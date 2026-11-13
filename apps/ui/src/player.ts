@@ -3,6 +3,7 @@ import Hls from "hls.js/light";
 import { api } from "./api.ts";
 import { errorMessage, h, icon, toast } from "./dom.ts";
 import { formatFreshness, formatPeers, formatSpeed, formatStandbys, pathLabel, STATE_LABELS } from "./format.ts";
+import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
 import type { Navigator } from "./navigation.ts";
 import type { WatchReporter } from "./watch.ts";
 
@@ -118,7 +119,7 @@ export class Player {
 
   private attach(url: string): void {
     if (Hls.isSupported()) {
-      const hls = new Hls({ liveSyncDurationCount: 3, backBufferLength: 30 });
+      const hls = new Hls({ ...OUTAGE_TOLERANT_LOADING, liveSyncDurationCount: 3, backBufferLength: 30 });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) {
           return;

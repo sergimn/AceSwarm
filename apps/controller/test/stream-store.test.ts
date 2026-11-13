@@ -65,6 +65,31 @@ describe("StreamStore", () => {
     expect(reloaded.get(stream.id)?.aceIdKind).toBeNull();
   });
 
+  it("keeps the session a stream plays from, and loads files written before it was kept", async () => {
+    const directory = await tempDirectory();
+    const store = new StreamStore(directory);
+    await store.load();
+    const stream = await store.add({ aceId: ID_A });
+    expect(stream.session).toBeNull();
+    const session = {
+      playbackUrl: "http://172.31.250.10:6878/ace/r/x/y",
+      statUrl: "http://172.31.250.10:6878/ace/stat/x/y",
+      commandUrl: "http://172.31.250.10:6878/ace/cmd/x/y",
+    };
+    await store.update(stream.id, { session });
+    const reloaded = new StreamStore(directory);
+    await reloaded.load();
+    expect(reloaded.get(stream.id)?.session).toEqual(session);
+
+    const legacy = { ...stream } as Partial<typeof stream>;
+    delete legacy.session;
+    const { writeJsonFile } = await import("../src/json-file.ts");
+    await writeJsonFile(join(directory, "streams.json"), { version: 1, streams: [legacy] });
+    const older = new StreamStore(directory);
+    await older.load();
+    expect(older.get(stream.id)?.session).toBeNull();
+  });
+
   it("returns copies, not internal state", async () => {
     const directory = await tempDirectory();
     const store = new StreamStore(directory);

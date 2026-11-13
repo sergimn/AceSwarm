@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import type { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
@@ -53,6 +54,12 @@ export interface ServerOptions {
   uiDir: string;
   transcoderUrl: string;
   eventIntervalMs?: number;
+  /**
+   * Resolves once the orchestrator has started. API requests wait for it, so they never see an
+   * empty stream list; the HLS proxy doesn't, so players get their segments back as soon as a
+   * restarted controller listens.
+   */
+  ready?: Promise<void>;
 }
 
 /** Registers the REST API, the live event stream, the HLS proxy and the static UI. */
@@ -62,6 +69,14 @@ export async function registerRoutes(
   options: ServerOptions,
 ): Promise<FastifyInstance> {
   const { app } = service;
+  const ready = options.ready;
+  if (ready !== undefined) {
+    app.addHook("onRequest", async (request) => {
+      if (request.url.startsWith("/api/")) {
+        await ready;
+      }
+    });
+  }
 
   app.get("/api/snapshot", () => orchestrator.snapshot());
   app.get("/api/streams", () => orchestrator.snapshot().streams);
@@ -205,6 +220,17 @@ export async function registerRoutes(
     }
   });
 
+  // Open event streams. They never end on their own, and closing the server waits for every
+  // request: they end first, and the browsers reconnect to the next run.
+  const eventStreams = new Set<ServerResponse>();
+  app.addHook("preClose", (done) => {
+    for (const response of eventStreams) {
+      response.end();
+    }
+    eventStreams.clear();
+    done();
+  });
+
   app.get("/api/events", (request, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -218,8 +244,10 @@ export async function registerRoutes(
     };
     send();
     const timer = setInterval(send, options.eventIntervalMs ?? 2000);
+    eventStreams.add(reply.raw);
     request.raw.on("close", () => {
       clearInterval(timer);
+      eventStreams.delete(reply.raw);
     });
   });
 

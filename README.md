@@ -17,6 +17,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
 - **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine only restarts when the stream you are watching fails or several of its streams fail at once, and its streams keep their picture while it does.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.
 - **WireGuard only.** One switch keeps every stream off the direct connection. If no VPN is up, streams wait instead of going direct.
+- **Updates without a gap.** Restarting or updating the controller doesn't interrupt the streams: the new one takes over the engines and video that kept running, and players play on from their buffer meanwhile.
 - **History.** Optional Prometheus, Loki and Grafana keep long-term records of stream health, peers and uploads, network paths, engine memory and cache, and who watched what. A ready-made dashboard and alerts are included.
 - Runs on x86_64 and arm64 (including the Raspberry Pi 5), with Docker or Podman, rootful or rootless.
 

@@ -9,6 +9,20 @@ export async function sleep(ms: number): Promise<void> {
   await wait(ms);
 }
 
+/** Waits for `promise`, but no longer than `ms`. */
+export async function waitAtMost(promise: Promise<void>, ms: number): Promise<void> {
+  if (ms === Infinity) {
+    await promise;
+    return;
+  }
+  const timeout = new AbortController();
+  try {
+    await Promise.race([promise, wait(ms, undefined, { signal: timeout.signal }).catch(() => undefined)]);
+  } finally {
+    timeout.abort();
+  }
+}
+
 /** The pipeline as exited, for one the transcoder no longer knows (for example after it restarted). */
 export function exitedPipeline(previous: PipelineStatus | undefined, error: string): PipelineStatus | undefined {
   return previous === undefined ? undefined : { ...previous, state: "exited", error };
