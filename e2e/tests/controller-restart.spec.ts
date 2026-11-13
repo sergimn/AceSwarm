@@ -310,7 +310,7 @@ test("a controller restart doesn't interrupt a stream on a shared engine", async
   expect((await streamById(request, stream.id))?.engine).toMatchObject({ shared: true });
 });
 
-test("stopping the whole stack removes every engine, and restarting the cleanup service alone doesn't", async ({
+test("stopping the whole stack removes every engine, and stopping the cleanup service alone doesn't", async ({
   request,
 }) => {
   // The previous case's two streams, on a shared engine.
@@ -320,10 +320,12 @@ test("stopping the whole stack removes every engine, and restarting the cleanup 
   expect(engines.length).toBeGreaterThan(0);
 
   // Recreating the cleanup service, as `docker compose up -d` does after an update, stops it while
-  // the controller runs: the engines stay.
-  compose("restart", "cleanup");
-  expect(stackEngines()).toEqual(engines);
+  // the controller runs: the engines stay. Not `compose restart`: on Podman, it gives the container
+  // no time to stop, so the service never gets to decide.
+  compose("stop", "cleanup");
   expect(compose("logs", "--no-color", "cleanup")).toContain("a controller still runs");
+  expect(stackEngines()).toEqual(engines);
+  compose("start", "cleanup");
 
   // `docker compose down` and `stop` stop the controller first, since it depends on the cleanup
   // service, then the cleanup service, which removes the engines before it exits.
