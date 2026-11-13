@@ -30,21 +30,25 @@ export function maxEngineMemoryCacheMb(limitMb: number): number {
   );
 }
 
+/** Docker API endpoint. Always a socket proxy, never the raw socket. */
+const dockerHost = z
+  .string()
+  .default("tcp://docker-proxy:2375")
+  .transform((value) => value.replace(/^tcp:\/\//, "http://").replace(/\/+$/, ""));
+
+/** Label value that marks engines owned by this stack, so several stacks can share a host. */
+const stackName = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]*$/)
+  .default("aceswarm");
+
 const schema = z
   .object({
     PORT: envInt(8080),
     DATA_DIR: z.string().default("/data"),
     UI_DIR: z.string().default(new URL("../public", import.meta.url).pathname),
-    /** Docker API endpoint. Always a socket proxy, never the raw socket. */
-    DOCKER_HOST: z
-      .string()
-      .default("tcp://docker-proxy:2375")
-      .transform((value) => value.replace(/^tcp:\/\//, "http://").replace(/\/+$/, "")),
-    /** Label value that marks engines owned by this stack, so several stacks can share a host. */
-    STACK_NAME: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9_-]*$/)
-      .default("aceswarm"),
+    DOCKER_HOST: dockerHost,
+    STACK_NAME: stackName,
     ENGINE_IMAGE: z.string().default("ghcr.io/sergimn/aceswarm-engine:latest"),
     ENGINE_NETWORK: z.string().default("aceswarm_engines"),
     /** Address of the network gateway on the engines network; engines use it as default route. */
@@ -143,4 +147,13 @@ export type Config = z.infer<typeof schema>;
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   return parseEnv(schema, env);
+}
+
+const cleanupSchema = z.object({ DOCKER_HOST: dockerHost, STACK_NAME: stackName });
+
+export type CleanupConfig = z.infer<typeof cleanupSchema>;
+
+/** The settings of the cleanup service (`src/cleanup.ts`), which shares the controller's image. */
+export function loadCleanupConfig(env: Record<string, string | undefined> = process.env): CleanupConfig {
+  return parseEnv(cleanupSchema, env);
 }

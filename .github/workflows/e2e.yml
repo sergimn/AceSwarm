@@ -248,3 +248,8 @@ jobs:
         continue-on-error: ${{ matrix.runtime == 'podman' }}
         timeout-minutes: 5
         run: e2e/stack.sh down
+      - name: Check that the stack left no engines
+        # Its cleanup service removes them on the way down, on Podman too.
+        if: always()
+        timeout-minutes: 2
+        run: e2e/stack.sh leftovers

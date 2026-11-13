@@ -70,8 +70,10 @@ export class SavedPlayback {
   /**
    * The first time only: the playback the previous run left, if the saved session is on `engine`
    * (the engine the stream just took over) and the transcoder's ffmpeg still reads it. Otherwise
-   * the saved session is forgotten, and stopped if it still answers, so the engine doesn't keep
-   * downloading it for nobody.
+   * the saved session is forgotten and stopped, so that no engine keeps downloading it for nobody:
+   * on `engine`, only if the engine still knows it; on another engine (a shared engine on another
+   * path, say, or one that is gone), in the background and unchecked, since a request to a gone
+   * address takes seconds and the stream doesn't wait for it.
    *
    * Throws while the transcoder can't be reached: nothing could start then either, its ffmpeg may
    * well still read the session, and the next call tries again.

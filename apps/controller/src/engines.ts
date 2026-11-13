@@ -56,8 +56,8 @@ export function engineEnvironment(
   ];
 }
 
-const ROLE_LABEL = "aceswarm.role";
-const STACK_LABEL = "aceswarm.stack";
+export const ROLE_LABEL = "aceswarm.role";
+export const STACK_LABEL = "aceswarm.stack";
 const STREAM_LABEL = "aceswarm.stream";
 const GENERATION_LABEL = "aceswarm.generation";
 const SHARED_PATH_LABEL = "aceswarm.shared-path";

@@ -2,10 +2,13 @@ import { existsSync } from "node:fs";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import {
   addStream,
+  compose,
   composeAsync,
   engineContainers,
   resetStack,
   sharedEngineContainers,
+  snapshot,
+  stackEngines,
   streamById,
   waitForPlaying,
   waitForSteadyPlaying,
@@ -16,8 +19,9 @@ import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, type Broadcas
  * Restarting the controller (an update, say) must not interrupt playing streams: the new run takes
  * over the engine session and the transcoder's ffmpeg that kept running, the old one stops within
  * a few seconds even with the UI open, and the player rides out the moment the controller (which
- * proxies the HLS) is gone. A hot standby isn't taken over: the new run starts a new one. See
- * e2e/README.md.
+ * proxies the HLS) is gone. A hot standby isn't taken over: the new run starts a new one. The
+ * engines only go when the whole stack goes down: the cleanup service removes them once the
+ * controller stopped. See e2e/README.md.
  */
 test.describe.configure({ mode: "serial" });
 
@@ -304,4 +308,43 @@ test("a controller restart doesn't interrupt a stream on a shared engine", async
   expect(result.generations).toHaveLength(1);
   expect(result.outageMs).toBeLessThan(MAX_OUTAGE_MS);
   expect((await streamById(request, stream.id))?.engine).toMatchObject({ shared: true });
+});
+
+test("stopping the whole stack removes every engine, and restarting the cleanup service alone doesn't", async ({
+  request,
+}) => {
+  // The previous case's two streams, on a shared engine.
+  const streams = (await snapshot(request)).streams.map(({ id }) => id);
+  expect(streams).toHaveLength(2);
+  const engines = stackEngines();
+  expect(engines.length).toBeGreaterThan(0);
+
+  // Recreating the cleanup service, as `docker compose up -d` does after an update, stops it while
+  // the controller runs: the engines stay.
+  compose("restart", "cleanup");
+  expect(stackEngines()).toEqual(engines);
+  expect(compose("logs", "--no-color", "cleanup")).toContain("a controller still runs");
+
+  // `docker compose down` and `stop` stop the controller first, since it depends on the cleanup
+  // service, then the cleanup service, which removes the engines before it exits.
+  const stopping = Date.now();
+  await composeAsync("stop", "controller", "cleanup");
+  const stopMs = Date.now() - stopping;
+  const left = stackEngines();
+  const description = `stack stop: controller and cleanup service stopped in ${String(stopMs)} ms, ${String(engines.length)} engines before, ${String(left.length)} after`;
+  test.info().annotations.push({ type: "stack stop", description });
+  process.stdout.write(`${description}\n`);
+  expect(left).toEqual([]);
+
+  // The stack comes back: every stream starts again on a new engine.
+  await composeAsync("start", "cleanup", "controller");
+  await expect
+    .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), { timeout: 60_000 })
+    .toBe(true);
+  for (const id of streams) {
+    await waitForPlaying(request, id);
+  }
+  const after = stackEngines();
+  expect(after.length).toBeGreaterThan(0);
+  expect(after.filter((name) => engines.includes(name))).toEqual([]);
 });
