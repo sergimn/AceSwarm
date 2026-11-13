@@ -5,13 +5,13 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 
 # Real-engine E2E
 
-`e2e/README.md` is the full reference, with diagrams of the runners, the mesh and every spec. This is the short version.
+`e2e/README.md` is the full reference, with diagrams of the runners, the mesh and most specs. This is the short version.
 
 ## 1. Rules
 
 - **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers and stopped broadcasts (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput` in `e2e/tests/mesh.ts`).
 - **The suite runs in CI only.** It needs four machines joined by a mesh, so there is no local or single-machine run. `npm run check` covers typecheck, lint, format and unit tests, not E2E.
-- **Real streams don't load in a cloud sandbox.** The engine starts and its API answers, but its peer-to-peer traffic doesn't get out, so `getstream` answers "failed to load content". That says nothing about the code. Real streams play in CI and on the Testing environment.
+- **No stream loads in a cloud sandbox.** The engine starts and its API answers, but its peer-to-peer traffic doesn't get out, so `getstream` answers "failed to load content". That says nothing about the code. Streams play in CI and on the Testing environment.
 - Never skip, disable or loosen a test to get green. `retries: 0` is on purpose.
 
 ## 2. Start a run
@@ -19,7 +19,7 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 - Workflow **E2E** (`.github/workflows/e2e.yml`) runs on every pull request and on every push to `main`. A pull request needs nothing extra: push and read its run.
 - For a branch without a pull request: Actions, E2E, "Run workflow", and pick the branch. From a session, that is `gh workflow run e2e.yml --ref <branch>`, or the GitHub tool `actions_run_trigger` with `method: run_workflow`, `workflow_id: e2e.yml` and `ref`. The workflow takes no inputs.
 - A new run for the same pull request or branch cancels the one in progress.
-- **Re-run all jobs, never only the failed one.** The runners only work together, and a single job would wait for runners that are gone.
+- **Re-run all jobs, never only the failed one.** The runners only work together, and a single job would wait for runners that are gone. From a session: `gh run rerun <run id>` without `--failed`, or `actions_run_trigger` with `method: rerun_workflow_run`, never `rerun_failed_jobs`.
 
 ## 3. Read a run
 
@@ -39,30 +39,31 @@ Four jobs start together:
 
 ## 4. Real failure or not
 
-- **The same test fails on both stack jobs.** Real, as long as the `wg` and `source` jobs are healthy: those two runners are all the stack jobs share.
-- **A test fails on one stack job.** Often real and specific to that runtime (on Podman the fault rules go into Podman's network namespace, and the host is Ubuntu 26.04 with its AppArmor profiles). Re-run all jobs once. If it fails again, it is real. If it passes, report a flaky test with both run links, don't drop it.
-- **A step fails before the tests**: finding the public UDP address, "Join the mesh" ("no connectivity to …"), waiting for the profile or `broadcasts.json`, or `stack.sh check`. Infrastructure: re-run all jobs. "Build the images and start AceSwarm" is the exception, because the change can break a build or a service's health check.
+- **The same test fails on both stack jobs.** Real, as long as the `wg` and `source` jobs are healthy.
+- **A test fails on one stack job.** Often real and specific to that runtime (on Podman the fault rules go into Podman's network namespace, and the runner is `ubuntu-26.04` with its AppArmor profiles). Re-run all jobs once. If it fails again, it is real. If it passes, report a flaky test with the links to both attempts, don't drop it.
+- **A step fails before the tests**: finding the public UDP address, "Join the mesh" ("no connectivity to …"), waiting for the profile or `broadcasts.json`, or `stack.sh check`. Usually infrastructure: re-run all jobs once. It is real if the same step fails again, or if the change touches what that step runs: the scripts in `e2e/`, `e2e/tracker.ts`, `e2e/wg-server/`, the workflow, or the gateway for `stack.sh check`. When the wait for the profile or `broadcasts.json` fails, the cause is in the `wg` or `source` job: read its **Logs** step. "Build the images and start AceSwarm" is always suspect, because the change can break a build or a service's health check.
 - **Every test times out waiting for "playing".** Read the `source` job's logs first: each engine should announce to the tracker and get its broadcast as a peer. Engines resolve content IDs and infohashes through Acestream's own lookup service, so an outage there fails the whole run. If the announces are there, suspect the change.
-- **Known old flake.** In `streams.spec.ts`, "exports the engine's memory cache cap and estimated use, and the peers it uploads to" sometimes saw one uploading peer where it expects none. #19 fixed the count. On a branch without #19, merge `main` instead of investigating. With #19, a non-zero count is a finding: the test attaches "gateway flows of the engine".
+- **Known old flake.** In `streams.spec.ts`, "exports the engine's memory cache cap and estimated use, and the peers it uploads to" sometimes saw one uploading peer where it expects none. #19 (`abf2f1e`) fixed the count. On a branch without it (`git merge-base --is-ancestor abf2f1e HEAD` fails), merge `main` instead of investigating. With #19, a non-zero count is a finding: the test attaches "gateway flows of the engine".
 
 No other check is known to be flaky.
 
 ## 5. Add or change a spec
 
 - Get broadcasts with `broadcasts(n)` from `e2e/tests/mesh.ts`. Their infohashes and content IDs are new in every run, and each stack runner has three.
-- Start from `resetStack(request)` in `beforeAll`, and remove every fault the spec adds.
-- Use the helpers (`docker`, `compose`, the fault setters) instead of calling the runtime directly, so the spec passes on Docker and on Podman.
+- Start from `resetStack(request)` (`e2e/tests/helpers.ts`) in `beforeAll`, and remove every fault the spec adds.
+- Both runtimes have to pass. Use `docker` and `compose` from `helpers.ts` and the fault setters from `mesh.ts`, never iptables or the runtime directly: on Podman the rules go into another chain. Pause and unpause by container ID with `docker(...)`, because `compose unpause` finds nothing on Podman (see `paths.spec.ts`). Use `MESH.self`, not a literal address.
 - Real engines are slow to start: `waitForPlaying` allows 180 s. Don't shorten a timeout to make a spec faster.
 - Update the spec table and the order diagram in `e2e/README.md`.
 
 ## 6. Check a real stream by hand
 
-The suite plays its own broadcasts. To check a public stream against one engine, on the Testing environment:
+The suite plays its own broadcasts. To check a public stream against one engine, on the Testing environment (if your session can't reach it, ask the maintainer to run the check):
 
 ```sh
 ENGINE=http://127.0.0.1:6878 # the engine's HTTP API
-curl -s "$ENGINE/ace/getstream?infohash=<40 hex>&format=json&pid=manual-check" # or ?id=<content ID>
+curl -s -m 90 "$ENGINE/ace/getstream?infohash=<40 hex>&format=json&pid=manual-check" # or ?id=<content ID>
 # good: {"response": {"playback_url": "...", "stat_url": "...", "command_url": "..."}, "error": null}
+# A live stream never ends, so exit code 28 (timed out) is expected here: read the byte count.
 curl -L -m 90 -o /dev/null -w '%{size_download}\n' "<playback_url>"
 curl -s "<command_url>?method=stop"
 ```
@@ -70,6 +71,6 @@ curl -s "<command_url>?method=stop"
 - **Content ID or infohash.** Both are 40 hex characters, and they are not interchangeable: `id=` takes a content ID, `infohash=` an infohash. The wrong one answers "failed to load content" in about 2 s, so try the other before you call a stream dead. AceSwarm does the same for a bare value: content ID first, then infohash.
 - **`playback_url` redirects.** Without `-L` you get about 100 bytes, which looks like a dead stream.
 - **What healthy looks like.** Bytes within about 5 s, a burst of 9 to 16 MB, then 3 to 6 Mbit/s: tens of MB in 90 s. Give it the full 90 s.
-- **One reader per stream.** A second reader of the same stream on the same engine kicks the first, so don't read a stream that AceSwarm is playing from that engine.
+- **One reader per session** (`docs/architecture.md`). Use an engine of your own, never one that AceSwarm is playing the stream from.
 - **Control streams**, live when last checked on 2026-11-04: infohash `6d325cda6ed591647ef5e91edd043147bce8be30`, content ID `b146ee4b6e16c9df58e27bd02ffd6cea840ff212`. Public streams come and go, so check a control before you blame the code.
 - **On the Testing environment**, ask before you start engines, run one or two at most, and never while another session is running its own.
