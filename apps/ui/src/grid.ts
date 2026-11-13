@@ -5,6 +5,7 @@ import {
   formatFreshness,
   formatPeers,
   formatSpeed,
+  formatStandbys,
   isFresh,
   pathLabel,
   STATE_LABELS,
@@ -30,6 +31,7 @@ class Tile {
   private readonly peers: HTMLElement;
   private readonly countries: HTMLElement;
   private readonly speed: HTMLElement;
+  private readonly standbys: HTMLElement;
   private readonly message: HTMLElement;
   private thumbnailTick = -1;
   private countryKey = "";
@@ -59,6 +61,7 @@ class Tile {
     this.peers = h("span", { className: "stat-value" });
     this.countries = h("span", { className: "stat-value flags" });
     this.speed = h("span", { className: "stat-value" });
+    this.standbys = h("span", { className: "stat-value" });
     this.message = h("p", { className: "tile-message" });
     this.element = h("button", { className: "tile", attrs: { type: "button", "data-stream": stream.id } }, [
       h("div", { className: "tile-media" }, [h("div", { className: "tile-placeholder" }), this.poster, this.video]),
@@ -69,6 +72,7 @@ class Tile {
         statRow("Peers", this.peers),
         statRow("Countries", this.countries),
         statRow("Download", this.speed),
+        statRow("Standby", this.standbys),
         this.message,
       ]),
     ]);
@@ -91,6 +95,7 @@ class Tile {
     this.freshness.classList.toggle("fresh", isFresh(stream.lastFrameAt, now));
     this.peers.textContent = formatPeers(stream.peers);
     this.speed.textContent = formatSpeed(stream.downloadKBps);
+    this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths);
     this.message.textContent = stream.message ?? "";
     this.message.hidden = stream.message === null;
     this.renderCountries(stream);

@@ -66,6 +66,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
   {
     viewers: () => orchestrator.viewers(),
     sharedEngines: () => sharedEngines.view(),
+    engines: () => engineResources.running(),
   },
 );
 const sharedEngines = new SharedEngines({
@@ -98,12 +99,25 @@ const orchestrator: Orchestrator = new Orchestrator({
   metrics,
   logger,
   maxKeptEngines: config.MAX_KEPT_ENGINES,
+  standby: {
+    maxPaths: config.STANDBY_MAX_PATHS,
+    failoverAfterMs: config.STANDBY_FAILOVER_SECONDS * 1000,
+    // A standby gets as long as a starting stream to deliver its first data.
+    warmupMs: config.STARTUP_GRACE_SECONDS * 1000,
+    hotWithinMs: 10_000,
+    downGraceMs: 120_000,
+    policy: {
+      baseDelayMs: config.RECOVERY_BASE_DELAY_SECONDS * 1000,
+      maxDelayMs: config.RECOVERY_MAX_DELAY_SECONDS * 1000,
+    },
+  },
   settings: {
     tickMs: config.TICK_MS,
     stallAfterMs: config.STALL_SECONDS * 1000,
     startupGraceMs: config.STARTUP_GRACE_SECONDS * 1000,
     recoveryBaseDelayMs: config.RECOVERY_BASE_DELAY_SECONDS * 1000,
     recoveryMaxDelayMs: config.RECOVERY_MAX_DELAY_SECONDS * 1000,
+    staleSourceRetryMs: config.STALE_SOURCE_RETRY_SECONDS * 1000,
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
     pathStrategy: config.PATH_STRATEGY,
     pathMinDwellMs: config.PATH_MIN_DWELL_SECONDS * 1000,
@@ -118,10 +132,22 @@ await registerRoutes(service, orchestrator, {
   transcoderUrl: config.TRANSCODER_URL,
   ready: started,
 });
+// One sample at a time: with a slow Docker API, samples would pile up and an older one could
+// finish last, putting back an old engine count or clearing a fresh one.
+const engineSampling = { busy: false };
 const sampleEngines = (): void => {
-  void engineResources.sample().catch((error: unknown) => {
-    logger.debug({ err: error }, "could not sample engine resources");
-  });
+  if (engineSampling.busy) {
+    return;
+  }
+  engineSampling.busy = true;
+  void engineResources
+    .sample()
+    .catch((error: unknown) => {
+      logger.debug({ err: error }, "could not sample engine resources");
+    })
+    .finally(() => {
+      engineSampling.busy = false;
+    });
 };
 sampleEngines();
 const engineResourceTimer = setInterval(sampleEngines, config.ENGINE_STATS_SECONDS * 1000);

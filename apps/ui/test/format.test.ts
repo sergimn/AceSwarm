@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { PathStatus } from "@aceswarm/shared/api-types";
 import {
   formatFreshness,
   formatLoss,
   formatPeers,
   formatRtt,
   formatSpeed,
+  formatStandbys,
   isFresh,
   pathLabel,
   topCountries,
@@ -34,9 +36,9 @@ describe("formatFreshness", () => {
 
 describe("formatPeers", () => {
   it("leads with peers that send data", () => {
-    expect(formatPeers({ connected: 12, active: 4, countries: [] })).toBe("4 sending · 12 connected");
-    expect(formatPeers({ connected: 12, active: null, countries: [] })).toBe("12 connected");
-    expect(formatPeers({ connected: null, active: null, countries: [] })).toBe("Unknown");
+    expect(formatPeers({ connected: 12, active: 4, uploading: null, countries: [] })).toBe("4 sending · 12 connected");
+    expect(formatPeers({ connected: 12, active: null, uploading: null, countries: [] })).toBe("12 connected");
+    expect(formatPeers({ connected: null, active: null, uploading: null, countries: [] })).toBe("Unknown");
   });
 });
 
@@ -67,5 +69,21 @@ describe("small formatters", () => {
     expect(pathLabel(null, [])).toBe("–");
     expect(pathLabel("direct", [])).toBe("Direct");
     expect(pathLabel("wg:sweden", [])).toBe("VPN sweden");
+  });
+});
+
+describe("formatStandbys", () => {
+  it("names each standby's path and whether it is hot", () => {
+    const vpn = { id: "wg:a", label: "VPN A" } as PathStatus;
+    expect(formatStandbys([], [vpn])).toBe("–");
+    expect(
+      formatStandbys(
+        [
+          { path: "wg:a", state: "hot", engine: { name: "e1", shared: false } },
+          { path: "direct", state: "warming", engine: null },
+        ],
+        [vpn],
+      ),
+    ).toBe("VPN A (hot), Direct (warming up)");
   });
 });

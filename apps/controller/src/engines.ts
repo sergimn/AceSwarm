@@ -118,9 +118,14 @@ export class EngineManager {
     return handles.toSorted((a, b) => b.generation - a.generation);
   }
 
+  /** The container name of a stream's own engine of that generation. */
+  ownName(streamId: string, generation: number): string {
+    return `${this.options.stack}-engine-${streamId}-${String(generation)}`;
+  }
+
   /** Creates and starts a stream's own engine, then waits until its HTTP API answers. */
   async create(streamId: string, generation: number, onAddress?: OnEngineAddress): Promise<EngineHandle> {
-    const name = `${this.options.stack}-engine-${streamId}-${String(generation)}`;
+    const name = this.ownName(streamId, generation);
     const handle = await this.createContainer(name, { [STREAM_LABEL]: streamId }, generation, onAddress);
     this.logger.info({ streamId, generation, container: name }, "engine started");
     return handle;

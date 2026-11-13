@@ -58,28 +58,35 @@ export class SavedPlayback {
     });
   }
 
+  /** Stops the session the stream played from, if it has one, and forgets it. */
+  async stop(session: EngineSession | undefined): Promise<void> {
+    if (session === undefined) {
+      return;
+    }
+    await this.deps.ace.stopSession(session.commandUrl).catch(() => undefined);
+    await this.save(undefined);
+  }
+
   /**
    * The first time only: the playback the previous run left, if the saved session is on `engine`
    * (the engine the stream just took over) and the transcoder's ffmpeg still reads it. Otherwise
    * the saved session is forgotten, and stopped if it still answers, so the engine doesn't keep
    * downloading it for nobody.
+   *
+   * Throws while the transcoder can't be reached: nothing could start then either, its ffmpeg may
+   * well still read the session, and the next call tries again.
    */
   async takeOver(engine: EngineHandle, now: number): Promise<RunningPlayback | undefined> {
-    if (this.tried) {
-      return undefined;
-    }
-    this.tried = true;
-    const saved = this.deps.store.get(this.streamId)?.session ?? null;
+    const saved = this.tried ? null : (this.deps.store.get(this.streamId)?.session ?? null);
     if (saved === null) {
+      this.tried = true;
       return undefined;
     }
     // A session on another address belongs to another engine, or to one that restarted.
-    const [pipeline, stats] = sameHost(saved.statUrl, engine.baseUrl)
-      ? await Promise.all([
-          this.deps.transcoder.status(this.streamId).catch(() => undefined),
-          this.deps.ace.stats(saved.statUrl).catch(() => undefined),
-        ])
-      : [undefined, undefined];
+    const onEngine = sameHost(saved.statUrl, engine.baseUrl);
+    const pipeline = onEngine ? await this.deps.transcoder.status(this.streamId) : undefined;
+    this.tried = true;
+    const stats = onEngine ? await this.deps.ace.stats(saved.statUrl).catch(() => undefined) : undefined;
     const problem = adoptionProblem(saved, pipeline, stats);
     if (problem !== undefined || pipeline === undefined || stats === undefined) {
       this.logger.info({ reason: problem }, "could not take over the running playback; starting the stream");
@@ -118,6 +125,11 @@ function adoptionProblem(
   }
   if (pipeline.source !== saved.playbackUrl) {
     return "the transcoder reads another source";
+  }
+  if (pipeline.pendingSource !== null) {
+    // The previous run stopped in the middle of a move or a failover. The transcoder may still cut
+    // over to that source, whose engine this run doesn't know (or already removed).
+    return "the transcoder is moving to another source";
   }
   return pipeline.state === "exited" ? "the transcoder's ffmpeg exited" : undefined;
 }

@@ -17,6 +17,7 @@ import type { ControllerMetrics } from "./metrics.ts";
 import type { NetworkPolicyStore } from "./network-policy-store.ts";
 import type { SettingsStore } from "./settings-store.ts";
 import type { SharedEngines } from "./shared-engines.ts";
+import { DEFAULT_STANDBY_SETTINGS, type StandbySettings } from "./standby.ts";
 import type { NewStream, StreamConfig, StreamPatch, StreamStore } from "./stream-store.ts";
 import { MoveSlots } from "./stream-paths.ts";
 import { streamView } from "./stream-view.ts";
@@ -51,6 +52,8 @@ export interface OrchestratorDeps {
   settings: SupervisorSettings;
   /** How many streams at once may keep the new engine of a failed move (see `StreamEngines.move`). */
   maxKeptEngines?: number;
+  /** Hot standbys on the other paths (see `StreamStandbys`). */
+  standby?: StandbySettings;
   pathPollMs?: number;
   /** How long shutting down waits for each stream's step in progress (see `stop`). */
   stopWaitMs?: number;
@@ -75,10 +78,17 @@ export class Orchestrator {
   private readonly policyMoves = new MoveSlots(2);
   /** Engines kept after a failed move to try again on them; each is an engine more, so only a few. */
   private readonly spareSlots: MoveSlots;
+  /**
+   * Standbys starting, at most two at a time across every stream: each starts an engine (or a
+   * session on a path's shared engine), and starting them all at once would load the host.
+   */
+  private readonly standbyStarts = new MoveSlots(2);
+  private readonly standby: StandbySettings;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
     this.spareSlots = new MoveSlots(deps.maxKeptEngines ?? 2);
+    this.standby = deps.standby ?? DEFAULT_STANDBY_SETTINGS;
     this.logger = deps.logger.child({ component: "orchestrator" });
   }
 
@@ -146,6 +156,11 @@ export class Orchestrator {
         maxFailures: this.deps.shared.settings.maxFailures,
         failureWindowSeconds: Math.round(this.deps.shared.settings.failureWindowMs / 1000),
       },
+      hotStandby: {
+        enabled: this.deps.settingsStore.get().hotStandby,
+        maxPaths: this.standby.maxPaths,
+        failoverSeconds: Math.round(this.standby.failoverAfterMs / 1000),
+      },
       viewerPingSeconds: Math.round(this.deps.viewers.pingMs / 1000),
     };
   }
@@ -156,13 +171,17 @@ export class Orchestrator {
 
   /**
    * Changes settings. Turning engine sharing on or off takes effect on every stream's next check:
-   * each one moves to the kind of engine the setting asks for without losing its picture.
+   * each one moves to the kind of engine the setting asks for without losing its picture. Turning
+   * hot standby on or off starts or removes every stream's standbys on its next check.
    */
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     const before = this.deps.settingsStore.get();
     const after = await this.deps.settingsStore.update(patch);
     if (after.sharedEngines !== before.sharedEngines) {
       this.logger.info({ sharedEngines: after.sharedEngines }, "engine sharing changed");
+    }
+    if (after.hotStandby !== before.hotStandby) {
+      this.logger.info({ hotStandby: after.hotStandby }, "hot standby changed");
     }
     return after;
   }
@@ -391,9 +410,12 @@ export class Orchestrator {
       pathAllowed: (path) => isPathAllowed(this.deps.policy.get(), path),
       policyMoves: this.policyMoves,
       spareSlots: this.spareSlots,
+      standby: this.standby,
+      standbyStarts: this.standbyStarts,
       pathLoad: () => this.pathLoad(),
       shared: this.deps.shared,
       sharedEngines: () => this.deps.settingsStore.get().sharedEngines,
+      hotStandby: () => this.deps.settingsStore.get().hotStandby,
       viewers: () => this.deps.viewers.count(stream.id),
     });
     this.supervisors.set(stream.id, supervisor);

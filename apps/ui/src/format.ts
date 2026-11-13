@@ -1,4 +1,11 @@
-import type { CountryCount, PathStatus, PeerSummary, StreamState } from "@aceswarm/shared/api-types";
+import type {
+  CountryCount,
+  PathStatus,
+  PeerSummary,
+  StandbyState,
+  StandbyView,
+  StreamState,
+} from "@aceswarm/shared/api-types";
 
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
@@ -58,6 +65,7 @@ export const STATE_LABELS: Record<StreamState, string> = {
   buffering: "Buffering",
   playing: "Live",
   stalled: "Stalled",
+  "stale-source": "Waiting for source",
   recovering: "Recovering",
   switching: "Switching path",
   stopped: "Off",
@@ -73,6 +81,19 @@ export function pathLabel(path: string | null, paths: readonly PathStatus[]): st
     return known.label;
   }
   return path === "direct" ? "Direct" : path.replace(/^wg:/, "VPN ");
+}
+
+const STANDBY_LABELS: Record<StandbyState, string> = {
+  starting: "starting",
+  warming: "warming up",
+  hot: "hot",
+  failed: "failed",
+};
+
+/** A stream's standbys on other paths, such as "VPN A (hot)"; "–" without any. */
+export function formatStandbys(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
+  const labels = standbys.map((standby) => `${pathLabel(standby.path, paths)} (${STANDBY_LABELS[standby.state]})`);
+  return labels.length === 0 ? "–" : labels.join(", ");
 }
 
 function createRegionNames(): Intl.DisplayNames | undefined {

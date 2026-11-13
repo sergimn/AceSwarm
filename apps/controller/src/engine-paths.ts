@@ -28,6 +28,21 @@ export class EnginePaths {
     this.assigned.set(ip, path);
   }
 
+  /**
+   * Takes over an address that already has its path at the gateway (from another list, when an
+   * engine moves between a stream's standbys and the engine it plays from).
+   */
+  adopt(ip: string, path: string): void {
+    this.assigned.set(ip, path);
+  }
+
+  /** Leaves out an address without telling the gateway: another list now holds its path. */
+  forget(ip: string): string | undefined {
+    const path = this.assigned.get(ip);
+    this.assigned.delete(ip);
+    return path;
+  }
+
   /** Drops the path of an address. Never fails: the next full list sent to the gateway drops it too. */
   async drop(ip: string): Promise<void> {
     this.assigned.delete(ip);

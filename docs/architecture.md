@@ -1,6 +1,6 @@
 # Architecture
 
-Ace Swarm is a small set of Node.js services written in TypeScript and run by Node's built-in type stripping, so there is no build step. The UI is the only part that is bundled (with Vite). Engines are created on demand: one container per stream, or, with [shared engines](#shared-engines), one per network path that every stream on it uses.
+Ace Swarm is a small set of Node.js services written in TypeScript and run by Node's built-in type stripping, so there is no build step. The UI is the only part that is bundled (with Vite). Engines are created on demand: one container per stream, or, with [shared engines](#shared-engines), one per network path that every stream on it uses. With more than one path, each stream also keeps a [hot standby](#hot-standby) on the other paths.
 
 ```mermaid
 flowchart TB
@@ -30,13 +30,13 @@ flowchart TB
 
 ## Services
 
-| Service      | Privileges                                          | Role                                                            |
-| ------------ | --------------------------------------------------- | --------------------------------------------------------------- |
-| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data` |
-| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails     |
-| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats    |
-| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API      |
-| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                            |
+| Service      | Privileges                                          | Role                                                                                                        |
+| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data`                                             |
+| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails; it also reads each [hot standby](#hot-standby) |
+| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats                                                |
+| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API                                                  |
+| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                                                                        |
 
 ## Streams
 
@@ -47,20 +47,21 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 3. **Take over the playback** a previous run left, if there is one (see [controller restarts](#controller-restarts)). Otherwise it goes on with the next two steps.
 4. **Open a session.** It calls `/ace/getstream`. A pasted value is a content ID or an infohash, and both are 40 hex characters. If the input doesn't say which (a magnet link does), the controller tries one kind, then the other, and saves the kind that worked.
 5. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
-6. **Check health every tick.** A stream is healthy only while new video frames arrive.
+6. **Check health every tick.** A stream is healthy only while new video frames arrive, and only frames from a source whose live edge moves count (see [stale sources](#stale-sources)).
 
 ### Controller restarts
 
 Engines, the transcoder and its ffmpeg runs keep going while the controller restarts (after an update, say), so streams don't stop:
 
-- **The playback is taken over.** `streams.json` also keeps the engine session the transcoder reads. A restarted controller takes over the stream's engine, then that session, as long as the engine still knows it and the transcoder's ffmpeg still reads it. Nothing restarts, so there is no new ffmpeg run and no discontinuity. Otherwise (the engine or the transcoder restarted too) the stream starts as usual, and a saved session that still answers is stopped.
+- **The playback is taken over.** `streams.json` also keeps the engine session the transcoder reads. A restarted controller takes over the stream's engine, then that session, as long as the engine still knows it and the transcoder's ffmpeg still reads it. Nothing restarts, so there is no new ffmpeg run and no discontinuity. Otherwise (the engine or the transcoder restarted too) the stream starts as usual, and a saved session that still answers is stopped. A stream whose previous run stopped in the middle of a move or a failover also starts as usual: the transcoder may still cut over to the other engine, which the new run doesn't know. While the transcoder can't be reached, the stream neither starts nor stops anything, and tries again.
+- **After a move or a failover,** the saved session is the one on the engine the stream moved to, so that is what a restarted controller takes over. [Hot standbys](#hot-standby) aren't taken over: their engines are removed, and new ones start once the stream plays, which it does at once.
 - **Shutting down is quick.** On SIGTERM, the controller waits at most 2 seconds for steps in progress (opening a session or a handover can take minutes) and ends the UI's event streams, which closing the server would otherwise wait for. Every service exits after 5 seconds whatever happens, before Docker or Podman kill it at 10.
 - **The proxy comes back first.** The controller serves the HLS proxy as soon as it listens; the API waits until the stream list is loaded.
 - **Players ride out the gap.** The controller is unreachable for a moment, and refused connections have no HTTP status, which hls.js doesn't retry by default. The UI's players retry them for about 10 seconds and play on from their buffer meanwhile.
 
 ### Recovery ladder
 
-When a stream stalls, recovery climbs a ladder, and the delay between steps grows exponentially:
+When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over to it first. Otherwise recovery climbs a ladder, and the delay between steps grows exponentially:
 
 | Failures | Action                                 |
 | -------- | -------------------------------------- |
@@ -70,6 +71,16 @@ When a stream stalls, recovery climbs a ladder, and the delay between steps grow
 | 4, 6, …  | restart the engine                     |
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this. On a [shared engine](#shared-engines), the engine restart steps only restart the stream's session.
+
+### Stale sources
+
+A broadcast that stops doesn't look like a stall to the engine. The engine keeps its peers, keeps answering, and keeps serving the window it already has, and so do peers that have the same window. A new session gets that old window too: it plays for a few seconds, then stops. Restarting on every stall therefore loops forever and shows old video each time. Only the engine's **live edge** tells: `livepos.last` in the session's stats, the newest data of the broadcast the engine knows of.
+
+- **The transcoder follows each source's live edge.** The controller sends the session's stat URL with its playback URL (and with each standby's). The transcoder polls it every second. Times are its own: `livepos` is stamped by the broadcaster's clock, which can be off by minutes, so its values are only compared with each other.
+- **A new source is published once its edge moves.** Its segments wait until the session downloaded and its own live edge kept moving past the newest edge the stream's previous session saw, at about the broadcast's pace: two rises at least 1.5 s apart by our clock, by no more than that time plus 3 s. Only segments written after that are published. Moving once is not enough: for a broadcast that stopped, a peer can know of a slightly later end of the old window. Moving fast is not enough either: an engine catching up on an old window sees its edge rise faster than time passes, then stop. Its frames don't count as video (`lastFrameAt`) before that, so the stream still starts, and a handover doesn't take over. For every source, with a live position or not, frames only count once a segment of it is in the playlist, so "playing" always means players can get video. A source without a live position (stats that show none, or don't answer, for 10 polls) is published as before.
+- **A source whose edge stops is stale.** Once the edge didn't move for `STALE_SOURCE_SECONDS` (60), or the engine serves the stream that far behind it, the transcoder stops its ffmpeg and publishes nothing more from it. Stats that stop answering for that long count the same way. A new session of the same stream starts from what the previous one saw: one that only has the same old window is stale at once. Published segments older than the threshold leave the playlist, and the thumbnail goes too, so a player that opens the stream never starts on old video. A standby only counts as hot while its own live edge moves.
+- **The stream waits for its source.** The controller shows `stale-source` ("Waiting for source" in the UI, which hides the last picture). The ladder goes on with longer waits: `STALE_SOURCE_RETRY_SECONDS` (30), doubling up to `RECOVERY_MAX_DELAY_SECONDS` (300). Every step replaces the engine, so the one whose edge stopped can't keep serving its old window, and every second step does that on another path when there is one. On a [shared engine](#shared-engines), other streams play from it, so only the stream's session starts again. It never gives up. Restart stream in the UI acts at once and starts the waits over, here and on the usual ladder. The stale session's live edge is still followed: when it moves before the next step, the next step comes at once. While it waits, the stream's standbys go, the shared engine isn't blamed, and the path's health record is left alone.
+- **Metrics.** `aceswarm_stream_live_edge_unchanged_seconds` (since the edge last moved) and `aceswarm_stream_live_edge_age_seconds` (`livepos.last` against our clock) are on the dashboard's "Stream stability" row. Its "Delivering new frames" timeline shows a stopped broadcast as one outage: red ("Not delivering"), then dark red ("Waiting for source") while the stream is `stale-source`. Old video never counts as delivering, so there are no green gaps in it.
 
 ### Path selection
 
@@ -137,6 +148,22 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
 - **Leftovers.** The controller removes a path's engine that nobody used for two minutes (see above) once no stream is still moving to it. Once every stream tried to start an engine (a stream waiting for the gateway, or for a WireGuard path it may use, hasn't yet), it also removes the shared engines a previous run left that no stream took over.
 - **Peers.** The engine reports connected peers per session. Connection tracking only sees the engine, so the "sending" peers and their countries are the engine's, the same for each of its streams.
 
+### Hot standby
+
+With **Hot standby on other paths** on (the default; `PATCH /api/settings`, `{ "hotStandby": true }`, stored in `/data/settings.json`), every stream that played since the controller started keeps a standby on each other path it may use: on the best `STANDBY_MAX_PATHS` of them, or on all of them with 0 (the default). A standby is an engine of the stream's own on that path (`<stack>-engine-<stream>-<generation>`, routed through the path like the stream's own engine), or with [shared engines](#shared-engines) on, a session on that path's shared engine, which the shared engines count apart from the streams that play from it.
+
+- **The transcoder keeps it hot.** An engine only keeps downloading a stream that someone reads, so the transcoder reads each standby session and throws the data away (`PUT /standbys/<stream>` with `{ "sources": [...] }`, sent on every check; readers it no longer lists stop). The engine allows one reader per session, so a reader stops when ffmpeg starts on its source: ffmpeg starts half a second after the reader's connection closed, and opens the source again (up to five times, a second apart) when it fails before any video, since the engine may still refuse a new reader for a moment. While the transcoder reads a standby's session itself (after a failover that gave up, it may still take it), the standby isn't started again for bringing no data. A standby is _hot_ while its last data is at most 10 seconds old.
+- **Only video counts as data.** An engine can send bytes that aren't video, such as zeros, and a standby that only has those can't take over. So the reader only counts MPEG-TS packets that carry stream data: it locks on once five sync bytes line up 188 bytes apart, and leaves out padding, the tables on PIDs below 0x20 (PAT, SDT, EIT and the like), packets without a payload and packets flagged with a transport error. It doesn't look for which PID holds the video, so audio alone, or the PMT, still counts there. It only reads 188-byte packets (what engines serve), not the 192- or 204-byte kind. That costs a few byte reads per packet. MPEG-TS is the container, so the check doesn't depend on the codec. On top of that, ffmpeg checks that the video decodes, fed by the reader, since the engine allows one reader per session: when data starts to come, then about every minute, when a check is free. A check passes once ffmpeg decoded five video frames within 20 seconds. One that fails comes again after 10 seconds, and the wait doubles up to 5 minutes while they keep failing. A check whose data stopped coming, or that ffmpeg couldn't run, says nothing: the next one comes 10 seconds later, doubling while they keep saying nothing, up to a minute for a standby whose video decodes, and never sooner than the failures before it allow for one whose video didn't. ffmpeg that can't start gets a warning in the log, once. At most two run at a time across all streams. A standby whose last check failed goes first, since its data doesn't count meanwhile, then standbys never checked, then the routine re-checks; among the same kind, who waited longest goes first. A standby's data counts until a check fails, and then not until one passes. A connection that brought 1 MB without MPEG-TS video gets a warning in the log.
+- **Failing over.** A stream fails over to its best hot standby (by the order of path selection) when no new video came for `STANDBY_FAILOVER_SECONDS` (8), before it counts as stalled, and before any ladder step once it stalled. The move is make-before-break, with a shorter handover (30 seconds at most), and counts as a recovery (`action="failover"`). The stream's own engine on the path it left becomes the standby there, with a new session; on a shared engine, the stream's session goes, and the path gets a new standby session. A failover that brings no video leaves the stream where it was, and that standby isn't tried again for a while (the ladder's delays), so the ladder can go on. A standby only counts for a failover when the transcoder answered on this check and its data is newer than the stream's last video by half the failover delay (at most 4 seconds): when the transcoder restarts, or the broadcast pauses on every path, the standbys stopped with the stream, and moving would not help.
+- **Path moves use standbys.** A recovery path switch, or a move off the direct path once WireGuard only is on, moves to a hot standby first, or to the standby on the target path, hot or not, before it starts a new engine.
+- **Standbys are sticky.** A healthy stream never moves to a standby, and standbys keep their paths when path scores change: one that moves starts again from no peers. A standby goes when its path may no longer be used (WireGuard only, a removed profile), the stream moves onto its path, sharing is turned on or off (the standby of the other kind goes, and one of the right kind starts), its shared engine is replaced, its path is down for two minutes, or there are more than `STANDBY_MAX_PATHS`.
+- **Failing standbys.** A standby whose session brings no data within `STARTUP_GRACE_SECONDS` starts again: its own engine restarts, or on a shared engine only its session does. After three failed tries it goes, and its path gets a new standby later, with the ladder's growing delays. After three such rounds the path gets none until it goes down or the stream moves to another path. Nothing happens to a standby while its path is down.
+- **Only while the stream plays.** A stream that had no video for ten minutes keeps no standbys, so a broadcast that is off for hours doesn't keep engines starting; they come back once it plays.
+- **Background work.** Standbys start, open their sessions, start again and go in the background, so the stream's own checks never wait for them. At most two standby engines start (or start again) at once, across all streams.
+- **Shared engines** count a stream's standby session and its play role on an engine separately, so a failed move to the engine of a path where the stream also has a standby leaves that standby counted.
+- **After a controller restart,** standbys aren't taken over: the stream's own engine is, and the others are removed. New standbys start once the stream plays.
+- **Metrics.** `aceswarm_stream_standby{stream, path, state}` (`starting`, `warming`, `hot`, `failed`) and `aceswarm_shared_engine_standbys{path, engine}`. The dashboard's "Delivering new frames" timeline shows a stream that plays with at least one hot standby in blue ("High availability"), and one that plays without in green ("Delivering").
+
 ### Viewers
 
 The player reports the stream it shows full screen (`POST /api/viewers/<viewer>` with `{ "stream": "<id>" }`), when it opens and every `VIEWER_PING_SECONDS` (60), and `{ "stream": null }` when it closes or the page is hidden. A viewer that misses two and a half reports no longer counts. `VIEWER_PING_SECONDS` is at least 5.
@@ -147,7 +174,7 @@ The player reports the stream it shows full screen (`POST /api/viewers/<viewer>`
 
 ### HLS continuity
 
-Every ffmpeg run writes its segments into a new "generation" directory. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves.
+Every ffmpeg run writes its segments into a new "generation" directory. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves. Segments leave the playlist once they are older than `STALE_SOURCE_SECONDS`, so after a long gap the playlist is empty (404) until new video comes, and its sequence goes on from there.
 
 ## Network gateway (netgw)
 
@@ -194,17 +221,17 @@ The entrypoint runs as root only for these steps:
 2. Drop to uid 1000 with `chpst`, which clears every capability, under `setpriv --nnp`, so nothing can regain privileges.
 3. Start the engine.
 
-Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engine's `--memory-cache-limit`), and have a memory limit (`ENGINE_MEMORY_MB`). Without the cap an engine grows for over an hour, to about 1.7 GB. With it, an engine levels off at about the cap plus 150 MB. The controller refuses a limit that leaves less than 256 MB besides the cap, or under which a full cache plus 200 MB (some room above the measured 150 MB) would pass the 85% memory alert. It exports each engine's memory use and out-of-memory kills.
+Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engine's `--memory-cache-limit`), and have a memory limit (`ENGINE_MEMORY_MB`). Without the cap an engine grows for over an hour, to about 1.7 GB. With it, an engine levels off at about the cap plus 150 MB. The controller refuses a limit that leaves less than 256 MB besides the cap, or under which a full cache plus 200 MB (some room above the measured 150 MB) would pass the 85% memory alert. It exports each engine's memory use and out-of-memory kills, and its cache cap (read from the container's environment). Engines don't report how full their cache is, so the controller estimates it as the engine's memory above its idle memory, at most the cap. The idle memory is the engine's lowest reading once it has run for 20 s (it may still be loading before that), or 145 MiB (an idle x86 engine in testing) if that is lower, as for an engine first seen with a full cache after a controller restart. In testing, an engine's memory grew from that idle size by about what it downloaded, until the cache was full.
 
 ## Monitoring
 
-- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, and how many streams each shared engine plays and why it was replaced. Recording rules compute availability, and alerts cover:
+- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, how many streams each shared engine plays and why it was replaced, how full each engine's memory cache is, and how much the engines upload. The gateway counts the peers each engine sends stream data to from its connection table, next to the peers sending data to it: a peer counts when the engine sent it at least 16 KiB between two samples (`PEERS_INTERVAL_SECONDS`) on top of 1/8 of what the peer sent it. That share covers the acknowledgements and requests that every download sends back, which add up to more than 16 KiB on a fast one. A stream shows 0 while its engine reports no upload speed: the engine counts only stream data, so what the gateway saw then is other traffic to its peers. Recording rules compute availability, and alerts cover:
   - stream down or flapping,
   - path down,
   - engine memory near its limit, and out-of-memory kills,
   - a service being down.
 - **Logs.** Alloy discovers the stack's containers through a second socket proxy that allows no changes. It labels their logs by service, role and stream, then ships them to Loki.
-- **Dashboard.** It ships as portable JSON with data source variables, so it can be imported into an existing Grafana.
+- **Dashboard.** It ships as portable JSON with data source variables, so it can be imported into an existing Grafana. Its top row shows the streams live and configured, the engines running, the paths up and the recoveries. The engine count (`aceswarm_engines{kind}`, `own` or `shared`) comes from the container runtime every `ENGINE_STATS_SECONDS` (15 s), so it includes every running engine container: the ones streams play from and their hot standbys. It also includes engines kept to retry a move, and shared engines that stay a while after their last stream left. While a stream or a replaced shared engine's streams move to a new engine, both engines count. If the engines can't be listed, the count is left out until the next sample, so the panel shows no data rather than an old number.
 
 ## Tests
 

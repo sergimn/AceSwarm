@@ -4,6 +4,8 @@ import type {
   PeerStats,
   PipelineRequest,
   PipelineStatus,
+  StandbyReaderStatus,
+  StandbySource,
 } from "@aceswarm/shared/api-types";
 import { HttpError, requestJson, requestOk } from "@aceswarm/shared/http";
 
@@ -18,6 +20,8 @@ export class TranscoderClient {
   /**
    * Starts (or replaces) the pipeline of a stream. With `handover`, the current output keeps
    * playing until the new source produces video, which avoids a visible gap on path switches.
+   * With the session's `stat` URL, the new source's video is only published once its live edge
+   * moves, and stops when it no longer does (see `LiveEdgeView`).
    */
   async start(id: string, request: PipelineRequest, handover = false): Promise<PipelineStatus> {
     return requestJson<PipelineStatus>(
@@ -41,6 +45,26 @@ export class TranscoderClient {
 
   async stop(id: string): Promise<void> {
     await requestOk(`${this.baseUrl}/pipelines/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /**
+   * Has the transcoder read exactly these standby sources of the stream, which keeps them pulling
+   * the stream (see `StreamStandbys`). Returns their status, or undefined while the stream has no
+   * pipeline.
+   */
+  async setStandbys(id: string, sources: StandbySource[]): Promise<StandbyReaderStatus[] | undefined> {
+    try {
+      return await requestJson<StandbyReaderStatus[]>(`${this.baseUrl}/standbys/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        body: { sources },
+        timeoutMs: 3000,
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 404) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async list(): Promise<PipelineStatus[]> {

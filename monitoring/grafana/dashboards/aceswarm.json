@@ -86,7 +86,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
         "y": 1
       },
@@ -129,8 +129,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 5,
         "y": 1
       },
       "targets": [
@@ -164,6 +164,52 @@
     },
     {
       "type": "stat",
+      "title": "Engines running",
+      "id": 41,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Engine containers running now. Each enabled stream has an engine of its own, plus its hot standbys on other paths. With \"One engine per path\" on, each path has one shared engine instead, for all its streams and their standbys. Engines kept to retry a move, and shared engines that stay a while after their last stream left, count too, and so do both engines while streams move to a new one. From the container runtime, every ENGINE_STATS_SECONDS (15 s).",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 10,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(aceswarm_engines)",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "stat",
       "title": "Network paths up",
       "id": 4,
       "datasource": {
@@ -172,8 +218,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 5,
+        "x": 14,
         "y": 1
       },
       "targets": [
@@ -215,8 +261,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 5,
+        "x": 19,
         "y": 1
       },
       "targets": [
@@ -456,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_stream_up * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "(aceswarm_stream_up * on (stream) (1 + 2 * (max by (stream) (aceswarm_stream_standby{state=\"hot\"}) or on (stream) 0 * aceswarm_stream_up)) + on (stream) 2 * aceswarm_stream_state{state=\"stale-source\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
           "legendFormat": "{{name}}",
@@ -474,31 +520,26 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "Down",
+                  "text": "Not delivering",
                   "color": "red"
                 },
                 "1": {
-                  "text": "Up",
+                  "text": "Delivering",
                   "color": "green"
+                },
+                "2": {
+                  "text": "Waiting for source",
+                  "color": "dark-red"
+                },
+                "3": {
+                  "text": "High availability",
+                  "color": "blue"
                 }
               }
             }
           ],
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
+            "mode": "fixed"
           }
         },
         "overrides": []
@@ -508,7 +549,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "Green while the stream produces new video frames (aceswarm_stream_up)."
+      "description": "High availability (blue): the stream plays (Live in the UI) and produces new video frames, and at least one hot standby on another path receives the live broadcast too, so a failover takes seconds. A standby is hot while it got data in the last 10 seconds and its live edge moves (aceswarm_stream_standby{state=\"hot\"}). Delivering (green): the stream plays and produces new video frames (aceswarm_stream_up), with no hot standby. Waiting for source (dark red): the stream is stale-source, because its source's live edge has not moved for STALE_SOURCE_SECONDS (60 by default) or the engine serves the stream that far behind its live edge. No old video is published, and the stream retries until the broadcast is back. Not delivering (red): every other state (starting, buffering, stalled, recovering, switching path, off or error). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
     },
     {
       "type": "bargauge",
@@ -688,6 +729,78 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Live edge unchanged for",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_live_edge_unchanged_seconds * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Seconds since the live edge of the engine session each stream plays from last moved (the newest data of the broadcast the engine knows of). Past STALE_SOURCE_SECONDS (60 by default) the broadcast counts as stopped: the stream shows 'Waiting for source', nothing old is published, and it tries a new session from time to time."
+    },
+    {
+      "type": "timeseries",
+      "title": "Live edge age (broadcaster's clock)",
+      "id": 43,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_live_edge_age_seconds * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Age of the newest data of each stream's broadcast that its engine knows of (livepos.last). It is stamped by the broadcaster's clock, which can be off, so a steady offset is no problem; one that keeps growing is a broadcast that stopped."
+    },
+    {
       "type": "row",
       "title": "Peers",
       "id": 12,
@@ -696,7 +809,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 56
       },
       "panels": []
     },
@@ -712,7 +825,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "targets": [
         {
@@ -748,7 +861,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 57
       },
       "targets": [
         {
@@ -783,7 +896,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "targets": [
         {
@@ -828,7 +941,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 57
+        "y": 65
       },
       "targets": [
         {
@@ -852,6 +965,80 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Peers getting data from us",
+      "id": 37,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Peers each engine sent stream data to between two gateway samples (at least one 16 KiB block on top of 1/8 of what the peer sent us, which covers the acknowledgements and requests a download sends back), from the gateway's connection table. A stream shows 0 while its engine reports no upload speed, since what it sends its peers then isn't stream data. Only peers the engine connected to itself count: the gateway forwards no inbound ports. Every stream on a shared engine that uploads shows the same peers.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_peers{kind=\"uploading\"} * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Upload speed",
+      "id": 38,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Upload rate each stream's engine reports.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_speed_kbytes{direction=\"up\"} * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "KBs",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
       "type": "row",
       "title": "Engines",
       "id": 27,
@@ -860,7 +1047,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 81
       },
       "panels": []
     },
@@ -877,7 +1064,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 66
+        "y": 82
       },
       "targets": [
         {
@@ -961,7 +1148,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 66
+        "y": 82
       },
       "targets": [
         {
@@ -1031,7 +1218,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 66
+        "y": 82
       },
       "targets": [
         {
@@ -1090,7 +1277,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 90
       },
       "targets": [
         {
@@ -1128,7 +1315,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 90
       },
       "targets": [
         {
@@ -1153,6 +1340,140 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Engine memory cache (estimated)",
+      "id": 39,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above its lowest reading (at most 145 MiB, an idle engine), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat. Where an idle engine uses less than 145 MiB, a full cache can read a few MiB under the cap.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "max(aceswarm_engine_memory_cache_limit_bytes{stream=~\"$stream\"})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Cap",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cap"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine memory cache, share of the cap",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How full each engine's memory cache is (estimated, see the panel on the left). Engines without a cap (ENGINE_MEMORY_CACHE_MB=0) don't show here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes / aceswarm_engine_memory_cache_limit_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"} / aceswarm_engine_memory_cache_limit_bytes{stream=\"\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{engine}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
       "type": "row",
       "title": "Network paths",
       "id": 17,
@@ -1161,7 +1482,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 106
       },
       "panels": []
     },
@@ -1177,7 +1498,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 107
       },
       "targets": [
         {
@@ -1210,20 +1531,7 @@
             }
           ],
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
+            "mode": "fixed"
           }
         },
         "overrides": []
@@ -1245,7 +1553,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 113
       },
       "targets": [
         {
@@ -1280,7 +1588,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 113
       },
       "targets": [
         {
@@ -1315,7 +1623,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 113
       },
       "targets": [
         {
@@ -1352,7 +1660,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 97
+        "y": 121
       },
       "targets": [
         {
@@ -1393,7 +1701,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 121
       },
       "targets": [
         {
@@ -1429,7 +1737,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 105
+        "y": 129
       },
       "panels": []
     },
@@ -1445,7 +1753,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 130
       },
       "targets": [
         {
@@ -1479,7 +1787,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 116
+        "y": 140
       },
       "targets": [
         {

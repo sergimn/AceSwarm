@@ -1,4 +1,4 @@
-import type { PeerStats, PipelineStatus, StreamState, StreamView } from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus, StandbyView, StreamState, StreamView } from "@aceswarm/shared/api-types";
 import type { EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { hlsUrls } from "./hls-urls.ts";
@@ -14,6 +14,7 @@ export interface LiveStream {
   peers: PeerStats | undefined;
   recoveries: number;
   engine: EngineHandle | undefined;
+  standbys: StandbyView[];
 }
 
 /** The API's view of a stream: a running one's live state, or a stopped one's configuration. */
@@ -40,12 +41,24 @@ function stopped(stream: StreamConfig): LiveFields {
     stateSince: stream.createdAt,
     message: null,
     lastFrameAt: null,
-    peers: { connected: null, active: null, countries: [] },
+    liveEdge: null,
+    peers: { connected: null, active: null, uploading: null, countries: [] },
     downloadKBps: null,
     uploadKBps: null,
     recoveries: 0,
     engine: null,
+    standbys: [],
   };
+}
+
+/**
+ * Peers the gateway saw the engine send stream data to. The engine's own upload speed counts only
+ * stream data, so while it is 0 whatever the gateway saw is the engine's other traffic to its peers,
+ * and none of them counts.
+ */
+function uploadingPeers(stats: EngineStats | undefined, peers: PeerStats | undefined): number | null {
+  const uploading = peers?.uploading ?? null;
+  return uploading !== null && stats?.speedUp === 0 ? 0 : uploading;
 }
 
 function running(live: LiveStream): LiveFields {
@@ -55,14 +68,17 @@ function running(live: LiveStream): LiveFields {
     stateSince: new Date(live.stateSince).toISOString(),
     message: live.message,
     lastFrameAt: live.pipeline?.lastFrameAt ?? null,
+    liveEdge: live.pipeline?.liveEdge ?? null,
     peers: {
       connected: stats?.peers ?? peers?.connected ?? null,
       active: peers?.active ?? null,
+      uploading: uploadingPeers(stats, peers),
       countries: peers?.countries.slice(0, 3) ?? [],
     },
     downloadKBps: stats?.speedDown ?? null,
     uploadKBps: stats?.speedUp ?? null,
     recoveries: live.recoveries,
     engine: engine === undefined ? null : { name: engine.name, shared: engine.sharedPath !== null },
+    standbys: live.standbys,
   };
 }

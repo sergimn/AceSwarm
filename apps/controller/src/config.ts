@@ -2,7 +2,7 @@ import { envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
 /**
- * What an engine uses besides its memory cache, as the dashboards count it: 147 to 162 MB in
+ * What an engine uses besides its memory cache, as the dashboards count it: 146 to 162 MB in
  * testing, rounded up so that an engine at the minimum limit stays clear of the memory alert.
  */
 export const ENGINE_MEMORY_OVERHEAD_MB = 200;
@@ -57,12 +57,12 @@ const schema = z
     ENGINE_IP_RANGE: z.cidrv4().default("172.31.250.128/25"),
     ENGINE_HTTP_PORT: envInt(6878),
     /** Memory limit of each engine container; 0 sets none. */
-    ENGINE_MEMORY_MB: envInt(1024),
+    ENGINE_MEMORY_MB: envInt(512),
     /**
      * How much stream data an engine keeps in memory (the engine's `--memory-cache-limit`). Without a
      * cap an engine grows for over an hour, to about 1.7 GB in testing. 0 leaves it to the engine.
      */
-    ENGINE_MEMORY_CACHE_MB: z.coerce.number().int().min(0).max(65_536).default(512),
+    ENGINE_MEMORY_CACHE_MB: z.coerce.number().int().min(0).max(65_536).default(128),
     /** How often engine memory is sampled for the metrics. */
     ENGINE_STATS_SECONDS: envInt(15),
     ENGINE_EXTRA_FLAGS: z.string().default(""),
@@ -80,12 +80,29 @@ const schema = z
     STARTUP_GRACE_SECONDS: envInt(90),
     RECOVERY_BASE_DELAY_SECONDS: envInt(5),
     RECOVERY_MAX_DELAY_SECONDS: envInt(300),
+    /**
+     * While a stream's broadcast sends nothing new (the transcoder found its live edge stale, see
+     * STALE_SOURCE_SECONDS there), the first wait before the next new engine. It doubles
+     * up to RECOVERY_MAX_DELAY_SECONDS, and the stream keeps trying until the broadcast is back.
+     */
+    STALE_SOURCE_RETRY_SECONDS: z.coerce.number().int().min(1).default(30),
     HANDOVER_TIMEOUT_SECONDS: envInt(120),
     /**
      * How many streams at once may keep the new engine of a failed move, to try again on it rather
      * than on a new one that starts from no peers. Each is an engine more; 0 turns this off.
      */
     MAX_KEPT_ENGINES: envInt(2),
+    /**
+     * Hot standby (a switch in the UI, on by default) keeps an engine on every other path that
+     * already pulls each stream. This limits how many other paths each stream keeps one on, best
+     * first; 0 means all of them.
+     */
+    STANDBY_MAX_PATHS: envInt(0),
+    /**
+     * A stream with a hot standby fails over once no new video came for this long, before the stall
+     * that STALL_SECONDS waits for.
+     */
+    STANDBY_FAILOVER_SECONDS: z.coerce.number().int().min(1).default(8),
     /**
      * With engine sharing on, a path's shared engine restarts once more than this many of its streams
      * failed within SHARED_ENGINE_FAILURE_WINDOW_SECONDS (or when the stream someone watches fails).

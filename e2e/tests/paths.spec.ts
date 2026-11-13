@@ -104,7 +104,11 @@ test("blocks engines while the gateway has no path for them, then restores their
   const ip = docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", engine!).trim();
 
   // Freeze the controller, so it can't send the paths again, to see what the gateway does alone.
-  compose("pause", "controller");
+  // By container ID: Podman's API leaves paused containers out of its list of running ones, so
+  // `compose unpause` finds nothing to unpause there and the controller would stay frozen.
+  const [controller] = compose("ps", "-q", "controller").split("\n", 1);
+  expect(controller).toBeTruthy();
+  docker("pause", controller!);
   try {
     compose("restart", "netgw");
     await expect.poll(() => tryGatewayAssignments(), { timeout: 60_000 }).toBeDefined();
@@ -114,7 +118,7 @@ test("blocks engines while the gateway has no path for them, then restores their
     // No accept rule for the engine: it can't reach anything, not even through the direct path.
     expect(rules).not.toContain(`-s ${ip}/32`);
   } finally {
-    compose("unpause", "controller");
+    docker("unpause", controller!);
   }
 
   // The controller sends every engine's path again, so the stream goes back to its VPN. The

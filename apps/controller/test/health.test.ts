@@ -1,6 +1,6 @@
 import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import { describe, expect, it } from "vitest";
-import { evaluateHealth, type HealthInputs } from "../src/health.ts";
+import { duration, evaluateHealth, type HealthInputs } from "../src/health.ts";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 
@@ -18,6 +18,7 @@ function pipeline(overrides: Partial<PipelineStatus> = {}): PipelineStatus {
     exitCode: null,
     error: null,
     pendingSource: null,
+    liveEdge: null,
     ...overrides,
   };
 }
@@ -70,5 +71,47 @@ describe("evaluateHealth", () => {
       healthy: false,
       reason: "no video after 90s",
     });
+  });
+});
+
+function stale(advancedAt: number, behindSeconds = 0): PipelineStatus["liveEdge"] {
+  return {
+    state: "stale",
+    edgeAt: new Date(advancedAt).toISOString(),
+    advancedAt: new Date(advancedAt).toISOString(),
+    behindSeconds,
+  };
+}
+
+describe("a source whose live edge stopped", () => {
+  it("is a stale source, before any other reading of the pipeline", () => {
+    const stopped = pipeline({ state: "exited", error: "stopped reading", liveEdge: stale(NOW - 2_242_000) });
+    expect(evaluateHealth(inputs({ pipeline: stopped }))).toEqual({
+      state: "stale-source",
+      healthy: false,
+      reason: "no new data from the broadcast for 37m",
+    });
+  });
+
+  it("says when the engine serves the broadcast far behind its live edge", () => {
+    const late = pipeline({ liveEdge: stale(NOW - 1000, 75) });
+    expect(evaluateHealth(inputs({ pipeline: late })).reason).toBe("the engine serves the broadcast 75s late");
+  });
+
+  it("waits for video while a new source's live edge has not moved yet", () => {
+    const waiting = pipeline({ liveEdge: { state: "waiting", edgeAt: null, advancedAt: null, behindSeconds: null } });
+    expect(evaluateHealth(inputs({ pipeline: waiting })).state).toBe("starting");
+  });
+});
+
+describe("duration", () => {
+  it("is in seconds up to two minutes, then minutes, then hours", () => {
+    expect([59_000, 119_400, 120_000, 7_199_000, 7_260_000].map((ms) => duration(ms))).toEqual([
+      "59s",
+      "119s",
+      "2m",
+      "119m",
+      "2h 1m",
+    ]);
   });
 });

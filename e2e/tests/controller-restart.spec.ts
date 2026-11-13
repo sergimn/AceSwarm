@@ -10,13 +10,14 @@ import {
   waitForPlaying,
   waitForSteadyPlaying,
 } from "./helpers.ts";
-import { broadcasts, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
+import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
 
 /**
  * Restarting the controller (an update, say) must not interrupt playing streams: the new run takes
  * over the engine session and the transcoder's ffmpeg that kept running, the old one stops within
  * a few seconds even with the UI open, and the player rides out the moment the controller (which
- * proxies the HLS) is gone. See e2e/README.md.
+ * proxies the HLS) is gone. A hot standby isn't taken over: the new run starts a new one. See
+ * e2e/README.md.
  */
 test.describe.configure({ mode: "serial" });
 
@@ -30,7 +31,13 @@ const MAX_OUTAGE_MS = 4000;
 /** Docker and Podman kill a container that hasn't stopped 10 s after SIGTERM. */
 const MAX_STOP_MS = 5000;
 
+/** The VPN profile the hot standby case adds, and removes again. */
+const PROFILE = "ci-restart";
+const VPN_PATH = `wg:${PROFILE}`;
+
 const bc: Broadcast[] = [];
+/** The first case's stream, which the hot standby case plays on. */
+const run = { ownId: "" };
 
 test.beforeAll(async ({ request }) => {
   setDirectPathBlocked(false);
@@ -39,7 +46,8 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  await request.patch("/api/settings", { data: { sharedEngines: false } });
+  await request.patch("/api/settings", { data: { sharedEngines: false, hotStandby: false } });
+  await request.delete(`/api/wireguard/${PROFILE}`);
 });
 
 interface PlaylistSample {
@@ -201,6 +209,7 @@ function report(label: string, result: RestartResult, stallMs?: number): void {
 
 test("a controller restart doesn't interrupt a stream on its own engine", async ({ page, request, baseURL }) => {
   const stream = await addStream(request, bc[0]!.infohash, "Restart own");
+  run.ownId = stream.id;
   await waitForSteadyPlaying(request, stream.id);
   const engines = engineContainers(stream.id);
   expect(engines).toHaveLength(1);
@@ -222,6 +231,53 @@ test("a controller restart doesn't interrupt a stream on its own engine", async 
     expect(progress.longestStallMs).toBeLessThan(1500);
   }
   expect((await streamById(request, stream.id))?.recoveries).toBe(0);
+});
+
+test("a controller restart doesn't interrupt a stream that has a hot standby, and starts a new standby", async ({
+  request,
+  baseURL,
+}) => {
+  const settings = await request.patch("/api/settings", { data: { hotStandby: true } });
+  expect(settings.ok(), await settings.text()).toBe(true);
+  const profile = await request.post("/api/wireguard", {
+    data: { name: PROFILE, config: await remoteWireguardProfile() },
+  });
+  expect(profile.ok(), await profile.text()).toBe(true);
+  /** The stream's standbys, as "<path> <state>". */
+  const standbys = async (): Promise<string> =>
+    ((await streamById(request, run.ownId))?.standbys ?? []).map(({ path, state }) => `${path} ${state}`).join(", ");
+  await expect.poll(standbys, { timeout: 240_000, intervals: [2000] }).toBe(`${VPN_PATH} hot`);
+  const before = await waitForSteadyPlaying(request, run.ownId);
+  const playsFrom = before.engine?.name;
+  const standby = before.standbys[0]?.engine?.name;
+  expect(playsFrom).toBeTruthy();
+  expect(standby).toBeTruthy();
+  expect(engineContainers(run.ownId)).toHaveLength(2);
+
+  const result = await restartController(request, baseURL!, run.ownId);
+  report("own engine with a hot standby", result);
+
+  // The engine it plays from and its ffmpeg run went on, on the same path.
+  expect(await streamById(request, run.ownId)).toMatchObject({
+    path: "direct",
+    engine: { name: playsFrom },
+    recoveries: 0,
+  });
+  expect(result.generations).toHaveLength(1);
+  expect(result.outageMs).toBeLessThan(MAX_OUTAGE_MS);
+  // The standby isn't taken over: the new run removes its engine and starts a new one.
+  await expect.poll(standbys, { timeout: 240_000, intervals: [2000] }).toBe(`${VPN_PATH} hot`);
+  const engines = engineContainers(run.ownId);
+  expect(engines).toHaveLength(2);
+  expect(engines).toContain(playsFrom);
+  expect(engines).not.toContain(standby);
+
+  // The next case starts from one engine and one path.
+  const off = await request.patch("/api/settings", { data: { hotStandby: false } });
+  expect(off.ok(), await off.text()).toBe(true);
+  const removed = await request.delete(`/api/wireguard/${PROFILE}`);
+  expect(removed.ok(), await removed.text()).toBe(true);
+  await expect.poll(() => engineContainers(run.ownId), { timeout: 60_000 }).toEqual([playsFrom]);
 });
 
 test("a controller restart doesn't interrupt a stream on a shared engine", async ({ request, baseURL }) => {

@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { addStream, compose, engineContainers, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
+import {
+  addStream,
+  compose,
+  docker,
+  engineContainers,
+  resetStack,
+  snapshot,
+  streamById,
+  waitForPlaying,
+} from "./helpers.ts";
 import { broadcasts, type Broadcast } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -43,6 +52,52 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === contentId);
   expect(stream?.aceIdKind).toBe("content-id");
 });
+
+test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {
+  const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
+  expect(stream).toBeDefined();
+  const value = async (series: string): Promise<number | undefined> => {
+    const text = await (await request.get("/metrics")).text();
+    const match = new RegExp(String.raw`^${series} (\S+)$`, "m").exec(text);
+    return match === null ? undefined : Number(match[1]);
+  };
+  // Prometheus adds labels of its own, such as service.
+  const engine = String.raw`\{stream="${stream!.id}",engine="[^"]+"[^}]*\}`;
+  // The default ENGINE_MEMORY_CACHE_MB (128).
+  await expect
+    .poll(() => value(`aceswarm_engine_memory_cache_limit_bytes${engine}`), { timeout: 60_000 })
+    .toBe(128 * 1024 * 1024);
+  const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
+  expect(cache).toBeGreaterThanOrEqual(0);
+  expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);
+  // The broadcast runner is the only peer and needs nothing from us, so the engine reports no upload
+  // and no peer counts as uploading, in any of six gateway samples in a row soon after playback
+  // starts. The gateway alone sometimes counted the engine's other traffic to it as an upload.
+  const uploading = String.raw`aceswarm_stream_peers\{stream="${stream!.id}",kind="uploading"[^}]*\}`;
+  await expect.poll(() => value(uploading)).toBeDefined();
+  for (let sample = 0; sample < 6; sample++) {
+    const count = await value(uploading);
+    if (count !== 0) {
+      // Which remote it was: the gateway's connections of the engine, with their byte counters.
+      await test
+        .info()
+        .attach("gateway flows of the engine", { body: engineFlows(stream!.id), contentType: "text/plain" });
+    }
+    expect(count, `sample ${String(sample)}`).toBe(0);
+    expect((await streamById(request, stream!.id))?.uploadKBps, `sample ${String(sample)}`).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+});
+
+/** The gateway's tracked connections of the stream's engines, as `conntrack -L` prints them. */
+function engineFlows(streamId: string): string {
+  const ips = engineContainers(streamId).map((name) =>
+    docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name).trim(),
+  );
+  const flows = compose("exec", "-T", "netgw", "conntrack", "-L");
+  const lines = flows.split("\n").filter((line) => ips.some((ip) => ip !== "" && line.includes(`src=${ip} `)));
+  return `engines: ${ips.join(", ")}\n${lines.join("\n")}\n`;
+}
 
 test("detects infohashes without being told", async ({ page, request }) => {
   // A bare value is tried as a content ID first; the engine rejects it, so it must fall back.

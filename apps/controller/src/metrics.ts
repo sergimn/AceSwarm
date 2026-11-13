@@ -1,12 +1,63 @@
 import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
 import { Counter, Gauge, type Registry } from "@prometheus-io/client";
-import type { EngineMemory } from "./engine-resources.ts";
+import type { EngineCount, EngineMemory } from "./engine-resources.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
 export interface MetricSources {
   viewers?: () => ViewerView[];
   sharedEngines?: () => SharedEngineView[];
+  /** Engines running at the last sample; undefined before the first, or when it could not list them. */
+  engines?: () => EngineCount | undefined;
+}
+
+/** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
+function setEngineCount(gauge: Gauge<"kind">, source: (() => EngineCount | undefined) | undefined): void {
+  gauge.reset();
+  const count = source?.();
+  if (count === undefined) {
+    return;
+  }
+  gauge.set({ kind: "own" }, count.own);
+  gauge.set({ kind: "shared" }, count.shared);
+}
+
+function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: StreamView[]): void {
+  for (const stream of streams) {
+    for (const standby of stream.standbys) {
+      gauge.set({ stream: stream.id, path: standby.path, state: standby.state }, 1);
+    }
+  }
+}
+
+/** The live edge of the session a stream plays from: how old its newest data is, and since when it is the same. */
+function setLiveEdgeGauges(
+  gauges: Record<"age" | "unchanged", Gauge<"stream">>,
+  stream: StreamView,
+  now: number,
+): void {
+  const edgeAt = stream.liveEdge?.edgeAt ?? null;
+  const advancedAt = stream.liveEdge?.advancedAt ?? null;
+  if (edgeAt !== null) {
+    gauges.age.set({ stream: stream.id }, (now - Date.parse(edgeAt)) / 1000);
+  }
+  if (advancedAt !== null) {
+    gauges.unchanged.set({ stream: stream.id }, Math.max(0, (now - Date.parse(advancedAt)) / 1000));
+  }
+}
+
+type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<"stream" | "engine">>;
+
+function setEngineGauges(gauges: EngineGauges, engines: EngineMemory[]): void {
+  for (const engine of engines) {
+    const labels = { stream: engine.stream, engine: engine.engine };
+    gauges.memory.set(labels, engine.usedBytes);
+    gauges.memoryLimit.set(labels, engine.limitBytes);
+    gauges.cache.set(labels, engine.cacheBytes);
+    if (engine.cacheLimitBytes !== null) {
+      gauges.cacheLimit.set(labels, engine.cacheLimitBytes);
+    }
+  }
 }
 
 /**
@@ -68,8 +119,9 @@ export class ControllerMetrics {
       registers,
       collect: () => {
         const current = snapshot();
-        const gauges = [info, state, up, frameAge, peers, countries, speed, path, memory, memoryLimit, viewers];
-        for (const gauge of [...gauges, watching, sharedStreams]) {
+        const gauges = [info, state, up, frameAge, liveEdgeAge, liveEdgeStill, peers, countries, speed, path];
+        const others = [memory, memoryLimit, viewers, cache, cacheLimit, watching, sharedStreams, sharedStandbys];
+        for (const gauge of [...gauges, ...others, standbys]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -83,11 +135,15 @@ export class ControllerMetrics {
           if (stream.lastFrameAt !== null) {
             frameAge.set(labels, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
           }
+          setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
           if (stream.peers.connected !== null) {
             peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
           }
           if (stream.peers.active !== null) {
             peers.set({ ...labels, kind: "active" }, stream.peers.active);
+          }
+          if (stream.peers.uploading !== null) {
+            peers.set({ ...labels, kind: "uploading" }, stream.peers.uploading);
           }
           for (const country of stream.peers.countries) {
             countries.set({ ...labels, country: country.code }, country.count);
@@ -103,6 +159,8 @@ export class ControllerMetrics {
           }
           viewers.set(labels, stream.viewers);
         }
+        setStandbyGauge(standbys, current.streams);
+        setEngineCount(engines, sources.engines);
         const watchers = sources.viewers?.() ?? [];
         for (const viewer of watchers) {
           watching.set({ viewer: viewer.viewer, device: viewer.device, stream: viewer.stream }, 1);
@@ -113,12 +171,9 @@ export class ControllerMetrics {
             { path: engine.path, engine: engine.engine, retiring: String(engine.retiring) },
             engine.streams,
           );
+          sharedStandbys.set({ path: engine.path, engine: engine.engine }, engine.standbys);
         }
-        for (const engine of engineMemory()) {
-          const labels = { stream: engine.stream, engine: engine.engine };
-          memory.set(labels, engine.usedBytes);
-          memoryLimit.set(labels, engine.limitBytes);
-        }
+        setEngineGauges({ memory, memoryLimit, cache, cacheLimit }, engineMemory());
         total.set(current.streams.length);
       },
     });
@@ -147,9 +202,21 @@ export class ControllerMetrics {
       labelNames: ["stream"],
       registers,
     });
+    const liveEdgeAge = new Gauge({
+      name: "aceswarm_stream_live_edge_age_seconds",
+      help: "Age of the newest data of the broadcast the stream's engine knows of (livepos.last), by the broadcaster's clock, which can be off",
+      labelNames: ["stream"],
+      registers,
+    });
+    const liveEdgeStill = new Gauge({
+      name: "aceswarm_stream_live_edge_unchanged_seconds",
+      help: "Seconds since the live edge of the stream's engine session last moved, by our clock; past STALE_SOURCE_SECONDS the stream is stale-source",
+      labelNames: ["stream"],
+      registers,
+    });
     const peers = new Gauge({
       name: "aceswarm_stream_peers",
-      help: "Peers of the stream (connected: reported by the engine, active: sending data)",
+      help: "Peers of the stream (connected: reported by the engine, active: sending us data, uploading: getting data from us)",
       labelNames: ["stream", "kind"],
       registers,
     });
@@ -184,6 +251,18 @@ export class ControllerMetrics {
       labelNames: ["stream", "engine"],
       registers,
     });
+    const cache = new Gauge({
+      name: "aceswarm_engine_memory_cache_bytes",
+      help: "Estimated stream data in each engine's memory cache: its memory above an idle engine's, at most the cap",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
+    const cacheLimit = new Gauge({
+      name: "aceswarm_engine_memory_cache_limit_bytes",
+      help: "Memory cache cap of each engine (ENGINE_MEMORY_CACHE_MB when it started); missing when it has none",
+      labelNames: ["stream", "engine"],
+      registers,
+    });
 
     const viewers = new Gauge({
       name: "aceswarm_stream_viewers",
@@ -201,6 +280,24 @@ export class ControllerMetrics {
       name: "aceswarm_shared_engine_streams",
       help: "Streams playing from each shared engine",
       labelNames: ["path", "engine", "retiring"],
+      registers,
+    });
+    const sharedStandbys = new Gauge({
+      name: "aceswarm_shared_engine_standbys",
+      help: "Streams of other paths with a standby session on each shared engine",
+      labelNames: ["path", "engine"],
+      registers,
+    });
+    const standbys = new Gauge({
+      name: "aceswarm_stream_standby",
+      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed",
+      labelNames: ["stream", "path", "state"],
+      registers,
+    });
+    const engines = new Gauge({
+      name: "aceswarm_engines",
+      help: "Engine containers running at the last sample (every ENGINE_STATS_SECONDS), by kind: own (a stream's: the one it plays from, a standby, or one kept to retry a move) and shared (a network path's)",
+      labelNames: ["kind"],
       registers,
     });
   }

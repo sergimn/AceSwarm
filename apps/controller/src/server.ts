@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
 import { parseAceId } from "@aceswarm/shared/ace-id";
+import type { Settings } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
@@ -33,7 +34,7 @@ const profileSchema = z.object({
 
 const networkSchema = z.object({ wireguardOnly: z.boolean() }).strict();
 
-const settingsSchema = z.object({ sharedEngines: z.boolean().optional() }).strict();
+const settingsSchema = z.object({ sharedEngines: z.boolean().optional(), hotStandby: z.boolean().optional() }).strict();
 
 const streamIdSchema = z.string().regex(/^[a-z0-9]{6,32}$/);
 const viewerSchema = z.object({ stream: streamIdSchema.nullable() }).strict();
@@ -157,11 +158,16 @@ export async function registerRoutes(
   app.patch("/api/settings", async (request, reply) => {
     const parsed = settingsSchema.safeParse(request.body);
     if (!parsed.success) {
-      return badRequest(reply, "expected { sharedEngines? }");
+      return badRequest(reply, "expected { sharedEngines?, hotStandby? }");
     }
-    return parsed.data.sharedEngines === undefined
-      ? orchestrator.getSettings()
-      : orchestrator.updateSettings({ sharedEngines: parsed.data.sharedEngines });
+    const patch: Partial<Settings> = {};
+    if (parsed.data.sharedEngines !== undefined) {
+      patch.sharedEngines = parsed.data.sharedEngines;
+    }
+    if (parsed.data.hotStandby !== undefined) {
+      patch.hotStandby = parsed.data.hotStandby;
+    }
+    return Object.keys(patch).length === 0 ? orchestrator.getSettings() : orchestrator.updateSettings(patch);
   });
 
   // Players report the stream they show full screen about once a minute, and `null` once they

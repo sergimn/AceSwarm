@@ -5,7 +5,8 @@ import { engineEnvironment } from "../src/engines.ts";
 describe("engine memory settings", () => {
   it("defaults to a memory cache that fits under the engine's memory limit, below the alert", () => {
     const config = loadConfig({});
-    expect(config.ENGINE_MEMORY_CACHE_MB).toBe(512);
+    expect(config.ENGINE_MEMORY_CACHE_MB).toBe(128);
+    expect(config.ENGINE_MEMORY_MB).toBe(512);
     expect(config.ENGINE_MEMORY_MB).toBeGreaterThanOrEqual(minEngineMemoryMb(config.ENGINE_MEMORY_CACHE_MB));
     expect((config.ENGINE_MEMORY_CACHE_MB + ENGINE_MEMORY_OVERHEAD_MB) / config.ENGINE_MEMORY_MB).toBeLessThan(0.85);
   });
@@ -65,5 +66,18 @@ describe("engine memory settings", () => {
     expect(engineEnvironment({ gatewayIp: "x", dns: "y", memoryCacheMb: 0, extraFlags: "" })).toContain(
       "ACESWARM_MEMORY_CACHE_BYTES=0",
     );
+  });
+});
+
+describe("hot standby settings", () => {
+  it("keeps standbys on every other path by default, and fails over after 8 s without video", () => {
+    const config = loadConfig({});
+    expect(config.STANDBY_MAX_PATHS).toBe(0);
+    expect(config.STANDBY_FAILOVER_SECONDS).toBe(8);
+    expect(loadConfig({ STANDBY_MAX_PATHS: "1", STANDBY_FAILOVER_SECONDS: "3" })).toMatchObject({
+      STANDBY_MAX_PATHS: 1,
+      STANDBY_FAILOVER_SECONDS: 3,
+    });
+    expect(() => loadConfig({ STANDBY_FAILOVER_SECONDS: "0" })).toThrow();
   });
 });

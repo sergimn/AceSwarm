@@ -21,7 +21,8 @@ export interface ContainerDetails {
     /** Whether the last exit was a kill by the kernel for exceeding the memory limit. */
     OOMKilled: boolean;
   };
-  Config: { Labels: Record<string, string> };
+  /** Env includes the image's own environment. Podman can leave it out (null). */
+  Config: { Labels: Record<string, string>; Env?: string[] | null };
   NetworkSettings: { Networks: Record<string, { IPAddress: string } | undefined> };
 }
 

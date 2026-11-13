@@ -14,6 +14,8 @@ services:
       TICK_MS: "1000"
       RECOVERY_BASE_DELAY_SECONDS: "1"
       RECOVERY_MAX_DELAY_SECONDS: "4"
+      # While a broadcast sends nothing new: a new session every 10 s (see the transcoder below).
+      STALE_SOURCE_RETRY_SECONDS: "10"
       # Stickiness then comes only from a healthy stream never moving, which the tests check.
       PATH_MIN_DWELL_SECONDS: "0"
     ports: !override
@@ -24,6 +26,8 @@ services:
     environment:
       PREVIEW_FPS: "10"
       PREVIEW_HEIGHT: "180"
+      # A broadcast whose live edge doesn't move for this long is stale (60 s by default).
+      STALE_SOURCE_SECONDS: "30"
 
   netgw:
     image: aceswarm-netgw:e2e

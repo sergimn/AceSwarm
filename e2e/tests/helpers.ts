@@ -57,14 +57,15 @@ export async function waitForSteadyPlaying(
 }
 
 /**
- * Removes every stream and WireGuard profile, and turns engine sharing off, so each spec starts
- * from an empty stack.
+ * Removes every stream and WireGuard profile, and turns engine sharing and hot standby off, so
+ * each spec starts from an empty stack with one engine per stream (standby.spec.ts turns hot
+ * standby on).
  */
 export async function resetStack(request: APIRequestContext): Promise<void> {
   // WireGuard only keeps the last profile, so it goes first.
   const policy = await request.patch("/api/network", { data: { wireguardOnly: false } });
   expect(policy.ok(), await policy.text()).toBe(true);
-  const settings = await request.patch("/api/settings", { data: { sharedEngines: false } });
+  const settings = await request.patch("/api/settings", { data: { sharedEngines: false, hotStandby: false } });
   expect(settings.ok(), await settings.text()).toBe(true);
   const { streams } = await snapshot(request);
   for (const stream of streams) {
@@ -189,4 +190,24 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
   } catch (error) {
     return { ok: false, output: String((error as { stderr?: unknown }).stderr ?? error) };
   }
+}
+
+/**
+ * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
+ * "Engines running" adds up); undefined before its first sample, or when it could not list them.
+ */
+export async function reportedEngines(
+  request: APIRequestContext,
+): Promise<{ own: number; shared: number } | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const text = await response.text();
+  // The registry adds a default service label.
+  const value = (kind: string): number | undefined => {
+    const match = new RegExp(String.raw`^aceswarm_engines\{kind="${kind}"[^}]*\} (\S+)$`, "m").exec(text);
+    return match === null ? undefined : Number(match[1]);
+  };
+  const own = value("own");
+  const shared = value("shared");
+  return own === undefined || shared === undefined ? undefined : { own, shared };
 }

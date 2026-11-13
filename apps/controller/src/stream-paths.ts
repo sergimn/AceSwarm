@@ -1,6 +1,7 @@
 import type { PathStatus, PathStrategyName } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
-import { initialPath, rememberHealth, switchTarget, type PathMemory } from "./path-selector.ts";
+import type { Health } from "./health.ts";
+import { initialPath, pathScore, rememberHealth, switchTarget, type PathMemory } from "./path-selector.ts";
 
 export interface StreamPathsDeps {
   /** Latest network path status from the gateway (empty when it is unreachable). */
@@ -57,6 +58,34 @@ export class StreamPaths {
     rememberHealth(this.memory, path, healthy);
   }
 
+  /**
+   * Records the stream's health on its path, when it says something about the path: not while it
+   * starts, and not while its broadcast sends nothing new (that is the same on every path).
+   */
+  rememberHealth(path: string | null, health: Health): void {
+    const says = health.state !== "starting" && health.state !== "buffering" && health.state !== "stale-source";
+    if (path !== null && says) {
+      this.remember(path, health.healthy);
+    }
+  }
+
+  /** The gateway has the path (a WireGuard path goes once its profile is removed). */
+  exists(path: string): boolean {
+    return this.deps.paths().some((candidate) => candidate.id === path);
+  }
+
+  /**
+   * The paths a stream on `current` keeps standbys on: the other ones it may use that are up, best
+   * first (the gateway's probes and the stream's own history on each, as for a path switch).
+   */
+  standbyCandidates(current: string | null): string[] {
+    return this.usable()
+      .filter((path) => path.up && path.id !== current)
+      .map((path) => ({ id: path.id, score: pathScore(path, this.memory) }))
+      .toSorted((a, b) => b.score - a.score)
+      .map(({ id }) => id);
+  }
+
   /** The path is down, or gone (its WireGuard profile was removed). */
   isDown(path: string | null): boolean {
     return path !== null && this.known && this.deps.paths().find((candidate) => candidate.id === path)?.up !== true;
@@ -65,6 +94,11 @@ export class StreamPaths {
   /** Another path the stream may use is up. */
   hasAlternative(current: string | null): boolean {
     return this.usable().some((path) => path.up && path.id !== current);
+  }
+
+  /** The stream may leave `current`: another path is up, and it stayed long enough or `current` is down. */
+  canSwitch(current: string | null, sinceSwitchMs: number, minDwellMs: number): boolean {
+    return this.hasAlternative(current) && (sinceSwitchMs >= minDwellMs || this.isDown(current));
   }
 
   /**
