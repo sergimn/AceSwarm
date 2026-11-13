@@ -1,8 +1,8 @@
 import { createLogger } from "@aceswarm/shared/logger";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadCleanupConfig } from "../src/config.ts";
 import type { ContainerSummary, DockerClient } from "../src/docker.ts";
-import { CONTROLLER_LABEL, removeEnginesOnStackDown } from "../src/stack-cleanup.ts";
+import { cleanupOnSignal, CONTROLLER_LABEL, removeEnginesOnStackDown } from "../src/stack-cleanup.ts";
 
 const logger = createLogger("test", "silent");
 
@@ -114,5 +114,102 @@ describe("removing the engines when the stack goes down", () => {
       STACK_NAME: "aceswarm-e2e",
     });
     expect(() => loadCleanupConfig({ STACK_NAME: "Not A Stack" })).toThrow();
+  });
+});
+
+describe("the cleanup service's signal handler", () => {
+  it("removes the engines on the first signal, exits with 0 and ignores the next ones", async () => {
+    const { docker, removed } = fakeDocker(engines());
+    const exits: number[] = [];
+    const stop = cleanupOnSignal({
+      docker,
+      stack: "aceswarm",
+      logger,
+      exit: (code) => {
+        exits.push(code);
+      },
+    });
+
+    await Promise.all([stop("SIGTERM"), stop("SIGTERM"), stop("SIGINT")]);
+
+    expect(removed).toHaveLength(4);
+    expect(exits).toEqual([0]);
+  });
+
+  it("exits with 0 when it leaves the engines for a running controller", async () => {
+    const { docker, removed } = fakeDocker([...engines(), controller("running")]);
+    const exits: number[] = [];
+    await cleanupOnSignal({
+      docker,
+      stack: "aceswarm",
+      logger,
+      exit: (code) => {
+        exits.push(code);
+      },
+    })("SIGTERM");
+    expect(removed).toEqual([]);
+    expect(exits).toEqual([0]);
+  });
+
+  it("exits with 1 when an engine can't be removed", async () => {
+    const { docker } = fakeDocker([{ ...engine("stuck", { "aceswarm.stream": "d" }), stuck: true }]);
+    const exits: number[] = [];
+    await cleanupOnSignal({
+      docker,
+      stack: "aceswarm",
+      logger,
+      exit: (code) => {
+        exits.push(code);
+      },
+    })("SIGTERM");
+    expect(exits).toEqual([1]);
+  });
+
+  it("exits with 1 when Docker can't be reached", async () => {
+    const docker = {
+      listContainers: () => Promise.reject(new Error("docker GET /containers/json failed: ECONNREFUSED")),
+    } as unknown as DockerClient;
+    const exits: number[] = [];
+    await cleanupOnSignal({
+      docker,
+      stack: "aceswarm",
+      logger,
+      exit: (code) => {
+        exits.push(code);
+      },
+    })("SIGTERM");
+    expect(exits).toEqual([1]);
+  });
+
+  it("exits with 1 once the time is up, and only once", async () => {
+    vi.useFakeTimers();
+    try {
+      // Docker answers nothing until the test lets it, then an empty list to every call.
+      const hung = Promise.withResolvers<ContainerSummary[]>();
+      const docker = {
+        listContainers: () => hung.promise,
+      } as unknown as DockerClient;
+      const exits: number[] = [];
+      const stopping = cleanupOnSignal({
+        docker,
+        stack: "aceswarm",
+        logger,
+        timeoutMs: 25_000,
+        exit: (code) => {
+          exits.push(code);
+        },
+      })("SIGTERM");
+
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(exits).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(exits).toEqual([1]);
+      // Docker answering late changes nothing.
+      hung.resolve([]);
+      await stopping;
+      expect(exits).toEqual([1]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

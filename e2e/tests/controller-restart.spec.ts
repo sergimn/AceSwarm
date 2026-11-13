@@ -310,6 +310,11 @@ test("a controller restart doesn't interrupt a stream on a shared engine", async
   expect((await streamById(request, stream.id))?.engine).toMatchObject({ shared: true });
 });
 
+/** How many times the cleanup service said it is ready, which it does once it handles SIGTERM. */
+function cleanupReady(): number {
+  return compose("logs", "--no-color", "cleanup").split("waiting to remove the engines").length - 1;
+}
+
 test("stopping the whole stack removes every engine, and stopping the cleanup service alone doesn't", async ({
   request,
 }) => {
@@ -319,28 +324,35 @@ test("stopping the whole stack removes every engine, and stopping the cleanup se
   const engines = stackEngines();
   expect(engines.length).toBeGreaterThan(0);
 
-  // Recreating the cleanup service, as `docker compose up -d` does after an update, stops it while
-  // the controller runs: the engines stay. Not `compose restart`: on Podman, it gives the container
-  // no time to stop, so the service never gets to decide.
-  compose("stop", "cleanup");
-  expect(compose("logs", "--no-color", "cleanup")).toContain("a controller still runs");
-  expect(stackEngines()).toEqual(engines);
-  compose("start", "cleanup");
+  try {
+    // Recreating the cleanup service, as `docker compose up -d` does after an update, stops it
+    // while the controller runs: the engines stay. Not `compose restart`: on Podman, it gives the
+    // container no time to stop, so the service never gets to decide.
+    compose("stop", "cleanup");
+    expect(compose("logs", "--no-color", "cleanup")).toContain("a controller still runs");
+    expect(stackEngines()).toEqual(engines);
+    const started = cleanupReady();
+    compose("start", "cleanup");
+    // A stop right after the start could come before it listens for SIGTERM.
+    await expect.poll(cleanupReady, { timeout: 30_000 }).toBeGreaterThan(started);
 
-  // `docker compose down` and `stop` stop the controller first, since it depends on the cleanup
-  // service, then the cleanup service, which removes the engines before it exits.
-  const stopping = Date.now();
-  await composeAsync("stop", "controller", "cleanup");
-  const stopMs = Date.now() - stopping;
-  const left = stackEngines();
-  const description = `stack stop: controller and cleanup service stopped in ${String(stopMs)} ms, ${String(engines.length)} engines before, ${String(left.length)} after`;
-  test.info().annotations.push({ type: "stack stop", description });
-  process.stdout.write(`${description}\n`);
-  expect(left).toEqual([]);
+    // `docker compose down` and `stop` stop the controller first, since it depends on the cleanup
+    // service, then the cleanup service, which removes the engines before it exits.
+    const stopping = Date.now();
+    await composeAsync("stop", "controller", "cleanup");
+    const stopMs = Date.now() - stopping;
+    const left = stackEngines();
+    const description = `stack stop: controller and cleanup service stopped in ${String(stopMs)} ms, ${String(engines.length)} engines before, ${String(left.length)} after`;
+    test.info().annotations.push({ type: "stack stop", description });
+    process.stdout.write(`${description}\n`);
+    expect(left).toEqual([]);
+  } finally {
+    // The later specs need the whole stack, whatever happened here.
+    await composeAsync("start", "cleanup", "controller");
+  }
 
   // The stack comes back: every stream starts again on a new engine (with a new id, though a shared
   // engine gets the name of the removed one).
-  await composeAsync("start", "cleanup", "controller");
   await expect
     .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), { timeout: 60_000 })
     .toBe(true);

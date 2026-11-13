@@ -1,52 +1,41 @@
-import { createLogger } from "@aceswarm/shared/logger";
-import { loadCleanupConfig } from "./config.ts";
-import { DockerClient } from "./docker.ts";
-import { removeEnginesOnStackDown } from "./stack-cleanup.ts";
-
 /**
  * The cleanup service: it waits, and when it gets SIGTERM it removes the stack's engines if the
  * whole stack is going down (see `removeEnginesOnStackDown`). The controller creates engines
  * through the Docker API, so compose doesn't know them and would otherwise leave them running.
+ *
+ * It listens for signals before it loads anything else. Node runs as the container's PID 1, which
+ * ignores a signal it has no handler for, so a stop that came while the modules load would wait out
+ * compose's grace period and remove nothing. Static imports load before this code runs, so
+ * everything else comes in with `import()`, and a signal that came meanwhile is handled once it has.
  */
+const early: string[] = [];
+const handler: { stop?: (signal: string) => Promise<void> } = {};
+const onSignal = (signal: string): void => {
+  if (handler.stop === undefined) {
+    early.push(signal);
+  } else {
+    void handler.stop(signal);
+  }
+};
+process.on("SIGTERM", () => {
+  onSignal("SIGTERM");
+});
+process.on("SIGINT", () => {
+  onSignal("SIGINT");
+});
 
-/** Compose gives this service 30 s to stop (`stop_grace_period`); it exits a little sooner. */
-const CLEANUP_TIMEOUT_MS = 25_000;
-
+const [{ createLogger }, { loadCleanupConfig }, { DockerClient }, { cleanupOnSignal }] = await Promise.all([
+  import("@aceswarm/shared/logger"),
+  import("./config.ts"),
+  import("./docker.ts"),
+  import("./stack-cleanup.ts"),
+]);
 const config = loadCleanupConfig();
 const logger = createLogger("cleanup");
-const docker = new DockerClient(config.DOCKER_HOST);
-
 // Nothing to do until the stack stops. The timer keeps the process alive meanwhile.
-const idle = setInterval(() => undefined, 2 ** 31 - 1);
-const shutdown = { started: false };
-
-const stop = (signal: string): void => {
-  if (shutdown.started) {
-    return;
-  }
-  shutdown.started = true;
-  logger.info({ signal }, "shutting down");
-  const timer = setTimeout(() => {
-    logger.warn({ timeoutMs: CLEANUP_TIMEOUT_MS }, "removing the engines is taking too long; exiting now");
-    process.exit(1);
-  }, CLEANUP_TIMEOUT_MS);
-  timer.unref();
-  void removeEnginesOnStackDown(docker, config.STACK_NAME, logger)
-    .then((result) => (result.outcome === "removed" && result.failed > 0 ? 1 : 0))
-    .catch((error: unknown) => {
-      logger.error({ err: error }, "could not remove the engines");
-      return 1;
-    })
-    .then((code) => {
-      clearInterval(idle);
-      process.exit(code);
-    });
-};
-
-process.once("SIGTERM", () => {
-  stop("SIGTERM");
-});
-process.once("SIGINT", () => {
-  stop("SIGINT");
-});
+setInterval(() => undefined, 2 ** 31 - 1);
+handler.stop = cleanupOnSignal({ docker: new DockerClient(config.DOCKER_HOST), stack: config.STACK_NAME, logger });
 logger.info({ stack: config.STACK_NAME }, "waiting to remove the engines when the stack goes down");
+for (const signal of early) {
+  void handler.stop(signal);
+}

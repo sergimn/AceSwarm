@@ -37,14 +37,16 @@ down() {
 }
 
 leftovers() {
-  local filter="label=aceswarm.stack=${ACESWARM_STACK_NAME}"
-  if [[ -z "$(docker ps -aq --filter "$filter")" ]]; then
+  local filter="label=aceswarm.stack=${ACESWARM_STACK_NAME}" engines
+  # Not inside the test: a failing `docker ps` must fail the check rather than find nothing.
+  engines="$(docker ps -aq --filter "$filter")"
+  if [[ -z "$engines" ]]; then
     echo "no engines left"
     return 0
   fi
   echo "the stack went down but left engines behind:" >&2
   docker ps -a --filter "$filter" --format '{{.Names}} {{.Status}}' >&2
-  docker ps -aq --filter "$filter" | xargs -r docker rm -f >/dev/null
+  xargs -r docker rm -f <<<"$engines" >/dev/null
   # Their network couldn't go while they were on it.
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   return 1

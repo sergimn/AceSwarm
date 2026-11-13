@@ -63,3 +63,53 @@ export async function removeEnginesOnStackDown(
 function containerName(container: ContainerSummary): string {
   return container.Names[0]?.replace(/^\//, "") ?? container.Id;
 }
+
+/** Compose gives the cleanup service 30 s to stop (`stop_grace_period`); it exits a little sooner. */
+export const CLEANUP_TIMEOUT_MS = 25_000;
+
+export interface CleanupOnSignalOptions {
+  docker: DockerClient;
+  stack: string;
+  logger: Logger;
+  timeoutMs?: number;
+  /** Ends the process (tests pass their own). */
+  exit?: (code: number) => void;
+}
+
+/**
+ * The cleanup service's signal handler: the first SIGTERM or SIGINT runs `removeEnginesOnStackDown`,
+ * then exits: with 1 if an engine couldn't be removed or Docker couldn't be reached, and with 1
+ * after `timeoutMs` if that takes too long. Later signals change nothing.
+ */
+export function cleanupOnSignal(options: CleanupOnSignalOptions): (signal: string) => Promise<void> {
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const timeoutMs = options.timeoutMs ?? CLEANUP_TIMEOUT_MS;
+  const state = { started: false, exited: false };
+  const exitOnce = (code: number): void => {
+    if (state.exited) {
+      return;
+    }
+    state.exited = true;
+    exit(code);
+  };
+  return async (signal) => {
+    if (state.started) {
+      return;
+    }
+    state.started = true;
+    options.logger.info({ signal }, "shutting down");
+    const timer = setTimeout(() => {
+      options.logger.warn({ timeoutMs }, "removing the engines is taking too long; exiting now");
+      exitOnce(1);
+    }, timeoutMs);
+    timer.unref();
+    const code = await removeEnginesOnStackDown(options.docker, options.stack, options.logger)
+      .then((result) => (result.outcome === "removed" && result.failed > 0 ? 1 : 0))
+      .catch((error: unknown) => {
+        options.logger.error({ err: error }, "could not remove the engines");
+        return 1;
+      });
+    clearTimeout(timer);
+    exitOnce(code);
+  };
+}
