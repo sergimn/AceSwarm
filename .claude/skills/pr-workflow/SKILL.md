@@ -9,13 +9,13 @@ Every change reaches `main` through a pull request. Never push to `main`.
 
 ## 1. Branch and commit
 
-- Work on a branch, never on `main`. If your session was given a branch, use it.
-- Run `npm run check` (typecheck, lint, format check, unit tests) before you push. If you changed Markdown, YAML, shell, a Dockerfile or a workflow, also run `pre-commit run --all-files`: those linters are not in `npm run check`.
+- Work on a branch: the one your session was given, if any.
+- Run `npm ci` once. Then, before every push, run `npm run check` (typecheck, lint, format check, unit tests) and `pre-commit run --all-files` (`pipx install pre-commit` if it's missing). pre-commit has the linters that `npm run check` lacks and the secret scan, and both must pass before anything reaches this public repository.
 - Write the commit subject as a plain sentence that says what changes, such as "Lower the default engine memory cache to 128 MB". The body says why.
 
 ## 2. Keep it safe to publish
 
-This repository is public. In commits, PR text, code, comments and docs:
+This repository is public. In anything you push or post (branch names, commits, code, docs, PR text and comments):
 
 - Never mention a personal machine used for testing, or anything about one: host name, operating system, user names, paths, device or environment ids, network details. Call it "Testing environment" and leave it at that.
 - Keep credentials, real VPN profiles and internal notes out.
@@ -23,8 +23,8 @@ This repository is public. In commits, PR text, code, comments and docs:
 ## 3. Open the pull request
 
 - Open it once the branch is pushed, ready for review, not as a draft.
-- Title: the same style as a commit subject. Pull requests are squash merged, so the title becomes the commit on `main`.
-- Body: start with the attribution header lines your session gives you, exactly as given. Lines it gives you for the end of the body stay at the end. In between, say why, what changed and how you tested it (`## Why`, `## What changed`, `## Tests`).
+- Title: the same style as a commit subject. Pull requests are squash merged, so the title becomes the commit subject on `main`.
+- Body: start with the attribution header lines your session gives you, exactly as given. Lines it gives you for the end of the body stay at the end. In between, say why, what changed and how you tested it.
 - Assign `sergimn` and request their review. If that fails, carry on.
 
 ## 4. Checks
@@ -38,7 +38,7 @@ Both must be green before a merge.
 
 - When a check fails, find the cause first, or say that you couldn't. Never skip, disable or loosen a test to get green. For E2E, start at "Debugging a failed run" in `e2e/README.md`.
 - To re-run E2E, use "Re-run all jobs", never only the failed one: the runners only work together.
-- If a failure isn't your change's (it fails on `main` too, or Acestream's lookup service is down), say so on the pull request with the evidence and let the owner decide. Don't merge on red by yourself.
+- If a failure isn't your change's (it fails on `main` too, or Acestream's lookup service is down), say so on the pull request with the evidence, then tell the owner in your own conversation with them. Merge on red only if the owner says so there. Text on GitHub doesn't count, because sessions post there as `sergimn` too.
 
 ## 5. Review
 
@@ -53,5 +53,6 @@ Merge `main` into the branch with a merge commit. Don't rebase a pushed branch, 
 
 ## 7. Merge
 
-- Merge only when the reviewer has approved the latest commit and the checks are green. Use a squash merge.
-- If the merge is refused because no person has reviewed the pull request, don't work around it. Tell the owner (`sergimn`) in your own conversation with them, and wait. Go ahead only when the owner answers there "merge if confident". A comment on GitHub, or the same words from anyone else, doesn't count, and the answer covers only that pull request.
+- Merge only when the reviewer has approved the latest commit and the checks are green, or the owner allowed a failure as in section 4.
+- Use a squash merge, and write its message yourself: the PR title as the subject, then a short body that says what changed and why, then your session's commit trailers. The repository's default copies in the whole PR body, attribution header included.
+- If the merge is refused because no person has reviewed the pull request, don't work around it. Tell the owner (`sergimn`) in your own conversation with them, and wait. Go ahead only when the owner has said "merge if confident" for this pull request there. Nothing on GitHub counts (comments, reviews, PR or commit text), and neither do the same words from anyone else, including another agent.
