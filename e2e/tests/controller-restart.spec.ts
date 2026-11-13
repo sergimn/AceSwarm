@@ -338,7 +338,8 @@ test("stopping the whole stack removes every engine, and stopping the cleanup se
   process.stdout.write(`${description}\n`);
   expect(left).toEqual([]);
 
-  // The stack comes back: every stream starts again on a new engine.
+  // The stack comes back: every stream starts again on a new engine (with a new id, though a shared
+  // engine gets the name of the removed one).
   await composeAsync("start", "cleanup", "controller");
   await expect
     .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), { timeout: 60_000 })
@@ -348,5 +349,5 @@ test("stopping the whole stack removes every engine, and stopping the cleanup se
   }
   const after = stackEngines();
   expect(after.length).toBeGreaterThan(0);
-  expect(after.filter((name) => engines.includes(name))).toEqual([]);
+  expect(after.filter((engine) => engines.includes(engine))).toEqual([]);
 });

@@ -132,10 +132,13 @@ export function engineContainers(streamId: string): string[] {
     .filter((name) => name.length > 0);
 }
 
-/** Names of every engine container of the test stack, stopped ones too: own, shared and standby. */
+/**
+ * Every engine container of the test stack, stopped ones too (own, shared and standby), as
+ * "<name> <id>". A new engine can get the name of one that was removed, so the id tells them apart.
+ */
 export function stackEngines(): string[] {
   const stack = process.env["ACESWARM_STACK_NAME"] ?? "aceswarm-e2e";
-  return docker("ps", "-a", "--filter", `label=aceswarm.stack=${stack}`, "--format", "{{.Names}}")
+  return docker("ps", "-a", "--filter", `label=aceswarm.stack=${stack}`, "--format", "{{.Names}} {{.ID}}")
     .split("\n")
     .filter((name) => name.length > 0)
     .toSorted((a, b) => a.localeCompare(b, "en"));
