@@ -87,10 +87,14 @@ export class SavedPlayback {
     const pipeline = onEngine ? await this.deps.transcoder.status(this.streamId) : undefined;
     this.tried = true;
     const stats = onEngine ? await this.deps.ace.stats(saved.statUrl).catch(() => undefined) : undefined;
-    const problem = adoptionProblem(saved, pipeline, stats);
+    const problem = onEngine ? adoptionProblem(saved, pipeline, stats) : "the session is on another engine";
     if (problem !== undefined || pipeline === undefined || stats === undefined) {
       this.logger.info({ reason: problem }, "could not take over the running playback; starting the stream");
-      if (stats !== undefined) {
+      if (!onEngine) {
+        // Another engine, such as a shared engine on another path, may still pull it. That engine
+        // may also be gone, and a request to a gone address takes seconds: the stream doesn't wait.
+        void this.deps.ace.stopSession(saved.commandUrl).catch(() => undefined);
+      } else if (stats !== undefined) {
         await this.deps.ace.stopSession(saved.commandUrl).catch(() => undefined);
       }
       await this.save(undefined);

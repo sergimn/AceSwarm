@@ -589,6 +589,9 @@ describe("taking over the playback after a controller restart", () => {
     await fake.instance.tick();
     expect(fake.sessions()).toBe(1);
     expect(fake.transcoderStarts).toEqual([`${moved.baseUrl}/play`]);
+    // Whatever engine has its old address now, it shouldn't pull the stream for nobody.
+    expect(fake.stopped).toEqual([session.commandUrl]);
+    expect(fake.saved().session?.playbackUrl).toBe(`${moved.baseUrl}/play`);
   });
 
   test("forgets the session once it stops, and remembers the next one", async () => {

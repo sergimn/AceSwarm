@@ -32,4 +32,9 @@ describe("retryThroughOutages", () => {
     expect(OUTAGE_TOLERANT_LOADING.playlistLoadPolicy?.default.errorRetry).toBe(retryThroughOutages);
     expect(OUTAGE_TOLERANT_LOADING.fragLoadPolicy?.default.errorRetry).toBe(retryThroughOutages);
   });
+
+  it("keeps hls.js's own tries after a timeout", () => {
+    expect(OUTAGE_TOLERANT_LOADING.playlistLoadPolicy?.default.timeoutRetry?.maxNumRetry).toBe(2);
+    expect(OUTAGE_TOLERANT_LOADING.fragLoadPolicy?.default.timeoutRetry?.maxNumRetry).toBe(4);
+  });
 });

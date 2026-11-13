@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import {
   addStream,
-  compose,
+  composeAsync,
   engineContainers,
   resetStack,
   sharedEngineContainers,
@@ -133,6 +133,8 @@ async function openPlayer(page: Page, name: string): Promise<boolean> {
     `MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028,mp4a.40.2"')`,
   );
   if (!canPlay) {
+    // CI's runners have Google Chrome: there, the video check must not go missing without notice.
+    expect(process.env["CI"], "the browser can't play H.264, so the video can't be checked").toBeUndefined();
     return false;
   }
   await expect
@@ -165,15 +167,17 @@ interface RestartResult {
 
 /**
  * Stops and starts the controller while polling the stream's playlist, then lets it play on. The
- * page, if any, keeps the UI's event stream open, which closing the server used to wait for.
+ * page, if any, keeps the UI's event stream open, which closing the server used to wait for. The
+ * compose commands don't block, so the polling goes on while they run: the outage counts from the
+ * moment the old controller stops answering.
  */
 async function restartController(request: APIRequestContext, baseUrl: string, id: string): Promise<RestartResult> {
   const watcher = watchPlaylist(baseUrl, id);
   await new Promise((resolve) => setTimeout(resolve, 5000));
   const stopping = Date.now();
-  compose("stop", "controller");
+  await composeAsync("stop", "controller");
   const stopMs = Date.now() - stopping;
-  compose("start", "controller");
+  await composeAsync("start", "controller");
   await expect
     .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
       timeout: 60_000,
