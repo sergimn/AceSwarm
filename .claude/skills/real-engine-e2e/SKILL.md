@@ -27,23 +27,23 @@ Four jobs start together:
 
 | Job                                 | Role                                                           | Tells you             |
 | ----------------------------------- | -------------------------------------------------------------- | --------------------- |
-| WireGuard server                    | `wg`: the VPN server under test                                | infrastructure only   |
-| Dummy Acestream broadcast           | `source`: six real broadcasts (`bc1`-`bc6`) and the tracker    | infrastructure only   |
+| WireGuard server                    | `wg`: the VPN server under test                                | no AceSwarm result    |
+| Dummy Acestream broadcast           | `source`: six real broadcasts (`bc1`-`bc6`) and the tracker    | no AceSwarm result    |
 | AceSwarm with real engines          | `stack`: Docker on `ubuntu-24.04`, plays `bc1`-`bc3`           | the result for Docker |
 | AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6` | the result for Podman |
 
 - The result is the **Run the tests** step of each stack job, about 14 minutes. Playwright stops at 30. The two stack jobs don't cancel each other, and a change is validated only when both are green.
 - Specs run in file order with one worker, and each starts from `resetStack`. Most are serial: after a test fails, the rest of that file is skipped, so read the first failure.
-- A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints its own side: the mesh, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
+- A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
 - **Stop AceSwarm** on the Podman job may print "rootless netns: kill network process: permission denied". That step is allowed to fail and is not a test failure.
 
 ## 4. Real failure or not
 
 - **The same test fails on both stack jobs.** Real, as long as the `wg` and `source` jobs are healthy.
 - **A test fails on one stack job.** Often real and specific to that runtime (on Podman the fault rules go into Podman's network namespace, and the runner is `ubuntu-26.04` with its AppArmor profiles). Re-run all jobs once. If it fails again, it is real. If it passes, report a flaky test with the links to both attempts, don't drop it.
-- **A step fails before the tests**: finding the public UDP address, "Join the mesh" ("no connectivity to …"), waiting for the profile or `broadcasts.json`, or `stack.sh check`. Usually infrastructure: re-run all jobs once. It is real if the same step fails again, or if the change touches what that step runs: the scripts in `e2e/`, `e2e/tracker.ts`, `e2e/wg-server/`, the workflow, or the gateway for `stack.sh check`. When the wait for the profile or `broadcasts.json` fails, the cause is in the `wg` or `source` job: read its **Logs** step. "Build the images and start AceSwarm" is always suspect, because the change can break a build or a service's health check.
-- **Every test times out waiting for "playing".** Read the `source` job's logs first: each engine should announce to the tracker and get its broadcast as a peer. Engines resolve content IDs and infohashes through Acestream's own lookup service, so an outage there fails the whole run. If the announces are there, suspect the change.
-- **Known old flake.** In `streams.spec.ts`, "exports the engine's memory cache cap and estimated use, and the peers it uploads to" sometimes saw one uploading peer where it expects none. #19 (`abf2f1e`) fixed the count. On a branch without it (`git merge-base --is-ancestor abf2f1e HEAD` fails), merge `main` instead of investigating. With #19, a non-zero count is a finding: the test attaches "gateway flows of the engine".
+- **A step fails before the tests**: finding the public UDP address, "Join the mesh" ("no connectivity to …"), waiting for the profile or `broadcasts.json`, or `stack.sh check`. Usually infrastructure: re-run all jobs once. It is real if the change touches what that step runs: anything in `e2e/`, the workflow, or for `stack.sh check` the gateway, `compose.yaml` and the netgw stage of the `Dockerfile`. If the same step fails again, compare with the latest E2E run on `main`: only a failure there too makes it an outage. When the wait for the profile or `broadcasts.json` fails, the cause is in the `wg` or `source` job: read its **Logs** step. "Build the images and start AceSwarm" is always suspect, because the change can break a build or a service's health check.
+- **Every test times out waiting for "playing".** Read the `source` job's logs first: each engine should announce to the tracker and get its broadcast as a peer. If the announces are there, suspect the change. If they are missing, the engines couldn't resolve the broadcast through Acestream's lookup service, or couldn't get out at all. A change to the gateway, the engine image or the compose files does that too, since `stack.sh check` only pings from the gateway itself. Call it an outage only when E2E on `main` from the same time fails the same way.
+- **Known old flake.** In `streams.spec.ts`, "exports the engine's memory cache cap and estimated use, and the peers it uploads to" sometimes saw one uploading peer where it expects none. #19 (`abf2f1e`) fixed the count. A pull request run tests the branch merged into `main`, so it has #19 whatever the branch is based on. Only a run from "Run workflow" or a push tests the branch alone: there, if `git merge-base --is-ancestor abf2f1e <the run's commit>` fails (fetch `main` first in a shallow clone), merge `main` and run again instead of investigating. In every other case a non-zero count is a finding: the test attaches "gateway flows of the engine".
 
 No other check is known to be flaky.
 
@@ -51,7 +51,7 @@ No other check is known to be flaky.
 
 - Get broadcasts with `broadcasts(n)` from `e2e/tests/mesh.ts`. Their infohashes and content IDs are new in every run, and each stack runner has three.
 - Start from `resetStack(request)` (`e2e/tests/helpers.ts`) in `beforeAll`, and remove every fault the spec adds.
-- Both runtimes have to pass. Use `docker` and `compose` from `helpers.ts` and the fault setters from `mesh.ts`, never iptables or the runtime directly: on Podman the rules go into another chain. Pause and unpause by container ID with `docker(...)`, because `compose unpause` finds nothing on Podman (see `paths.spec.ts`). Use `MESH.self`, not a literal address.
+- Both runtimes have to pass. Use `docker` and `compose` from `helpers.ts` and the fault setters from `mesh.ts`, never iptables or the runtime directly: on Podman the rules go into another chain. Pause and unpause by container ID or name with `docker(...)`, because `compose unpause` finds nothing on Podman (see `paths.spec.ts`). Use `MESH.self`, not a literal address.
 - Real engines are slow to start: `waitForPlaying` allows 180 s. Don't shorten a timeout to make a spec faster.
 - Update the spec table and the order diagram in `e2e/README.md`.
 
@@ -63,7 +63,7 @@ The suite plays its own broadcasts. To check a public stream against one engine,
 ENGINE=http://127.0.0.1:6878 # the engine's HTTP API
 curl -s -m 90 "$ENGINE/ace/getstream?infohash=<40 hex>&format=json&pid=manual-check" # or ?id=<content ID>
 # good: {"response": {"playback_url": "...", "stat_url": "...", "command_url": "..."}, "error": null}
-# A live stream never ends, so exit code 28 (timed out) is expected here: read the byte count.
+# A live stream never ends, so for the next command exit code 28 (timed out) is expected: read the byte count.
 curl -L -m 90 -o /dev/null -w '%{size_download}\n' "<playback_url>"
 curl -s "<command_url>?method=stop"
 ```
