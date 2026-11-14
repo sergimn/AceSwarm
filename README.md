@@ -174,6 +174,7 @@ flowchart LR
 ```
 
 - **controller:** the web UI and API. It runs one supervisor per stream, which creates the stream's engine, watches its health and recovers it.
+- **cleanup:** removes the engines when the whole stack goes down (`docker compose down` or `stop`). A controller restart leaves them running, so the streams play on.
 - **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview and thumbnails.
 - **netgw:** the network gateway. Every engine routes through it. It owns the WireGuard tunnels, routes each engine through its path, probes the paths, and counts each engine's peers from connection tracking.
 - **engine:** the Acestream engine. It starts as root only to point its default route at the gateway, then drops to an unprivileged user with no capabilities.
@@ -182,10 +183,10 @@ flowchart LR
 
 ## Security notes
 
-- **Docker access.** Engines are created through [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), which only exposes the container and image API. That API can still create containers, so treat the controller as privileged.
+- **Docker access.** Engines are created through [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), which only exposes the container and image API. That API can still create and remove containers, so treat the controller and the cleanup service, its only clients, as privileged.
   - Rootless Docker or rootless Podman limits what that could reach.
   - A proxy that filters container settings is a possible follow-up.
-- **Container privileges.** The controller and transcoder run read-only, as non-root, with no capabilities. The gateway keeps only `NET_ADMIN`, `NET_RAW` and `DAC_READ_SEARCH`.
+- **Container privileges.** The controller, the cleanup service and the transcoder run read-only, as non-root, with no capabilities. The gateway keeps only `NET_ADMIN`, `NET_RAW` and `DAC_READ_SEARCH`.
 - **Engines are untrusted.** They can't change their routes, and they can't reach the gateway, controller or transcoder directly.
   - Like any device on your network, an engine can still reach the host's published ports (the UI and, when enabled, the monitoring ports), which have no login.
   - Blocking engine-to-host traffic with a host firewall rule is a possible follow-up.

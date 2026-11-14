@@ -38,6 +38,9 @@ services:
     depends_on:
       docker-proxy:
         condition: service_started
+      # Compose then stops the controller before the cleanup service: see `cleanup` below.
+      cleanup:
+        condition: service_started
       transcoder:
         condition: service_healthy
       netgw:
@@ -65,6 +68,9 @@ services:
       SHARED_ENGINE_FAILURE_WINDOW_SECONDS: ${SHARED_ENGINE_FAILURE_WINDOW_SECONDS:-60}
       VIEWER_PING_SECONDS: ${VIEWER_PING_SECONDS:-60}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    labels:
+      # While a controller with this label runs, the cleanup service leaves the engines alone.
+      aceswarm.controller: ${ACESWARM_STACK_NAME:-aceswarm}
     ports:
       - ${ACESWARM_HTTP_PORT:-8080}:8080
     volumes:
@@ -78,7 +84,35 @@ services:
       - docker-api
       - engines
 
-  # Only the Docker API sections the controller needs. It is the only client, on an internal network.
+  # Removes the engines when the whole stack goes down (`docker compose down` or `stop`). The
+  # controller creates them through the Docker API, so compose doesn't know them, and leaves them
+  # running when it stops, so that a restarted controller takes over their streams. The controller
+  # depends on this service, so compose stops the controller first, and this service only removes
+  # the engines once no controller runs. Recreating this service alone, as `docker compose up -d`
+  # does after an update, leaves them.
+  cleanup:
+    <<: *hardening
+    image: ${ACESWARM_IMAGE_PREFIX:-ghcr.io/sergimn/aceswarm}-controller:${ACESWARM_VERSION:-latest}
+    build:
+      context: .
+      target: controller
+    command: ["node", "src/cleanup.ts"]
+    read_only: true
+    cap_drop: [ALL]
+    # Removing the engines takes a second or two; the service gives up after 25 s.
+    stop_grace_period: 30s
+    depends_on:
+      docker-proxy:
+        condition: service_started
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+      STACK_NAME: ${ACESWARM_STACK_NAME:-aceswarm}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - docker-api
+
+  # Only the Docker API sections the controller and the cleanup service need. They are its only
+  # clients, on an internal network.
   docker-proxy:
     <<: *hardening
     image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459

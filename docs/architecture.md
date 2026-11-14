@@ -12,6 +12,7 @@ flowchart TB
     T[transcoder :8081]
     G[netgw :8082]
     P[docker-proxy]
+    K[cleanup]
   end
   subgraph engines[engines network 172.31.250.0/24]
     E1[engine stream A]
@@ -20,6 +21,7 @@ flowchart TB
   UI -- REST, server-sent events, HLS --> C
   C -- HLS proxy --> T
   C -- create / restart engines --> P --> API[(Docker or Podman API)]
+  K -- remove engines when the stack goes down --> P
   C -- getstream, stats --> E1 & E2
   T -- one reader per stream --> E1 & E2
   E1 & E2 -- default route --> G
@@ -35,7 +37,8 @@ flowchart TB
 | controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data`                                             |
 | transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails; it also reads each [hot standby](#hot-standby) |
 | netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats                                                |
-| docker-proxy | socket proxy, no other access                       | lets the controller reach only the container and image API                                                  |
+| cleanup      | non-root, read-only, no capabilities                | removes the engines when the stack goes down                                                                |
+| docker-proxy | socket proxy, no other access                       | lets the controller and the cleanup service reach only the container and image API                          |
 | engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                                                                        |
 
 ## Streams
@@ -55,7 +58,8 @@ Engines, the transcoder and its ffmpeg runs keep going while the controller rest
 
 - **The playback is taken over.** `streams.json` also keeps the engine session the transcoder reads. A restarted controller takes over the stream's engine, then that session, as long as the engine still knows it and the transcoder's ffmpeg still reads it. Nothing restarts, so there is no new ffmpeg run and no discontinuity. Otherwise (the engine or the transcoder restarted too) the stream starts as usual, and the saved session is stopped, so no engine pulls it for nobody. A stream whose previous run stopped in the middle of a move or a failover also starts as usual: the transcoder may still cut over to the other engine, which the new run doesn't know. While the transcoder can't be reached, the stream neither starts nor stops anything, and tries again.
 - **After a move or a failover,** the saved session is the one on the engine the stream moved to, so that is what a restarted controller takes over. [Hot standbys](#hot-standby) aren't taken over: their engines are removed, and new ones start once the stream plays, which it does at once.
-- **Shutting down is quick.** On SIGTERM, the controller waits at most 2 seconds for steps in progress (opening a session or a handover can take minutes) and ends the UI's event streams, which closing the server would otherwise wait for. Every service exits after 5 seconds whatever happens, before Docker or Podman kill it at 10.
+- **Shutting down is quick.** On SIGTERM, the controller waits at most 2 seconds for steps in progress (opening a session or a handover can take minutes) and ends the UI's event streams, which closing the server would otherwise wait for. Every service exits after 5 seconds whatever happens, before Docker or Podman kill it at 10. The cleanup service (below) has 25 seconds, of the 30 that compose gives it.
+- **Stopping the stack removes the engines.** The controller leaves its engines running when it stops, and it can't tell a restart from `docker compose down`, so the `cleanup` service removes them. The controller depends on it, so `docker compose down` and `docker compose stop` stop the controller, wait until it exited, and then stop the cleanup service. On SIGTERM, the cleanup service removes every engine of the stack (streams' own engines, shared engines and hot standbys, by their labels) and then exits, unless a controller of the stack still runs: its container carries the `aceswarm.controller` label. When `docker compose up -d` recreates the cleanup service after an update, compose does that before it recreates the controller, so a controller still runs and the engines stay for the new one. `docker compose restart` of the whole stack stops every service at once, so the engines may stay or go; the streams start again either way, since the transcoder restarted too. Engines are still left behind when the cleanup service gets no chance to run: after `docker compose kill`, or `down` or `stop` with `-t 0`, when the cleanup service was already stopped on its own, or when the stack stops before the service has started. The controller takes them over, or removes them, the next time it starts. `docker rm -f $(docker ps -aq --filter label=aceswarm.stack=aceswarm)` removes them by hand (for the default `ACESWARM_STACK_NAME`).
 - **The proxy comes back first.** The controller serves the HLS proxy as soon as it listens; the API waits until the stream list is loaded.
 - **Players ride out the gap.** The controller is unreachable for a moment, and refused connections have no HTTP status, which hls.js doesn't retry by default. The UI's players retry them for about 10 seconds and play on from their buffer meanwhile.
 

@@ -2,10 +2,13 @@ import { existsSync } from "node:fs";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import {
   addStream,
+  compose,
   composeAsync,
   engineContainers,
   resetStack,
   sharedEngineContainers,
+  snapshot,
+  stackEngines,
   streamById,
   waitForPlaying,
   waitForSteadyPlaying,
@@ -16,8 +19,9 @@ import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, type Broadcas
  * Restarting the controller (an update, say) must not interrupt playing streams: the new run takes
  * over the engine session and the transcoder's ffmpeg that kept running, the old one stops within
  * a few seconds even with the UI open, and the player rides out the moment the controller (which
- * proxies the HLS) is gone. A hot standby isn't taken over: the new run starts a new one. See
- * e2e/README.md.
+ * proxies the HLS) is gone. A hot standby isn't taken over: the new run starts a new one. The
+ * engines only go when the whole stack goes down: the cleanup service removes them once the
+ * controller stopped. See e2e/README.md.
  */
 test.describe.configure({ mode: "serial" });
 
@@ -304,4 +308,58 @@ test("a controller restart doesn't interrupt a stream on a shared engine", async
   expect(result.generations).toHaveLength(1);
   expect(result.outageMs).toBeLessThan(MAX_OUTAGE_MS);
   expect((await streamById(request, stream.id))?.engine).toMatchObject({ shared: true });
+});
+
+/** How many times the cleanup service said it is ready, which it does once it handles SIGTERM. */
+function cleanupReady(): number {
+  return compose("logs", "--no-color", "cleanup").split("waiting to remove the engines").length - 1;
+}
+
+test("stopping the whole stack removes every engine, and stopping the cleanup service alone doesn't", async ({
+  request,
+}) => {
+  // The previous case's two streams, on a shared engine.
+  const streams = (await snapshot(request)).streams.map(({ id }) => id);
+  expect(streams).toHaveLength(2);
+  const engines = stackEngines();
+  expect(engines.length).toBeGreaterThan(0);
+
+  try {
+    // Recreating the cleanup service, as `docker compose up -d` does after an update, stops it
+    // while the controller runs: the engines stay. Not `compose restart`: on Podman, it gives the
+    // container no time to stop, so the service never gets to decide.
+    compose("stop", "cleanup");
+    expect(compose("logs", "--no-color", "cleanup")).toContain("a controller still runs");
+    expect(stackEngines()).toEqual(engines);
+    const started = cleanupReady();
+    compose("start", "cleanup");
+    // A stop right after the start could come before it listens for SIGTERM.
+    await expect.poll(cleanupReady, { timeout: 30_000 }).toBeGreaterThan(started);
+
+    // `docker compose down` and `stop` stop the controller first, since it depends on the cleanup
+    // service, then the cleanup service, which removes the engines before it exits.
+    const stopping = Date.now();
+    await composeAsync("stop", "controller", "cleanup");
+    const stopMs = Date.now() - stopping;
+    const left = stackEngines();
+    const description = `stack stop: controller and cleanup service stopped in ${String(stopMs)} ms, ${String(engines.length)} engines before, ${String(left.length)} after`;
+    test.info().annotations.push({ type: "stack stop", description });
+    process.stdout.write(`${description}\n`);
+    expect(left).toEqual([]);
+  } finally {
+    // The later specs need the whole stack, whatever happened here.
+    await composeAsync("start", "cleanup", "controller");
+  }
+
+  // The stack comes back: every stream starts again on a new engine (with a new id, though a shared
+  // engine gets the name of the removed one).
+  await expect
+    .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), { timeout: 60_000 })
+    .toBe(true);
+  for (const id of streams) {
+    await waitForPlaying(request, id);
+  }
+  const after = stackEngines();
+  expect(after.length).toBeGreaterThan(0);
+  expect(after.filter((engine) => engines.includes(engine))).toEqual([]);
 });

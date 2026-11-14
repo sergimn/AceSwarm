@@ -2,10 +2,12 @@
 # The AceSwarm side of the end-to-end tests: builds the images (with the real engine image) and
 # starts or stops the stack. See e2e/README.md.
 #
-#   e2e/stack.sh build|up|down|logs|check
+#   e2e/stack.sh build|up|down|leftovers|logs|check
 #
 # `check` fails fast when the gateway can't ping its probe target (the WireGuard server's runner)
 # on the direct path: every path would stay down and every test would time out.
+#
+# `leftovers` fails when engines are left after `down`, and removes them.
 #
 # On the Podman leg, `docker` is Podman (podman-docker, see e2e/podman.sh).
 set -euo pipefail
@@ -29,9 +31,25 @@ build() {
 }
 
 down() {
-  # Engines are created by the controller, not by compose, so they are removed by label.
-  docker ps -aq --filter "label=aceswarm.stack=${ACESWARM_STACK_NAME}" | xargs -r docker rm -f >/dev/null
+  # The stack's cleanup service removes the engines, which the controller created through the
+  # Docker API, so compose doesn't know them.
   compose down --volumes --remove-orphans
+}
+
+leftovers() {
+  local filter="label=aceswarm.stack=${ACESWARM_STACK_NAME}" engines
+  # Not inside the test: a failing `docker ps` must fail the check rather than find nothing.
+  engines="$(docker ps -aq --filter "$filter")"
+  if [[ -z "$engines" ]]; then
+    echo "no engines left"
+    return 0
+  fi
+  echo "the stack went down but left engines behind:" >&2
+  docker ps -a --filter "$filter" --format '{{.Names}} {{.Status}}' >&2
+  xargs -r docker rm -f <<<"$engines" >/dev/null
+  # Their network couldn't go while they were on it.
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  return 1
 }
 
 logs() {
@@ -60,9 +78,10 @@ case "${1:-}" in
   check) check ;;
   up) compose up -d --wait --wait-timeout 180 ;;
   down) down ;;
+  leftovers) leftovers ;;
   logs) logs ;;
   *)
-    echo "usage: $0 build|up|down|logs|check" >&2
+    echo "usage: $0 build|up|down|leftovers|logs|check" >&2
     exit 2
     ;;
 esac
