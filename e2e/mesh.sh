@@ -23,7 +23,7 @@
 #   mesh.sh wait-all NAME ROLE...  waits until each ROLE that joined serves NAME or stops answering;
 #                                  fails if one stopped answering without it
 #   mesh.sh wait-fetched NAME ROLE...
-#                                  waits (up to 2 minutes) until each ROLE fetched NAME from this runner
+#                                  waits (up to 2 minutes) until each ROLE that joined fetched NAME
 #
 # Roles: wg (WireGuard server), source (Acestream broadcast), stack and stack-podman (AceSwarm and
 # the tests, on Docker and on rootless Podman). Both stacks share the other two.
@@ -386,12 +386,13 @@ wait_all() {
 wait_fetched() {
   local name="$1" role pattern deadline=$((SECONDS + ${MESH_FETCH_WAIT_SECONDS:-120}))
   shift
-  # A runner that failed before `join` set up its peers can't be reached, so nobody will fetch it.
-  if [[ -z "$(sudo wg show "$MESH_IFACE" peers 2>/dev/null)" ]]; then
-    log "not in the mesh, so no runner can fetch $name"
-    return 0
-  fi
   for role in "$@"; do
+    # Only a peer that answered during `join` can reach this runner's file server. Without this,
+    # a runner whose join failed would wait out the whole limit for fetches that can't come.
+    if ! grep -qx "$role" "$MESH_DIR/joined" 2>/dev/null; then
+      log "$role never joined this runner's mesh, so it can't fetch $name"
+      continue
+    fi
     # http.server logs each request as: 192.0.2.1 - - [date] "GET /done HTTP/1.1" 200 -
     pattern="^$(mesh_ip "$role" | sed 's/\./\\./g') .*\"GET /$name HTTP/[0-9.]+\" 200 "
     until grep -E "$pattern" "$MESH_DIR/share.log" >/dev/null 2>&1; do
