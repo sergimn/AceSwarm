@@ -16,6 +16,16 @@ import {
 } from "./helpers.ts";
 import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
 
+// A failed test in this file leaves the controller's state and logs in its report. This runs after
+// the test ends, so it also covers a test that ran out of time, which a catch around the restart
+// can't always reach.
+test.afterEach(async () => {
+  const testInfo = test.info();
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await attachServiceState("controller");
+  }
+});
+
 /**
  * Restarting the controller (an update, say) must not interrupt playing streams: the new run takes
  * over the engine session and the transcoder's ffmpeg that kept running, the old one stops within
@@ -182,19 +192,13 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const stopping = Date.now();
   await composeAsync("stop", "controller");
   const stopMs = Date.now() - stopping;
-  try {
-    await composeAsync("start", "controller");
-    await expect
-      .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
-        timeout: 60_000,
-        intervals: [100],
-      })
-      .toBe(true);
-  } catch (error) {
-    // Says why the controller didn't come back (or didn't start): its state, exit code and last log lines.
-    await attachServiceState("controller");
-    throw error;
-  }
+  await composeAsync("start", "controller");
+  await expect
+    .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
+      timeout: 60_000,
+      intervals: [100],
+    })
+    .toBe(true);
   // The new run takes the stream over on its first check.
   await expect.poll(async () => (await streamById(request, id))?.state, { timeout: 15_000 }).toBe("playing");
   await new Promise((resolve) => setTimeout(resolve, 15_000));
