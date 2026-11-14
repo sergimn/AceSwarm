@@ -780,8 +780,14 @@ p.form-error {
   gap: 12px;
 }
 
+.player-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
 .player-clock {
-  margin-left: auto;
   color: var(--muted);
   font-size: 2.4em;
   font-variant-numeric: tabular-nums;

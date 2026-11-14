@@ -53,13 +53,13 @@ export class Player {
     });
     this.clock = h("time", { className: "player-clock", attrs: { hidden: true } });
     startClock(this.clock);
+    const info = h("div", { className: "player-info" }, [this.title, this.details]);
+    const top = h("div", { className: "player-top" }, [info, this.clock]);
+    const actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
       this.waiting,
-      h("div", { className: "player-overlay" }, [
-        h("div", { className: "player-info" }, [this.title, this.details]),
-        h("div", { className: "player-actions" }, [backButton, restartButton, this.clock]),
-      ]),
+      h("div", { className: "player-overlay" }, [top, actions]),
     ]);
     this.root.addEventListener("pointermove", () => {
       this.showOverlay();
