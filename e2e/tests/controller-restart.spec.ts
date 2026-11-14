@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import {
   addStream,
+  attachServiceState,
   compose,
   composeAsync,
   engineContainers,
@@ -181,13 +182,19 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const stopping = Date.now();
   await composeAsync("stop", "controller");
   const stopMs = Date.now() - stopping;
-  await composeAsync("start", "controller");
-  await expect
-    .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
-      timeout: 60_000,
-      intervals: [100],
-    })
-    .toBe(true);
+  const startOutput = await composeAsync("start", "controller");
+  try {
+    await expect
+      .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
+        timeout: 60_000,
+        intervals: [100],
+      })
+      .toBe(true);
+  } catch (error) {
+    // Says why the controller didn't come back: its state, exit code and last log lines.
+    await attachServiceState("controller", startOutput);
+    throw error;
+  }
   // The new run takes the stream over on its first check.
   await expect.poll(async () => (await streamById(request, id))?.state, { timeout: 15_000 }).toBe("playing");
   await new Promise((resolve) => setTimeout(resolve, 15_000));

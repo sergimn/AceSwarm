@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import type { PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
@@ -123,6 +123,41 @@ const execFileAsync = promisify(execFile);
 export async function composeAsync(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], { encoding: "utf8" });
   return stdout;
+}
+
+/**
+ * Attaches what the stack says about one service to the running test's report: its container state
+ * (status, exit code, OOM kill, restarts, timestamps) and its last log lines. For a failure that a
+ * spec's own assertion can't explain, such as a service that never came back up. `context` is any
+ * output the spec already has, such as what the start command printed.
+ */
+export async function attachServiceState(service: string, context = ""): Promise<void> {
+  const sections: string[] = [];
+  const section = (label: string, run: () => string): void => {
+    try {
+      sections.push(`## ${label}\n${run().trimEnd() || "(no output)"}`);
+    } catch (error) {
+      sections.push(`## ${label}\n(failed: ${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+  if (context) {
+    sections.push(`## context\n${context.trimEnd()}`);
+  }
+  section("compose ps -a", () => compose("ps", "-a", service));
+  section("container state", () => {
+    const id = compose("ps", "-a", "-q", service).trim();
+    if (id === "") {
+      return "no container";
+    }
+    return docker(
+      "inspect",
+      "--format",
+      "status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}} error={{.State.Error}}",
+      id,
+    );
+  });
+  section("compose logs (last 200 lines)", () => compose("logs", "--no-color", "--tail", "200", service));
+  await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
 }
 
 /** Names of the engine containers the controller created for a stream. */
