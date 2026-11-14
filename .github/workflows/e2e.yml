@@ -40,6 +40,10 @@ jobs:
   wg:
     # mesh.sh (job_name) looks for this job by name.
     name: WireGuard server
+    permissions:
+      contents: read
+      # actions: read for the mesh artifacts; write to cancel the run when the mesh fails.
+      actions: write
     runs-on: ubuntu-24.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 60
@@ -71,6 +75,15 @@ jobs:
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
+      - name: Cancel the run if this runner couldn't join the mesh
+        # The four runners only work together, so the others would wait for this one for up to
+        # 10 minutes and then fail too. Only a failure up to here cancels: after the mesh is up,
+        # a stack job's failure must not cancel the other's tests.
+        if: failure()
+        timeout-minutes: 2
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Start the WireGuard server
         timeout-minutes: 10
         run: |
@@ -91,6 +104,10 @@ jobs:
   source:
     # mesh.sh (job_name) looks for this job by name.
     name: Dummy Acestream broadcast
+    permissions:
+      contents: read
+      # actions: read for the mesh artifacts; write to cancel the run when the mesh fails.
+      actions: write
     runs-on: ubuntu-24.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 60
@@ -121,6 +138,15 @@ jobs:
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
+      - name: Cancel the run if this runner couldn't join the mesh
+        # The four runners only work together, so the others would wait for this one for up to
+        # 10 minutes and then fail too. Only a failure up to here cancels: after the mesh is up,
+        # a stack job's failure must not cancel the other's tests.
+        if: failure()
+        timeout-minutes: 2
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Start the broadcasts
         timeout-minutes: 10
         run: |
@@ -139,6 +165,10 @@ jobs:
   stack:
     # mesh.sh (job_name) looks for these jobs by name.
     name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
+    permissions:
+      contents: read
+      # actions: read for the mesh artifacts; write to cancel the run when the mesh fails.
+      actions: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -189,6 +219,15 @@ jobs:
         run: e2e/mesh.sh join "$MESH_ROLE" wg source
         env:
           # Only this step reads the other runners' artifacts.
+          GH_TOKEN: ${{ github.token }}
+      - name: Cancel the run if this runner couldn't join the mesh
+        # The four runners only work together, so the others would wait for this one for up to
+        # 10 minutes and then fail too. Only a failure up to here cancels: after the mesh is up,
+        # a stack job's failure must not cancel the other's tests.
+        if: failure()
+        timeout-minutes: 2
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+        env:
           GH_TOKEN: ${{ github.token }}
       - name: Set up rootless Podman
         if: matrix.runtime == 'podman'
