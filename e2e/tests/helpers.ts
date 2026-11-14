@@ -125,8 +125,23 @@ export async function composeAsync(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], {
     encoding: "utf8",
     timeout: 120_000,
+    killSignal: "SIGKILL",
   });
   return stdout;
+}
+
+/**
+ * A `docker` command for diagnostics. It is synchronous, so it's bounded: a wedged daemon must not
+ * hang the worker, and a wedged daemon is the very case the diagnostics are for. A killed command
+ * throws, and the caller records that as the section's failure.
+ */
+function bounded(...args: string[]): string {
+  return execFileSync("docker", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+    killSignal: "SIGKILL",
+  });
 }
 
 /**
@@ -143,20 +158,22 @@ export async function attachServiceState(service: string): Promise<void> {
       sections.push(`## ${label}\n(failed: ${error instanceof Error ? error.message : String(error)})`);
     }
   };
-  section("compose ps -a", () => compose("ps", "-a", service));
+  section("compose ps -a", () => bounded("compose", "-p", PROJECT, "ps", "-a", service));
   section("container state", () => {
-    const id = compose("ps", "-a", "-q", service).trim();
+    const id = bounded("compose", "-p", PROJECT, "ps", "-a", "-q", service).trim();
     if (id === "") {
       return "no container";
     }
-    return docker(
+    return bounded(
       "inspect",
       "--format",
       "status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}} error={{.State.Error}}",
       id,
     );
   });
-  section("compose logs (last 200 lines)", () => compose("logs", "--no-color", "--tail", "200", service));
+  section("compose logs (last 200 lines)", () =>
+    bounded("compose", "-p", PROJECT, "logs", "--no-color", "--tail", "200", service),
+  );
   try {
     await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
   } catch {
