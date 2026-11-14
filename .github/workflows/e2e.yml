@@ -68,7 +68,7 @@ jobs:
           retention-days: 1
       - name: Join the mesh
         # A stack runner that is late or never starts must not take the other one's VPN down with
-        # it. One that fails before joining cancels the run (next step).
+        # it. One that fails before joining cancels the run from its own job.
         # Usually seconds; up to 10 minutes per peer for a runner that starts late.
         timeout-minutes: 20
         run: e2e/mesh.sh join wg source "stack?" "stack-podman?"

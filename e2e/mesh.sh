@@ -10,7 +10,7 @@
 #
 #   mesh.sh prepare ROLE           keys, mesh address, STUN; writes $MESH_DIR/publish/ROLE.json
 #                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE).
-#                                  Fails if the STUN servers saw different public ports.
+#                                  Fails if the STUN servers saw different public addresses.
 #   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer. A
 #                                  PEER written as NAME? is optional: it is added as soon as its
 #                                  artifact shows up (for up to 10 minutes), and left out if it
@@ -162,11 +162,11 @@ prepare() {
     >"$MESH_DIR/share.log" 2>&1 &
 
   log "public UDP address: $(cat "$MESH_DIR/stun.json")"
-  # The others reach this runner at the port STUN saw. If the servers saw different ones, the NAT
-  # picks a port per destination and hole punching can't work, so fail before publishing anything
+  # The others reach this runner at the address STUN saw. If the servers saw different ones, the
+  # NAT picks a port per destination and hole punching can't work, so fail before publishing anything
   # (the workflow then cancels the run).
   if [[ "$(jq -r .endpointIndependent "$MESH_DIR/stun.json")" != true ]]; then
-    log "STUN servers saw different public ports, so hole punching can't work"
+    log "STUN servers saw different public addresses, so hole punching can't work"
     return 1
   fi
   jq -n --arg role "$role" --arg ip "$(mesh_ip "$role")" --arg key "$(cat "$MESH_DIR/public.key")" \
