@@ -3,8 +3,8 @@
 # "mesh"), so the end-to-end test jobs can reach each other. See e2e/README.md for diagrams.
 #
 # Runners can't accept connections from the internet: they sit behind a NAT that only lets packets
-# in from an address the runner has sent to. That NAT keeps one public port per local port whatever
-# the destination, so each runner learns its public UDP address with STUN, publishes it with its
+# in from an address the runner has sent to. That NAT usually keeps one public port per local port
+# whatever the destination (prepare fails when STUN shows it doesn't), so each runner learns its public UDP address with STUN, publishes it with its
 # WireGuard public key as a workflow artifact, and configures the others as peers. Both sides then
 # send WireGuard handshakes, and each side's first packets open its own NAT for the other side.
 #
