@@ -156,8 +156,13 @@ a {
   color: var(--muted);
 }
 
-.connection {
+.clock {
   margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.connection {
   padding: 2px 10px;
   border-radius: 999px;
   background: var(--surface-2);
@@ -768,7 +773,15 @@ p.form-error {
 
 .player-actions {
   display: flex;
+  align-items: center;
   gap: 12px;
+}
+
+.player-clock {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 1.2em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Toasts ------------------------------------------------------------------------------------ */
