@@ -21,7 +21,18 @@ const BINDING_REQUEST = 0x00_01;
 const BINDING_SUCCESS = 0x01_01;
 const ATTR_MAPPED_ADDRESS = 0x00_01;
 const ATTR_XOR_MAPPED_ADDRESS = 0x00_20;
-const DEFAULT_SERVERS = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+const DEFAULT_SERVERS = [
+  "stun.l.google.com:19302",
+  "stun.cloudflare.com:3478",
+  "stun1.l.google.com:19302",
+  "stun2.l.google.com:19302",
+  "stun3.l.google.com:19302",
+  "stun4.l.google.com:19302",
+  "stun.voip.blackberry.com:3478",
+  "stun.sipgate.net:3478",
+  "stun.nextcloud.com:3478",
+  "global.stun.twilio.com:3478",
+];
 
 interface Mapping {
   server: string;
@@ -134,13 +145,9 @@ async function main(): Promise<void> {
     });
   });
 
-  const mappings: Mapping[] = [];
-  for (const server of servers) {
-    const mapping = await query(socket, server, 4);
-    if (mapping !== undefined) {
-      mappings.push(mapping);
-    }
-  }
+  // EXPERIMENT (temporary): probe all servers at once so 10 of them fit in mesh.sh's wait.
+  const answers = await Promise.all(servers.map((server) => query(socket, server, 4)));
+  const mappings: Mapping[] = answers.filter((mapping): mapping is Mapping => mapping !== undefined);
   const [first] = mappings;
   if (first === undefined) {
     process.stderr.write(`no STUN server answered (${servers.join(", ")})\n`);
