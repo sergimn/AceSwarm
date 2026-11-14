@@ -261,6 +261,8 @@ jobs:
       - name: Tell the other runners the tests are done
         # Also after failed tests, but not in a cancelled run: the other jobs are being cancelled
         # too, so nobody would fetch the file and this step would wait out wait-fetched's limit.
+        # A job that hits its own time limit counts as cancelled as well: wg and source then
+        # wait about five minutes for this runner to stop answering, and fail.
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |

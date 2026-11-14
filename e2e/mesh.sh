@@ -24,7 +24,6 @@
 #                                  fails if one stopped answering without it
 #   mesh.sh wait-fetched NAME ROLE...
 #                                  waits (up to 2 minutes) until each ROLE that joined fetched NAME
-#                                  from this runner
 #
 # Roles: wg (WireGuard server), source (Acestream broadcast), stack and stack-podman (AceSwarm and
 # the tests, on Docker and on rootless Podman). Both stacks share the other two.
