@@ -3,13 +3,14 @@
 # "mesh"), so the end-to-end test jobs can reach each other. See e2e/README.md for diagrams.
 #
 # Runners can't accept connections from the internet: they sit behind a NAT that only lets packets
-# in from an address the runner has sent to. That NAT keeps one public port per local port whatever
-# the destination, so each runner learns its public UDP address with STUN, publishes it with its
+# in from an address the runner has sent to. That NAT usually keeps one public port per local port
+# whatever the destination (prepare fails when STUN shows it doesn't), so each runner learns its public UDP address with STUN, publishes it with its
 # WireGuard public key as a workflow artifact, and configures the others as peers. Both sides then
 # send WireGuard handshakes, and each side's first packets open its own NAT for the other side.
 #
 #   mesh.sh prepare ROLE           keys, mesh address, STUN; writes $MESH_DIR/publish/ROLE.json
-#                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE)
+#                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE).
+#                                  Fails if the STUN servers saw different public addresses.
 #   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer. A
 #                                  PEER written as NAME? is optional: it is added as soon as its
 #                                  artifact shows up (for up to 10 minutes), and left out if it
@@ -22,7 +23,7 @@
 #   mesh.sh wait-all NAME ROLE...  waits until each ROLE that joined serves NAME or stops answering;
 #                                  fails if one stopped answering without it
 #   mesh.sh wait-fetched NAME ROLE...
-#                                  waits (up to 2 minutes) until each ROLE fetched NAME from this runner
+#                                  waits (up to 2 minutes) until each ROLE that joined fetched NAME
 #
 # Roles: wg (WireGuard server), source (Acestream broadcast), stack and stack-podman (AceSwarm and
 # the tests, on Docker and on rootless Podman). Both stacks share the other two.
@@ -161,8 +162,12 @@ prepare() {
     >"$MESH_DIR/share.log" 2>&1 &
 
   log "public UDP address: $(cat "$MESH_DIR/stun.json")"
+  # The others reach this runner at the address STUN saw. If the servers saw different ones, the
+  # NAT picks a port per destination and hole punching can't work, so fail before publishing anything
+  # (the workflow then cancels the run).
   if [[ "$(jq -r .endpointIndependent "$MESH_DIR/stun.json")" != true ]]; then
-    log "warning: STUN servers saw different ports, so hole punching may fail"
+    log "STUN servers saw different public addresses, so hole punching can't work"
+    return 1
   fi
   jq -n --arg role "$role" --arg ip "$(mesh_ip "$role")" --arg key "$(cat "$MESH_DIR/public.key")" \
     --slurpfile stun "$MESH_DIR/stun.json" \
@@ -381,12 +386,13 @@ wait_all() {
 wait_fetched() {
   local name="$1" role pattern deadline=$((SECONDS + ${MESH_FETCH_WAIT_SECONDS:-120}))
   shift
-  # A runner that failed before `join` set up its peers can't be reached, so nobody will fetch it.
-  if [[ -z "$(sudo wg show "$MESH_IFACE" peers 2>/dev/null)" ]]; then
-    log "not in the mesh, so no runner can fetch $name"
-    return 0
-  fi
   for role in "$@"; do
+    # Only a peer that answered during `join` can reach this runner's file server. Without this,
+    # a runner whose join failed would wait out the whole limit for fetches that can't come.
+    if ! grep -qx "$role" "$MESH_DIR/joined" 2>/dev/null; then
+      log "$role never joined this runner's mesh, so it can't fetch $name"
+      continue
+    fi
     # http.server logs each request as: 192.0.2.1 - - [date] "GET /done HTTP/1.1" 200 -
     pattern="^$(mesh_ip "$role" | sed 's/\./\\./g') .*\"GET /$name HTTP/[0-9.]+\" 200 "
     until grep -E "$pattern" "$MESH_DIR/share.log" >/dev/null 2>&1; do
