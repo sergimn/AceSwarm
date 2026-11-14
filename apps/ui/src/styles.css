@@ -157,6 +157,7 @@ a {
 }
 
 .clock {
+  align-self: center;
   margin-left: auto;
   color: var(--muted);
   font-size: 2em;
@@ -164,6 +165,7 @@ a {
 }
 
 .connection {
+  align-self: center;
   padding: 2px 10px;
   border-radius: 999px;
   background: var(--surface-2);
