@@ -177,7 +177,7 @@ export async function attachServiceState(service: string): Promise<void> {
   try {
     await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
   } catch {
-    // The attachment is a diagnostic: the caller rethrows the failure it was attaching to.
+    // The attachment is a diagnostic: a failure to write it must not replace the test's own error.
   }
 }
 
