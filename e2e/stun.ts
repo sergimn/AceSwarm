@@ -1,8 +1,9 @@
 /**
  * Minimal STUN client (RFC 5389 Binding requests) for the end-to-end test workflow.
  *
- * GitHub-hosted runners sit behind a NAT that keeps the same public port for one local port
- * whatever the destination (endpoint-independent mapping), so the address STUN reports for a local
+ * GitHub-hosted runners sit behind a NAT that usually keeps the same public port for one local
+ * port whatever the destination (endpoint-independent mapping; "endpointIndependent" says whether
+ * this runner's does), so the address STUN reports for a local
  * UDP port is also the address other runners can reach that port on once it has sent to them.
  *
  *   node e2e/stun.ts --port 51000 [--server host:port]... [--out file] [--keepalive seconds]
