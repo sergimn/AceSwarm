@@ -67,7 +67,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Join the mesh
-        # A stack runner that never shows up must not take the other one's VPN down with it.
+        # A stack runner that is late or never starts must not take the other one's VPN down with
+        # it. One that fails before joining cancels the run (next step).
         # Usually seconds; up to 10 minutes per peer for a runner that starts late.
         timeout-minutes: 20
         run: e2e/mesh.sh join wg source "stack?" "stack-podman?"
@@ -173,7 +174,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
-      # Each stack runner tests on its own; one failing must not cancel the other.
+      # Each stack runner tests on its own: once both have joined the mesh, one failing must not
+      # cancel the other. A failure up to the join cancels the whole run on purpose.
       fail-fast: false
       matrix:
         include:
