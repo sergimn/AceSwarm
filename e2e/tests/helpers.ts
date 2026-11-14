@@ -120,14 +120,19 @@ const execFileAsync = promisify(execFile);
  * `compose`, without blocking: the spec's own polling (of a playlist, say) goes on while it runs.
  * `compose` blocks the whole worker until the command exits.
  */
-export async function composeAsync(...args: string[]): Promise<string> {
-  // A stop or start of one container takes seconds: a command that hangs is killed, and it fails.
+export async function composeAsyncWithin(timeoutMs: number, ...args: string[]): Promise<string> {
+  // A command that hangs is killed after `timeoutMs`, and it fails.
   const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], {
     encoding: "utf8",
-    timeout: 120_000,
+    timeout: timeoutMs,
     killSignal: "SIGKILL",
   });
   return stdout;
+}
+
+/** `composeAsyncWithin` with a two-minute limit, for a start or a stop that takes seconds. */
+export function composeAsync(...args: string[]): Promise<string> {
+  return composeAsyncWithin(120_000, ...args);
 }
 
 /**

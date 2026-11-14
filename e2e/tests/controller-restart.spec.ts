@@ -5,6 +5,7 @@ import {
   attachServiceState,
   compose,
   composeAsync,
+  composeAsyncWithin,
   engineContainers,
   resetStack,
   sharedEngineContainers,
@@ -190,7 +191,8 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const watcher = watchPlaylist(baseUrl, id);
   await new Promise((resolve) => setTimeout(resolve, 5000));
   const stopping = Date.now();
-  await composeAsync("stop", "controller");
+  // The controller's own stop takes about 10 s (its grace period): 30 s is a hang, not a slow stop.
+  await composeAsyncWithin(30_000, "stop", "controller");
   const stopMs = Date.now() - stopping;
   await composeAsync("start", "controller");
   await expect
