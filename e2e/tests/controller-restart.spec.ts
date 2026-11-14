@@ -191,7 +191,8 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const watcher = watchPlaylist(baseUrl, id);
   await new Promise((resolve) => setTimeout(resolve, 5000));
   const stopping = Date.now();
-  // The controller's own stop takes about 10 s (its grace period): 30 s is a hang, not a slow stop.
+  // The controller has the default grace period, so Docker kills it at most 10 s after SIGTERM: 30 s
+  // separates a hang from a slow stop.
   await composeAsyncWithin(30_000, "stop", "controller");
   const stopMs = Date.now() - stopping;
   await composeAsync("start", "controller");
