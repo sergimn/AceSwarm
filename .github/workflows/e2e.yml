@@ -258,7 +258,9 @@ jobs:
         timeout-minutes: 35
         run: npm run e2e
       - name: Tell the other runners the tests are done
-        if: always()
+        # Also after failed tests, but not in a cancelled run: the other jobs are being cancelled
+        # too, so nobody would fetch the file and this step would wait out wait-fetched's limit.
+        if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |
           date -u > "$RUNNER_TEMP/done"
