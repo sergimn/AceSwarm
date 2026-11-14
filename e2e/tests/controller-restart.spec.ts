@@ -182,8 +182,8 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const stopping = Date.now();
   await composeAsync("stop", "controller");
   const stopMs = Date.now() - stopping;
-  const startOutput = await composeAsync("start", "controller");
   try {
+    await composeAsync("start", "controller");
     await expect
       .poll(async () => (await request.get("/healthz").catch(() => undefined))?.ok(), {
         timeout: 60_000,
@@ -191,8 +191,8 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
       })
       .toBe(true);
   } catch (error) {
-    // Says why the controller didn't come back: its state, exit code and last log lines.
-    await attachServiceState("controller", startOutput);
+    // Says why the controller didn't come back (or didn't start): its state, exit code and last log lines.
+    await attachServiceState("controller");
     throw error;
   }
   // The new run takes the stream over on its first check.

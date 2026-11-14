@@ -128,10 +128,9 @@ export async function composeAsync(...args: string[]): Promise<string> {
 /**
  * Attaches what the stack says about one service to the running test's report: its container state
  * (status, exit code, OOM kill, restarts, timestamps) and its last log lines. For a failure that a
- * spec's own assertion can't explain, such as a service that never came back up. `context` is any
- * output the spec already has, such as what the start command printed.
+ * spec's own assertion can't explain, such as a service that never came back up.
  */
-export async function attachServiceState(service: string, context = ""): Promise<void> {
+export async function attachServiceState(service: string): Promise<void> {
   const sections: string[] = [];
   const section = (label: string, run: () => string): void => {
     try {
@@ -140,9 +139,6 @@ export async function attachServiceState(service: string, context = ""): Promise
       sections.push(`## ${label}\n(failed: ${error instanceof Error ? error.message : String(error)})`);
     }
   };
-  if (context) {
-    sections.push(`## context\n${context.trimEnd()}`);
-  }
   section("compose ps -a", () => compose("ps", "-a", service));
   section("container state", () => {
     const id = compose("ps", "-a", "-q", service).trim();
@@ -157,7 +153,11 @@ export async function attachServiceState(service: string, context = ""): Promise
     );
   });
   section("compose logs (last 200 lines)", () => compose("logs", "--no-color", "--tail", "200", service));
-  await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
+  try {
+    await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
+  } catch {
+    // The attachment is a diagnostic: the caller rethrows the failure it was attaching to.
+  }
 }
 
 /** Names of the engine containers the controller created for a stream. */
