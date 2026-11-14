@@ -121,7 +121,11 @@ const execFileAsync = promisify(execFile);
  * `compose` blocks the whole worker until the command exits.
  */
 export async function composeAsync(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], { encoding: "utf8" });
+  // A stop or start of one container takes seconds: a command that hangs is killed, and it fails.
+  const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
   return stdout;
 }
 
