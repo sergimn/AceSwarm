@@ -26,6 +26,12 @@ const streamSchema = z.object({
    * a new one: a new session needs a new ffmpeg, and players would wait for its first segment.
    */
   session: z.object({ playbackUrl: z.string(), statUrl: z.string(), commandUrl: z.string() }).nullable().default(null),
+  /**
+   * The last time players could get new video of the stream, from any of its sessions; null if it
+   * never played. Kept so that a stream that stopped (disabled, or failing) still says how long
+   * ago it had video, also after a restart.
+   */
+  lastFrameAt: z.string().nullable().default(null),
 });
 
 const fileSchema = z.object({
@@ -49,7 +55,7 @@ export interface NewStream {
 }
 
 export type StreamPatch = Partial<
-  Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind" | "ownEngine" | "session">
+  Pick<StreamConfig, "name" | "enabled" | "path" | "aceIdKind" | "ownEngine" | "session" | "lastFrameAt">
 >;
 
 /**
@@ -95,6 +101,7 @@ export class StreamStore {
         path: null,
         ownEngine: null,
         session: null,
+        lastFrameAt: null,
       };
       await this.persist([...this.streams, stream]);
       return { ...stream };

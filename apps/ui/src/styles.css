@@ -33,6 +33,11 @@
   box-sizing: border-box;
 }
 
+/* `hidden` hides whatever `display` a class gives the element: a badge, a button. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -684,6 +689,26 @@ p.form-error {
   gap: 8px;
 }
 
+/* A disabled stream has one Enable button in the place of Restart and Disable. Those two stay in
+   the layout, invisible and out of reach, and Enable lies over them: it is exactly as wide as the
+   two together, and the buttons of every row line up. */
+.row-pair {
+  display: grid;
+}
+
+.row-pair > * {
+  grid-area: 1 / 1;
+}
+
+.row-pair-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.row-pair.single .row-pair-buttons {
+  visibility: hidden;
+}
+
 .score {
   width: 80px;
   height: 6px;
@@ -716,7 +741,8 @@ p.form-error {
   object-fit: contain;
 }
 
-.player.waiting-for-source .player-video {
+.player.waiting-for-source .player-video,
+.player.disabled .player-video {
   visibility: hidden;
 }
 

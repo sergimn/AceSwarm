@@ -30,6 +30,16 @@ function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: Str
   }
 }
 
+/**
+ * How long ago players could last get a new frame of a stream. A stopped stream keeps that time for
+ * the UI, but it isn't expected to have video, so it has no age here.
+ */
+function setFrameAge(gauge: Gauge<"stream">, stream: StreamView, now: number): void {
+  if (stream.lastFrameAt !== null && stream.state !== "stopped") {
+    gauge.set({ stream: stream.id }, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
+  }
+}
+
 /** The live edge of the session a stream plays from: how old its newest data is, and since when it is the same. */
 function setLiveEdgeGauges(
   gauges: Record<"age" | "unchanged", Gauge<"stream">>,
@@ -132,9 +142,7 @@ export class ControllerMetrics {
             state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
           }
           up.set(labels, stream.state === "playing" ? 1 : 0);
-          if (stream.lastFrameAt !== null) {
-            frameAge.set(labels, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
-          }
+          setFrameAge(frameAge, stream, now);
           setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
           if (stream.peers.connected !== null) {
             peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
@@ -198,7 +206,7 @@ export class ControllerMetrics {
     });
     const frameAge = new Gauge({
       name: "aceswarm_stream_last_frame_age_seconds",
-      help: "Seconds since the stream produced its last video frame",
+      help: "Seconds since players could last get a new video frame of the stream; none while it is disabled",
       labelNames: ["stream"],
       registers,
     });

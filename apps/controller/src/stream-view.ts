@@ -17,6 +17,14 @@ export interface LiveStream {
   standbys: StandbyView[];
 }
 
+/** The later of two frame times, either of which there may be none of. */
+export function newestFrame(a: string | null, b: string | null): string | null {
+  if (a === null || b === null) {
+    return a ?? b;
+  }
+  return Date.parse(b) > Date.parse(a) ? b : a;
+}
+
 /** The API's view of a stream: a running one's live state, or a stopped one's configuration. */
 export function streamView(stream: StreamConfig, viewers: number, live?: LiveStream): StreamView {
   return {
@@ -26,7 +34,12 @@ export function streamView(stream: StreamConfig, viewers: number, live?: LiveStr
     name: stream.name,
     enabled: stream.enabled,
     createdAt: stream.createdAt,
-    path: stream.path,
+    // A stopped stream has no engine, so it is on no path. Its config keeps the one it was on, to
+    // start there again.
+    path: live === undefined ? null : stream.path,
+    // The last video of any of its sessions: a pipeline only knows its own, and a stopped stream
+    // has none.
+    lastFrameAt: newestFrame(stream.lastFrameAt, live?.pipeline?.lastFrameAt ?? null),
     viewers,
     hls: hlsUrls(stream.id),
     ...(live === undefined ? stopped(stream) : running(live)),
@@ -40,7 +53,6 @@ function stopped(stream: StreamConfig): LiveFields {
     state: "stopped",
     stateSince: stream.createdAt,
     message: null,
-    lastFrameAt: null,
     liveEdge: null,
     peers: { connected: null, active: null, uploading: null, countries: [] },
     downloadKBps: null,
@@ -67,7 +79,6 @@ function running(live: LiveStream): LiveFields {
     state: live.state,
     stateSince: new Date(live.stateSince).toISOString(),
     message: live.message,
-    lastFrameAt: live.pipeline?.lastFrameAt ?? null,
     liveEdge: live.pipeline?.liveEdge ?? null,
     peers: {
       connected: stats?.peers ?? peers?.connected ?? null,

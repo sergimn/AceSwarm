@@ -1,4 +1,4 @@
-import type { Snapshot, StreamView } from "@aceswarm/shared/api-types";
+import type { Snapshot, StreamState, StreamView } from "@aceswarm/shared/api-types";
 import { h } from "./dom.ts";
 import {
   countryName,
@@ -8,6 +8,7 @@ import {
   formatStandbys,
   isFresh,
   pathLabel,
+  shownState,
   STATE_LABELS,
   topCountries,
 } from "./format.ts";
@@ -34,7 +35,8 @@ class Tile {
   private readonly standbys: HTMLElement;
   private readonly message: HTMLElement;
   private thumbnailTick = -1;
-  private countryKey = "";
+  /** The countries it shows, as a key; none yet, so that the first render also shows that there are none. */
+  private countryKey: string | undefined;
 
   constructor(stream: StreamView, onOpen: (id: string) => void) {
     this.video = h("video", {
@@ -82,29 +84,44 @@ class Tile {
   }
 
   update(stream: StreamView, snapshot: Snapshot, now: number): void {
-    const state = stream.enabled ? stream.state : "stopped";
+    const state = shownState(stream);
     this.element.dataset["state"] = state;
     this.element.setAttribute("aria-label", `${stream.name}, ${STATE_LABELS[state]}`);
     this.name.textContent = stream.name;
     this.badge.textContent = STATE_LABELS[state];
     this.badge.className = `badge state-${state}`;
     this.path.textContent = pathLabel(stream.path, snapshot.paths);
-    this.path.hidden = stream.path === null;
+    // A stopped stream is on no path, whatever path it was on.
+    this.path.hidden = stream.path === null || state === "stopped";
 
-    this.freshness.textContent = formatFreshness(stream.lastFrameAt, now);
-    this.freshness.classList.toggle("fresh", isFresh(stream.lastFrameAt, now));
-    this.peers.textContent = formatPeers(stream.peers);
+    const playing = state === "playing";
+    this.freshness.textContent = formatFreshness(stream.lastFrameAt, now, playing);
+    this.freshness.classList.toggle("fresh", isFresh(stream.lastFrameAt, now, playing));
+    this.peers.textContent = formatPeers(stream.peers, state);
     this.speed.textContent = formatSpeed(stream.downloadKBps);
     this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths);
     this.message.textContent = stream.message ?? "";
     this.message.hidden = stream.message === null;
     this.renderCountries(stream);
 
-    const tick = Math.floor(now / THUMBNAIL_REFRESH_MS);
-    if (tick === this.thumbnailTick || state === "stopped") {
+    this.renderPoster(stream, state, now);
+  }
+
+  private renderPoster(stream: StreamView, state: StreamState, now: number): void {
+    if (state === "stopped") {
+      // Its picture went with its output. Without this, a page that was open when the stream was
+      // disabled would keep its last thumbnail, and every other page would show none.
+      if (this.thumbnailTick !== -1) {
+        this.thumbnailTick = -1;
+        this.poster.removeAttribute("src");
+        this.poster.classList.add("missing");
+      }
       return;
     }
-
+    const tick = Math.floor(now / THUMBNAIL_REFRESH_MS);
+    if (tick === this.thumbnailTick) {
+      return;
+    }
     this.thumbnailTick = tick;
     this.poster.src = `${stream.hls.thumbnail}?t=${String(tick)}`;
   }

@@ -1,7 +1,7 @@
 import type { HotStandbyView, Settings, SharedEnginesView, Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import { api } from "./api.ts";
 import { confirmButton, dialogShell, errorMessage, h, icon, toast } from "./dom.ts";
-import { STATE_LABELS } from "./format.ts";
+import { shownState, STATE_LABELS } from "./format.ts";
 import type { Navigator } from "./navigation.ts";
 import type { PreviewMode } from "./previews.ts";
 
@@ -12,7 +12,11 @@ interface Row {
   name: HTMLElement;
   identifier: HTMLElement;
   state: HTMLElement;
-  toggle: HTMLButtonElement;
+  /** Restart and Disable, and the one Enable button that takes their place while the stream is disabled. */
+  pair: HTMLElement;
+  restart: HTMLButtonElement;
+  disable: HTMLButtonElement;
+  enable: HTMLButtonElement;
 }
 
 function hotStandbyHint(view: HotStandbyView | undefined, sharing: boolean): string {
@@ -214,13 +218,7 @@ export class ManageDialog {
         this.rows.set(stream.id, row);
         this.list.append(row.element);
       }
-      row.name.textContent = stream.name;
-      row.identifier.textContent = `${stream.aceId}${KIND_LABELS[stream.aceIdKind ?? "unknown"]}`;
-      const state = stream.enabled ? stream.state : "stopped";
-      row.state.textContent = STATE_LABELS[state];
-      row.state.className = `badge state-${state}`;
-      row.toggle.textContent = stream.enabled ? "Disable" : "Enable";
-      row.toggle.dataset["enabled"] = String(stream.enabled);
+      this.renderRow(row, stream);
     }
     for (const [id, row] of this.rows) {
       if (!seen.has(id)) {
@@ -234,6 +232,25 @@ export class ManageDialog {
   private markPreviewMode(mode: PreviewMode): void {
     for (const [key, button] of Object.entries(this.previewButtons)) {
       button.setAttribute("aria-pressed", String(key === mode));
+    }
+  }
+
+  private renderRow(row: Row, stream: StreamView): void {
+    row.name.textContent = stream.name;
+    row.identifier.textContent = `${stream.aceId}${KIND_LABELS[stream.aceIdKind ?? "unknown"]}`;
+    const state = shownState(stream);
+    row.state.textContent = STATE_LABELS[state];
+    row.state.className = `badge state-${state}`;
+    // A disabled stream has nothing to restart, and enabling it starts it afresh: one Enable
+    // button takes the place of Restart and Disable, so every button a remote lands on does
+    // something. Focus follows to the button that is there now.
+    const focused = document.activeElement;
+    row.pair.classList.toggle("single", !stream.enabled);
+    row.enable.hidden = stream.enabled;
+    if (!stream.enabled && (focused === row.restart || focused === row.disable)) {
+      row.enable.focus();
+    } else if (stream.enabled && focused === row.enable) {
+      row.disable.focus();
     }
   }
 
@@ -251,13 +268,34 @@ export class ManageDialog {
           toast(errorMessage(error), "error");
         });
     });
-    const toggle = h("button", { className: "button", attrs: { type: "button" } });
-    toggle.addEventListener("click", () => {
-      const enabled = toggle.dataset["enabled"] !== "true";
-      api.updateStream(stream.id, { enabled }).catch((error: unknown) => {
-        toast(errorMessage(error), "error");
-      });
+    const setEnabled = (enabled: boolean): void => {
+      api
+        .updateStream(stream.id, { enabled })
+        .then((updated) => {
+          // Without waiting for the next snapshot: the row shows what the press did.
+          const row = this.rows.get(stream.id);
+          if (row !== undefined) {
+            this.renderRow(row, updated);
+          }
+        })
+        .catch((error: unknown) => {
+          toast(errorMessage(error), "error");
+        });
+    };
+    const disable = h("button", { className: "button", text: "Disable", attrs: { type: "button" } });
+    disable.addEventListener("click", () => {
+      setEnabled(false);
     });
+    const enable = h("button", { className: "button", text: "Enable", attrs: { type: "button", hidden: true } });
+    enable.addEventListener("click", () => {
+      setEnabled(true);
+    });
+    // Restart and Disable stay in the layout while Enable lies over them, so it is exactly as wide
+    // as the two together and Remove stays where it is (see `.row-pair` in the styles).
+    const pair = h("div", { className: "row-pair" }, [
+      h("div", { className: "row-pair-buttons" }, [restart, disable]),
+      enable,
+    ]);
     const remove = confirmButton("Remove", "Press again to remove", async () => {
       await api.removeStream(stream.id);
       toast("Stream removed");
@@ -266,8 +304,8 @@ export class ManageDialog {
     const element = h("li", { className: "row" }, [
       h("div", { className: "row-main" }, [name, identifier]),
       state,
-      h("div", { className: "row-actions" }, [restart, toggle, remove]),
+      h("div", { className: "row-actions" }, [pair, remove]),
     ]);
-    return { element, name, identifier, state, toggle };
+    return { element, name, identifier, state, pair, restart, disable, enable };
   }
 }

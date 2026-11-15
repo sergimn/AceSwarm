@@ -90,6 +90,27 @@ describe("StreamStore", () => {
     expect(older.get(stream.id)?.session).toBeNull();
   });
 
+  it("keeps when a stream last had video, and loads files written before it was kept", async () => {
+    const directory = await tempDirectory();
+    const store = new StreamStore(directory);
+    await store.load();
+    const stream = await store.add({ aceId: ID_A });
+    expect(stream.lastFrameAt).toBeNull();
+    const lastFrameAt = "2026-11-15T20:00:00.000Z";
+    await store.update(stream.id, { enabled: false, lastFrameAt });
+    const reloaded = new StreamStore(directory);
+    await reloaded.load();
+    expect(reloaded.get(stream.id)).toMatchObject({ enabled: false, lastFrameAt });
+
+    const legacy = { ...stream } as Partial<typeof stream>;
+    delete legacy.lastFrameAt;
+    const { writeJsonFile } = await import("../src/json-file.ts");
+    await writeJsonFile(join(directory, "streams.json"), { version: 1, streams: [legacy] });
+    const older = new StreamStore(directory);
+    await older.load();
+    expect(older.get(stream.id)?.lastFrameAt).toBeNull();
+  });
+
   it("returns copies, not internal state", async () => {
     const directory = await tempDirectory();
     const store = new StreamStore(directory);

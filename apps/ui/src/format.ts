@@ -5,21 +5,25 @@ import type {
   StandbyState,
   StandbyView,
   StreamState,
+  StreamView,
 } from "@aceswarm/shared/api-types";
 
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/** Age of the last new frame: "Now" under a minute, then minutes, hours or days. */
-export function formatFreshness(lastFrameAt: string | null, now: number): string {
+/**
+ * Age of the last new frame: "Now" under a minute, then minutes, hours or days. A stream that is
+ * not playing gets no new frames, so it never says "Now": under a minute it counts the seconds.
+ */
+export function formatFreshness(lastFrameAt: string | null, now: number, playing = true): string {
   const at = lastFrameAt === null ? NaN : Date.parse(lastFrameAt);
   if (Number.isNaN(at)) {
     return "Never";
   }
   const seconds = Math.max(0, (now - at) / 1000);
   if (seconds < MINUTE) {
-    return "Now";
+    return playing ? "Now" : `${String(Math.max(1, Math.floor(seconds)))}s ago`;
   }
   if (seconds < HOUR) {
     return `${String(Math.floor(seconds / MINUTE))}m ago`;
@@ -30,12 +34,15 @@ export function formatFreshness(lastFrameAt: string | null, now: number): string
   return `${String(Math.floor(seconds / DAY))}d ago`;
 }
 
-export function isFresh(lastFrameAt: string | null, now: number): boolean {
-  return formatFreshness(lastFrameAt, now) === "Now";
+export function isFresh(lastFrameAt: string | null, now: number, playing = true): boolean {
+  return formatFreshness(lastFrameAt, now, playing) === "Now";
 }
 
-/** Peers that sent data are the useful ones, so they come first. */
-export function formatPeers(peers: PeerSummary): string {
+/** Peers that sent data are the useful ones, so they come first. A stopped stream has none to count. */
+export function formatPeers(peers: PeerSummary, state?: StreamState): string {
+  if (state === "stopped") {
+    return "–";
+  }
   if (peers.active !== null && peers.connected !== null) {
     return `${String(peers.active)} sending · ${String(peers.connected)} connected`;
   }
@@ -60,6 +67,10 @@ export function formatSpeed(kilobytesPerSecond: number | null): string {
   return `${String(Math.round(kilobytesPerSecond))} KB/s`;
 }
 
+/**
+ * Only a stream the user disabled is stopped, and "Disabled" says that it was their choice: the
+ * stream may well work.
+ */
 export const STATE_LABELS: Record<StreamState, string> = {
   starting: "Starting",
   buffering: "Buffering",
@@ -68,9 +79,14 @@ export const STATE_LABELS: Record<StreamState, string> = {
   "stale-source": "Waiting for source",
   recovering: "Recovering",
   switching: "Switching path",
-  stopped: "Off",
+  stopped: "Disabled",
   error: "Error",
 };
+
+/** The state to show: a disabled stream is stopped from the moment it is disabled. */
+export function shownState(stream: Pick<StreamView, "enabled" | "state">): StreamState {
+  return stream.enabled ? stream.state : "stopped";
+}
 
 export function pathLabel(path: string | null, paths: readonly PathStatus[]): string {
   if (path === null) {

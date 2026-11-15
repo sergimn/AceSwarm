@@ -56,7 +56,10 @@ export interface StreamView {
   state: StreamState;
   stateSince: string;
   message: string | null;
-  /** Last time the pipeline produced a new video frame players could get. */
+  /**
+   * Last time players could get a new video frame of the stream, from any of its sessions: it
+   * stays while the stream recovers, starts over or is disabled. Null if it never played.
+   */
   lastFrameAt: string | null;
   /**
    * The live edge of the session the stream plays from (see `LiveEdgeView`): whether its broadcast
@@ -66,7 +69,10 @@ export interface StreamView {
   peers: PeerSummary;
   downloadKBps: number | null;
   uploadKBps: number | null;
-  /** Network path currently used by the stream's engine ("direct" or "wg:<profile>"). */
+  /**
+   * Network path currently used by the stream's engine ("direct" or "wg:<profile>"); null before
+   * it has one, and while the stream is disabled.
+   */
   path: string | null;
   recoveries: number;
   /** The engine the stream plays from; shared engines serve every stream on their path. */

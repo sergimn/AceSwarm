@@ -242,7 +242,13 @@ export class Orchestrator {
   }
 
   async updateStream(id: string, patch: Pick<StreamPatch, "name" | "enabled">): Promise<StreamView | undefined> {
-    const updated = await this.deps.store.update(id, patch);
+    // A stream being disabled loses its supervisor, which knows when it last had video: that is
+    // saved with the change, so the stream shows it from the first moment it is off.
+    const stopping = patch.enabled === false ? this.supervisors.get(id) : undefined;
+    const updated = await this.deps.store.update(
+      id,
+      stopping === undefined ? patch : { ...patch, lastFrameAt: stopping.view().lastFrameAt },
+    );
     if (updated === undefined) {
       return undefined;
     }

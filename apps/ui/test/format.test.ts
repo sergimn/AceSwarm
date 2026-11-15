@@ -9,6 +9,8 @@ import {
   formatStandbys,
   isFresh,
   pathLabel,
+  shownState,
+  STATE_LABELS,
   topCountries,
 } from "../src/format.ts";
 
@@ -25,6 +27,18 @@ describe("formatFreshness", () => {
     expect(formatFreshness(ago(3 * 86_400), NOW)).toBe("3d ago");
   });
 
+  it('counts the seconds instead of saying "Now" for a stream that is not playing', () => {
+    // No new frames come: "Now", and its green, would say they do.
+    expect(formatFreshness(ago(25), NOW, false)).toBe("25s ago");
+    expect(formatFreshness(ago(59.9), NOW, false)).toBe("59s ago");
+    expect(formatFreshness(ago(0), NOW, false)).toBe("1s ago");
+    expect(isFresh(ago(25), NOW, false)).toBe(false);
+    // From a minute on it reads the same either way.
+    expect(formatFreshness(ago(60), NOW, false)).toBe("1m ago");
+    expect(formatFreshness(ago(720), NOW, false)).toBe("12m ago");
+    expect(formatFreshness(null, NOW, false)).toBe("Never");
+  });
+
   it("handles missing and future timestamps", () => {
     expect(formatFreshness(null, NOW)).toBe("Never");
     expect(formatFreshness("garbage", NOW)).toBe("Never");
@@ -39,6 +53,23 @@ describe("formatPeers", () => {
     expect(formatPeers({ connected: 12, active: 4, uploading: null, countries: [] })).toBe("4 sending · 12 connected");
     expect(formatPeers({ connected: 12, active: null, uploading: null, countries: [] })).toBe("12 connected");
     expect(formatPeers({ connected: null, active: null, uploading: null, countries: [] })).toBe("Unknown");
+  });
+
+  it("shows none for a stopped stream, rather than peers nobody can know", () => {
+    const none = { connected: null, active: null, uploading: null, countries: [] };
+    expect(formatPeers(none, "stopped")).toBe("–");
+    expect(formatPeers(none, "starting")).toBe("Unknown");
+    expect(formatPeers({ ...none, connected: 3 }, "playing")).toBe("3 connected");
+  });
+});
+
+describe("the state a stream shows", () => {
+  it("is Disabled for a stream the user turned off, whatever state it still reports", () => {
+    expect(shownState({ enabled: false, state: "playing" })).toBe("stopped");
+    expect(shownState({ enabled: false, state: "stopped" })).toBe("stopped");
+    expect(shownState({ enabled: true, state: "recovering" })).toBe("recovering");
+    expect(STATE_LABELS[shownState({ enabled: false, state: "playing" })]).toBe("Disabled");
+    expect(STATE_LABELS.playing).toBe("Live");
   });
 });
 

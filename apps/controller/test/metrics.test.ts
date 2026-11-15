@@ -78,3 +78,47 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
   expect(scrape).toContain('aceswarm_engine_memory_cache_bytes{stream="",engine="e2"} 700');
   expect(scrape).not.toContain('aceswarm_engine_memory_cache_limit_bytes{stream="",engine="e2"}');
 });
+
+test("exports the age of a stream's last frame while it runs, not once it is stopped", async () => {
+  const registry = new Registry();
+  const stream: StreamView = {
+    id: "s1",
+    aceId: "a".repeat(40),
+    aceIdKind: "infohash",
+    name: "One",
+    enabled: true,
+    createdAt: "2026-11-06T10:00:00.000Z",
+    state: "recovering",
+    stateSince: "2026-11-06T10:00:00.000Z",
+    message: null,
+    lastFrameAt: new Date(Date.now() - 90_000).toISOString(),
+    liveEdge: null,
+    peers: { connected: null, active: null, uploading: null, countries: [] },
+    downloadKBps: null,
+    uploadKBps: null,
+    path: "direct",
+    recoveries: 1,
+    viewers: 0,
+    hls: { preview: "", full: "", thumbnail: "" },
+    engine: null,
+    standbys: [],
+  };
+  let streams = [stream];
+  new ControllerMetrics(
+    registry,
+    () => ({ streams, paths: [] }),
+    () => [],
+  );
+  const age = async (): Promise<number | undefined> => {
+    const match = /^aceswarm_stream_last_frame_age_seconds\{stream="s1"\} (\S+)$/m.exec(await registry.metrics());
+    return match === null ? undefined : Number(match[1]);
+  };
+  // A stream that recovers has no frame from its new pipeline yet: its age is that of its last video.
+  expect(await age()).toBeGreaterThanOrEqual(90);
+  expect(await age()).toBeLessThan(100);
+
+  // A disabled stream keeps the time for the UI, but it isn't expected to have video, and it is on no path.
+  streams = [{ ...stream, enabled: false, state: "stopped", path: null }];
+  expect(await age()).toBeUndefined();
+  expect(await registry.metrics()).not.toContain('aceswarm_stream_path{stream="s1"');
+});

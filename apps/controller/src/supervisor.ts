@@ -174,13 +174,15 @@ export class StreamSupervisor {
     this.running = false;
     clearTimeout(this.timer);
     await waitAtMost(this.current, teardown ? Infinity : waitMs);
+    // Before the pipeline goes: nobody follows the stream's video from here on.
+    await this.record.saveLastVideo(teardown);
     if (teardown) {
       await this.teardown();
     }
   }
 
   updateConfig(stream: StreamConfig): void {
-    this.record.config = stream;
+    this.record.update(stream);
   }
 
   requestRestart(): void {
@@ -399,6 +401,8 @@ export class StreamSupervisor {
     }
     const polled = await this.engines.poll(this.engine, this.session, this.pipeline);
     this.pipeline = polled.pipeline;
+    // Before the step goes on: a recovery replaces the pipeline, and its video with it.
+    await this.record.sawVideo(this.pipeline, this.now());
     this.stats = polled.stats;
     this.peers = polled.peers;
   }

@@ -52,6 +52,10 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 5. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
 6. **Check health every tick.** A stream is healthy only while new video frames arrive, and only frames from a source whose live edge moves count (see [stale sources](#stale-sources)).
 
+The controller keeps the time of each stream's last video: the newest frame any of its ffmpeg runs published. A new run starts without one, so this is what the UI's "Freshness" shows while a stream recovers or starts over. `streams.json` keeps it too, saved with the first video, then at most once a minute, and when the stream or the controller stops.
+
+A disabled stream has no supervisor, so no engine and no network path. The UI shows it as "Disabled", with the time of its last video, and offers to enable it instead of restarting it.
+
 ### Controller restarts
 
 Engines, the transcoder and its ffmpeg runs keep going while the controller restarts (after an update, say), so streams don't stop:
