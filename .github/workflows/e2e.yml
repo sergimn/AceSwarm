@@ -237,7 +237,7 @@ jobs:
         if: matrix.runtime == 'podman'
         timeout-minutes: 10
         run: e2e/podman.sh setup
-      - run: npm ci
+      - run: npm ci --no-audit --no-fund
         timeout-minutes: 10
       - run: npx playwright install --with-deps chromium ffmpeg
         timeout-minutes: 10
