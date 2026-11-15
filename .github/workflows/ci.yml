@@ -28,17 +28,7 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      # npm's own cache still leaves npm ci 35-50 s of unpacking, so keep node_modules itself. Only
-      # an exact match skips npm ci: no restore-keys. The only install script is fsevents (macOS).
-      - id: node-modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            node_modules
-            apps/*/node_modules
-          key: node-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.node-version', 'package-lock.json') }}
-      - if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci --no-audit --no-fund
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
