@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import type { PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
@@ -120,9 +120,70 @@ const execFileAsync = promisify(execFile);
  * `compose`, without blocking: the spec's own polling (of a playlist, say) goes on while it runs.
  * `compose` blocks the whole worker until the command exits.
  */
-export async function composeAsync(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], { encoding: "utf8" });
+export async function composeAsyncWithin(timeoutMs: number, ...args: string[]): Promise<string> {
+  // A command that hangs is killed after `timeoutMs`, and it fails.
+  const { stdout } = await execFileAsync("docker", ["compose", "-p", PROJECT, ...args], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+  });
   return stdout;
+}
+
+/** `composeAsyncWithin` with a two-minute limit, for a start or a stop that takes seconds. */
+export function composeAsync(...args: string[]): Promise<string> {
+  return composeAsyncWithin(120_000, ...args);
+}
+
+/**
+ * A `docker` command for diagnostics. It is synchronous, so it's bounded: a wedged daemon must not
+ * hang the worker, and a wedged daemon is the very case the diagnostics are for. A killed command
+ * throws, and the caller records that as the section's failure.
+ */
+function bounded(...args: string[]): string {
+  return execFileSync("docker", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+    killSignal: "SIGKILL",
+  });
+}
+
+/**
+ * Attaches what the stack says about one service to the running test's report: its container state
+ * (status, exit code, OOM kill, restarts, timestamps) and its last log lines. For a failure that a
+ * spec's own assertion can't explain, such as a service that never came back up.
+ */
+export async function attachServiceState(service: string): Promise<void> {
+  const sections: string[] = [];
+  const section = (label: string, run: () => string): void => {
+    try {
+      sections.push(`## ${label}\n${run().trimEnd() || "(no output)"}`);
+    } catch (error) {
+      sections.push(`## ${label}\n(failed: ${error instanceof Error ? error.message : String(error)})`);
+    }
+  };
+  section("compose ps -a", () => bounded("compose", "-p", PROJECT, "ps", "-a", service));
+  section("container state", () => {
+    const id = bounded("compose", "-p", PROJECT, "ps", "-a", "-q", service).trim();
+    if (id === "") {
+      return "no container";
+    }
+    return bounded(
+      "inspect",
+      "--format",
+      "status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}} error={{.State.Error}}",
+      id,
+    );
+  });
+  section("compose logs (last 200 lines)", () =>
+    bounded("compose", "-p", PROJECT, "logs", "--no-color", "--tail", "200", service),
+  );
+  try {
+    await test.info().attach(`${service}-state.txt`, { body: sections.join("\n\n"), contentType: "text/plain" });
+  } catch {
+    // The attachment is a diagnostic: a failure to write it must not replace the test's own error.
+  }
 }
 
 /** Names of the engine containers the controller created for a stream. */

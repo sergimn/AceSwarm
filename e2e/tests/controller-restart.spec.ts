@@ -2,8 +2,10 @@ import { existsSync } from "node:fs";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import {
   addStream,
+  attachServiceState,
   compose,
   composeAsync,
+  composeAsyncWithin,
   engineContainers,
   resetStack,
   sharedEngineContainers,
@@ -14,6 +16,16 @@ import {
   waitForSteadyPlaying,
 } from "./helpers.ts";
 import { broadcasts, remoteWireguardProfile, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
+
+// A failed test in this file leaves the controller's state and logs in its report. This runs after
+// the test ends, so it also covers a test that ran out of time, which a catch around the restart
+// can't always reach.
+test.afterEach(async () => {
+  const testInfo = test.info();
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await attachServiceState("controller");
+  }
+});
 
 /**
  * Restarting the controller (an update, say) must not interrupt playing streams: the new run takes
@@ -179,7 +191,9 @@ async function restartController(request: APIRequestContext, baseUrl: string, id
   const watcher = watchPlaylist(baseUrl, id);
   await new Promise((resolve) => setTimeout(resolve, 5000));
   const stopping = Date.now();
-  await composeAsync("stop", "controller");
+  // The controller has the default grace period, so Docker kills it at most 10 s after SIGTERM: 30 s
+  // separates a hang from a slow stop.
+  await composeAsyncWithin(30_000, "stop", "controller");
   const stopMs = Date.now() - stopping;
   await composeAsync("start", "controller");
   await expect
