@@ -28,7 +28,17 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - run: npm ci
+      # npm's own cache still leaves npm ci 35-50 s of unpacking, so keep node_modules itself. Only
+      # an exact match skips npm ci: no restore-keys. The only install script is fsevents (macOS).
+      - id: node-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.node-version', 'package-lock.json') }}
+      - if: steps.node-modules.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
@@ -42,6 +52,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Installing the hook environments takes about a minute (gitleaks builds from source).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.pre-commit-config.yaml') }}
       # The Node.js hooks need node_modules and run in the "check" job instead. On pushes to main,
       # the checkout is the main branch itself, which no-commit-to-branch would reject.
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
