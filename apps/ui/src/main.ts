@@ -3,6 +3,7 @@ import "./styles.css";
 import type { Snapshot } from "@aceswarm/shared/api-types";
 import { AddStreamDialog } from "./add-stream-dialog.ts";
 import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
+import { startClock } from "./clock.ts";
 import { errorMessage, toast } from "./dom.ts";
 import { Grid } from "./grid.ts";
 import { ManageDialog } from "./manage-dialog.ts";
@@ -67,6 +68,7 @@ class App {
   private focusedOnce = false;
 
   constructor() {
+    startClock(element("#clock"));
     element("[data-action=add]").addEventListener("click", () => {
       this.streamForm.open();
     });

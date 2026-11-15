@@ -1,6 +1,7 @@
 import type { Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import Hls from "hls.js/light";
 import { api } from "./api.ts";
+import { startClock } from "./clock.ts";
 import { errorMessage, h, icon, toast } from "./dom.ts";
 import { formatFreshness, formatPeers, formatSpeed, formatStandbys, pathLabel, STATE_LABELS } from "./format.ts";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
@@ -21,6 +22,8 @@ export class Player {
   private readonly navigator: Navigator;
   private readonly watch: WatchReporter;
   private readonly backButton: HTMLButtonElement;
+  /** Shown beside the buttons only in full screen, where the overlay appears with the cursor. */
+  private readonly clock: HTMLElement;
   private hls: Hls | undefined;
   private streamId: string | undefined;
   private overlayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -48,19 +51,22 @@ export class Player {
     restartButton.addEventListener("click", () => {
       this.restart();
     });
+    this.clock = h("time", { className: "player-clock", attrs: { hidden: true } });
+    startClock(this.clock);
+    const info = h("div", { className: "player-info" }, [this.title, this.details]);
+    const top = h("div", { className: "player-top" }, [info, this.clock]);
+    const actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
       this.waiting,
-      h("div", { className: "player-overlay" }, [
-        h("div", { className: "player-info" }, [this.title, this.details]),
-        h("div", { className: "player-actions" }, [backButton, restartButton]),
-      ]),
+      h("div", { className: "player-overlay" }, [top, actions]),
     ]);
     this.root.addEventListener("pointermove", () => {
       this.showOverlay();
     });
     document.body.append(this.root);
     document.addEventListener("fullscreenchange", () => {
+      this.clock.hidden = document.fullscreenElement !== this.root;
       if (document.fullscreenElement === null && this.streamId !== undefined) {
         this.navigator.back();
       }
