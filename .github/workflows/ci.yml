@@ -28,7 +28,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - run: npm ci
+      # The audit was most of npm ci's time (35-50 s, against 6 s without it).
+      - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
