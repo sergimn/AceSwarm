@@ -42,6 +42,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Installing the hook environments takes about a minute (gitleaks builds from source).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.pre-commit-config.yaml') }}
       # The Node.js hooks need node_modules and run in the "check" job instead. On pushes to main,
       # the checkout is the main branch itself, which no-commit-to-branch would reject.
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
