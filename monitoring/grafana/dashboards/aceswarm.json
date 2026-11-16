@@ -847,7 +847,7 @@
         "overrides": []
       },
       "options": {},
-      "description": "Peers whose traffic grew during the last sample, measured on the gateway."
+      "description": "Peers that sent the stream's engine at least one 16 KiB block of stream data during the last gateway sample, on top of 1/8 of what the engine sent them (which covers the acknowledgements and requests a download sends back). The gateway counts only the engine's traffic with the internet, so it misses peers on the engines' own network, such as a hot standby, and it counts the engine's peers: every stream on a shared engine shows the same."
     },
     {
       "type": "timeseries",
@@ -892,6 +892,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Where the peers that sent stream data come from, as the gateway sees the engines' traffic with the internet: each engine's top five countries, counted once per engine however many streams share it.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -900,7 +901,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (country) (aceswarm_stream_peer_countries{stream=~\"$stream\"}))",
+          "expr": "topk(15, sum by (country) (max by (engine, country) (aceswarm_stream_peer_countries{stream=~\"$stream\"})))",
           "range": false,
           "instant": true,
           "legendFormat": "{{country}}",
@@ -937,6 +938,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Peers the engine reports for each stream's session. They can include other engines of Ace Swarm on the same host, such as a hot standby. There is none while the engine's stats request fails.",
       "gridPos": {
         "h": 8,
         "w": 12,

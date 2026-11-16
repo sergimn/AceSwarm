@@ -81,10 +81,13 @@ function running(live: LiveStream): LiveFields {
     message: live.message,
     liveEdge: live.pipeline?.liveEdge ?? null,
     peers: {
-      connected: stats?.peers ?? peers?.connected ?? null,
+      // The engine's count for the session, or none. The gateway's count of connections is another
+      // measure (hosts that answered up to two minutes ago, every session of the engine), so it is
+      // no stand-in while a stats request fails or the session is new.
+      connected: stats?.peers ?? null,
       active: peers?.active ?? null,
       uploading: uploadingPeers(stats, peers),
-      countries: peers?.countries.slice(0, 3) ?? [],
+      countries: peers?.countries ?? [],
     },
     downloadKBps: stats?.speedDown ?? null,
     uploadKBps: stats?.speedUp ?? null,

@@ -4,8 +4,8 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
 
 - **A grid of live previews.** Select a tile to watch the stream full screen. Hover or focus a tile to see:
   - how fresh the picture is ("Now" while new frames arrive),
-  - how many peers are actually sending data,
-  - where the top peers are, with flags.
+  - how many peers are actually sending data (and how many the engine says are connected),
+  - where the peers sending data are from, as flags.
 - **Paste anything.** Content IDs, infohashes, `acestream://` links and magnet links all work. You don't have to say which kind it is: Ace Swarm works it out.
 - **Built for remotes.** Arrow keys and Back move around the UI, so it works on Android TV and other TV browsers.
 - **Self-healing.** Each stream runs in its own engine container. A stalled stream is recovered step by step, without touching the other streams:
@@ -126,7 +126,7 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
 
 - **Replacing is make-before-break.** A new engine starts on the same path, and each stream moves over once the new engine delivers its video. The old engine goes once its last stream left.
 - **It needs about the same memory as one stream's engine.** The `ENGINE_MEMORY_CACHE_MB` cap is per engine, not per stream: in testing with a 512 MB cache, an engine playing two streams levelled off at 674 MB, against 662 MB for one. It fills its cache sooner, though. Watch the "Engines" dashboard row. After changing `ENGINE_MEMORY_CACHE_MB` or `ENGINE_MEMORY_MB`, run `docker compose up -d`, then press **Restart** on one stream of each path to replace its engine with one that uses them.
-- **Peer counts are shared too.** The engine reports connected peers per stream, but the peers sending data and their countries come from the engine's connections, so every stream on it shows the same ones.
+- **Peer counts are shared too.** The engine reports connected peers per stream, but the peers sending data and their countries come from the engine's connections, so every stream on it shows the same ones. The tile says so: "8 connected · 40 sending on the shared engine".
 
 ### Who is watching
 

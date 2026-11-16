@@ -38,18 +38,39 @@ export function isFresh(lastFrameAt: string | null, now: number, playing = true)
   return formatFreshness(lastFrameAt, now, playing) === "Now";
 }
 
-/** Peers that sent data are the useful ones, so they come first. A stopped stream has none to count. */
-export function formatPeers(peers: PeerSummary, state?: StreamState): string {
+/**
+ * Peers that sent data are the useful ones, so they come first. A stopped stream has none to count.
+ * On a shared engine only the connected peers are the stream's own: the sending ones are the engine's,
+ * every stream on it shows the same, so they come second and say whose they are.
+ */
+export function formatPeers(peers: PeerSummary, state?: StreamState, sharedEngine = false): string {
   if (state === "stopped") {
     return "–";
   }
-  if (peers.active !== null && peers.connected !== null) {
-    return `${String(peers.active)} sending · ${String(peers.connected)} connected`;
-  }
-  if (peers.connected !== null) {
-    return `${String(peers.connected)} connected`;
-  }
-  return peers.active === null ? "Unknown" : `${String(peers.active)} sending`;
+  const connected = peers.connected === null ? undefined : `${String(peers.connected)} connected`;
+  const sending =
+    peers.active === null ? undefined : `${String(peers.active)} sending${sharedEngine ? " on the shared engine" : ""}`;
+  const shown = (sharedEngine ? [connected, sending] : [sending, connected]).filter((part) => part !== undefined);
+  return shown.length === 0 ? "Unknown" : shown.join(" · ");
+}
+
+/**
+ * What the Peers figures count. They come from two places: the engine reports its connected peers
+ * for each stream, and the gateway sees the engine's traffic with the internet.
+ */
+export function peersHint(sharedEngine: boolean): string {
+  return [
+    "Sending: peers on the internet that sent the engine stream data in the last few seconds, as the gateway sees them.",
+    "Connected: the peers the engine reports for this stream. They can include other engines of Ace Swarm, such as a hot standby, which the gateway does not see.",
+    ...(sharedEngine
+      ? ["The engine is shared: its sending peers and their countries are those of every stream on it."]
+      : []),
+  ].join(" ");
+}
+
+/** The tooltip of a country's flag: how many of the peers sending data are there. */
+export function countryHint(code: string, count: number, sharedEngine: boolean): string {
+  return `${countryName(code)}: ${String(count)} sending${sharedEngine ? " on the shared engine" : ""}`;
 }
 
 export function topCountries(countries: readonly CountryCount[], limit = 3): CountryCount[] {

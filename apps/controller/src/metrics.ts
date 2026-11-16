@@ -48,6 +48,13 @@ function setFrameAge(gauge: Gauge<"stream">, stream: StreamView, now: number, si
   }
 }
 
+/** The countries of the peers sending the stream's engine data, with the engine they are the peers of. */
+function setCountries(gauge: Gauge<"stream" | "engine" | "country">, stream: StreamView): void {
+  for (const country of stream.peers.countries) {
+    gauge.set({ stream: stream.id, engine: stream.engine?.name ?? "", country: country.code }, country.count);
+  }
+}
+
 /** The live edge of the session a stream plays from: how old its newest data is, and since when it is the same. */
 function setLiveEdgeGauges(
   gauges: Record<"age" | "unchanged", Gauge<"stream">>,
@@ -161,9 +168,7 @@ export class ControllerMetrics {
           if (stream.peers.uploading !== null) {
             peers.set({ ...labels, kind: "uploading" }, stream.peers.uploading);
           }
-          for (const country of stream.peers.countries) {
-            countries.set({ ...labels, country: country.code }, country.count);
-          }
+          setCountries(countries, stream);
           if (stream.downloadKBps !== null) {
             speed.set({ ...labels, direction: "down" }, stream.downloadKBps);
           }
@@ -234,14 +239,18 @@ export class ControllerMetrics {
     });
     const peers = new Gauge({
       name: "aceswarm_stream_peers",
-      help: "Peers of the stream (connected: reported by the engine, active: sending us data, uploading: getting data from us)",
+      help:
+        "Peers of the stream (connected: reported by the engine for its session, active: sending the engine stream data, " +
+        "uploading: getting stream data from it). Active and uploading are the engine's, which a shared engine's streams share",
       labelNames: ["stream", "kind"],
       registers,
     });
     const countries = new Gauge({
       name: "aceswarm_stream_peer_countries",
-      help: "Peers of the stream per country (top countries only)",
-      labelNames: ["stream", "country"],
+      help:
+        "Per country, the peers that sent the stream's engine data (its top five countries). Every stream on a shared " +
+        "engine reports the engine's: count each engine once",
+      labelNames: ["stream", "engine", "country"],
       registers,
     });
     const speed = new Gauge({

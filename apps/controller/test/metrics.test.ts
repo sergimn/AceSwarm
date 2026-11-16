@@ -79,6 +79,53 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
   expect(scrape).not.toContain('aceswarm_engine_memory_cache_limit_bytes{stream="",engine="e2"}');
 });
 
+function streamOnSharedEngine(id: string): StreamView {
+  return {
+    id,
+    aceId: "a".repeat(40),
+    aceIdKind: "infohash",
+    name: id,
+    enabled: true,
+    createdAt: "2026-11-06T10:00:00.000Z",
+    state: "playing",
+    stateSince: "2026-11-06T10:00:00.000Z",
+    message: null,
+    lastFrameAt: null,
+    liveEdge: null,
+    peers: {
+      connected: 5,
+      active: 3,
+      uploading: 0,
+      countries: [
+        { code: "ES", count: 2 },
+        { code: "FR", count: 1 },
+      ],
+    },
+    downloadKBps: 500,
+    uploadKBps: 0,
+    path: "direct",
+    recoveries: 0,
+    viewers: 0,
+    hls: { preview: "", full: "", thumbnail: "" },
+    engine: { name: "shared-direct", shared: true },
+    standbys: [],
+  };
+}
+
+test("exports the countries of the engine's sending peers with the engine they belong to", async () => {
+  const registry = new Registry();
+  new ControllerMetrics(registry, () => ({
+    streams: [streamOnSharedEngine("s1"), streamOnSharedEngine("s2")],
+    paths: [],
+  }));
+  const scrape = await registry.metrics();
+  // Both streams report the engine's countries, so a dashboard counts each engine once.
+  for (const id of ["s1", "s2"]) {
+    expect(scrape).toContain(`aceswarm_stream_peer_countries{stream="${id}",engine="shared-direct",country="ES"} 2`);
+    expect(scrape).toContain(`aceswarm_stream_peer_countries{stream="${id}",engine="shared-direct",country="FR"} 1`);
+  }
+});
+
 test("exports the age of a stream's last frame while it runs, not once it is stopped", async () => {
   const registry = new Registry();
   const stream: StreamView = {

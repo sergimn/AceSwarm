@@ -154,7 +154,7 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
   The gateway routes the new engine from the moment it has an address, like any engine's. A stream that starts on the path while the new engine starts, and the old one is already gone, waits for the new one. A replacement that doesn't start leaves the old engine in place.
 
 - **Leftovers.** The controller removes a path's engine that nobody used for two minutes (see above) once no stream is still moving to it. Once every stream tried to start an engine (a stream waiting for the gateway, or for a WireGuard path it may use, hasn't yet), it also removes the shared engines a previous run left that no stream took over.
-- **Peers.** The engine reports connected peers per session. Connection tracking only sees the engine, so the "sending" peers and their countries are the engine's, the same for each of its streams.
+- **Peers.** The engine reports connected peers per session. Connection tracking only sees the engine, so the "sending" peers and their countries are the engine's, the same for each of its streams. The UI marks them as the shared engine's ("8 connected · 40 sending on the shared engine"). A stream's connected count is the engine's own and nothing else: while the engine's stats request fails, the tile shows no connected figure rather than the gateway's count of connections, which is another measure.
 
 ### Hot standby
 
@@ -210,9 +210,9 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
   - Every path is pinged at an interval (`PROBE_TARGETS`, by default `1.1.1.1` and `9.9.9.9`), and its loss and latency become a 0–1 score.
   - A tunnel without a WireGuard handshake in the last three minutes counts as down.
 - **Peer stats.** The engine API doesn't list peers, so the gateway reads the kernel's connection tracking table.
-  - Per engine, it counts peers that answered ("connected") and peers whose byte counters grew since the last sample ("sending").
-  - It looks up their countries in the DB-IP Lite database, which it downloads monthly.
-  - Ports 53, 80 and 443 are ignored, so DNS and trackers don't count as peers.
+  - Per engine, it counts peers that answered ("connected") and the connected peers that sent the engine stream data since the last sample ("sending"): at least one 16 KiB block (`PEERS_INTERVAL_SECONDS` apart) on top of 1/8 of what the engine sent that peer, the rule that "uploading" peers use the other way round (see Metrics). Acknowledgements, handshakes, resets and the short answers of trackers and DHT nodes don't add up to a block, so they don't count. The engine's peers on the engines' own network, such as a hot standby that feeds it, never pass the gateway: they show in the engine's connected count and not in "sending".
+  - It looks up the countries of the sending peers (of the connected ones without connection accounting) in the DB-IP Lite database, which it downloads monthly.
+  - Ports 53, 80 and 443 are ignored, so DNS and trackers on them don't count as peers.
 
 ## Engine image
 
@@ -233,7 +233,7 @@ Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engi
 
 ## Monitoring
 
-- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, how many streams each shared engine plays and why it was replaced, how full each engine's memory cache is, and how much the engines upload. The gateway counts the peers each engine sends stream data to from its connection table, next to the peers sending data to it: a peer counts when the engine sent it at least 16 KiB between two samples (`PEERS_INTERVAL_SECONDS`) on top of 1/8 of what the peer sent it. That share covers the acknowledgements and requests that every download sends back, which add up to more than 16 KiB on a fast one. A stream shows 0 while its engine reports no upload speed: the engine counts only stream data, so what the gateway saw then is other traffic to its peers. Recording rules compute availability, and alerts cover:
+- **Metrics.** Every service exposes `/metrics`. Prometheus keeps 90 days by default. The dashboard also shows who watches which stream, how many streams each shared engine plays and why it was replaced, how full each engine's memory cache is, and how much the engines upload. The gateway counts the peers each engine sends stream data to from its connection table, next to the peers sending data to it, which count by the same rule the other way round: a peer counts when the engine sent it at least 16 KiB between two samples (`PEERS_INTERVAL_SECONDS`) on top of 1/8 of what the peer sent it. That share covers the acknowledgements and requests that every download sends back, which add up to more than 16 KiB on a fast one. A stream shows 0 while its engine reports no upload speed: the engine counts only stream data, so what the gateway saw then is other traffic to its peers. Recording rules compute availability, and alerts cover:
   - stream down or flapping,
   - path down,
   - engine memory near its limit, and out-of-memory kills,

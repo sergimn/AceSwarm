@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus } from "@aceswarm/shared/api-types";
 import {
+  countryHint,
   formatFreshness,
   formatLoss,
   formatPeers,
@@ -9,6 +10,7 @@ import {
   formatStandbys,
   isFresh,
   pathLabel,
+  peersHint,
   shownState,
   STATE_LABELS,
   topCountries,
@@ -53,6 +55,24 @@ describe("formatPeers", () => {
     expect(formatPeers({ connected: 12, active: 4, uploading: null, countries: [] })).toBe("4 sending · 12 connected");
     expect(formatPeers({ connected: 12, active: null, uploading: null, countries: [] })).toBe("12 connected");
     expect(formatPeers({ connected: null, active: null, uploading: null, countries: [] })).toBe("Unknown");
+  });
+
+  it("says on a shared engine that the sending peers are the engine's, and puts the stream's own count first", () => {
+    const peers = { connected: 8, active: 40, uploading: null, countries: [] };
+    expect(formatPeers(peers, "playing", true)).toBe("8 connected · 40 sending on the shared engine");
+    expect(formatPeers({ ...peers, connected: null }, "playing", true)).toBe("40 sending on the shared engine");
+    expect(formatPeers({ ...peers, active: null }, "playing", true)).toBe("8 connected");
+    expect(formatPeers({ ...peers, active: null, connected: null }, "playing", true)).toBe("Unknown");
+    expect(formatPeers(peers, "playing", false)).toBe("40 sending · 8 connected");
+    expect(formatPeers(peers, "stopped", true)).toBe("–");
+  });
+
+  it("explains what the figures count, and for a shared engine that the sending ones are shared", () => {
+    expect(peersHint(false)).toContain("hot standby");
+    expect(peersHint(false)).not.toContain("shared");
+    expect(peersHint(true)).toContain("every stream on it");
+    expect(countryHint("ES", 3, false)).toBe("Spain: 3 sending");
+    expect(countryHint("ES", 3, true)).toBe("Spain: 3 sending on the shared engine");
   });
 
   it("shows none for a stopped stream, rather than peers nobody can know", () => {

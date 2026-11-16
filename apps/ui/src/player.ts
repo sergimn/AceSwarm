@@ -143,7 +143,7 @@ export class Player {
     const running = disabled
       ? []
       : [
-          `Peers: ${formatPeers(stream.peers)}`,
+          `Peers: ${formatPeers(stream.peers, state, stream.engine?.shared === true)}`,
           formatSpeed(stream.downloadKBps),
           pathLabel(stream.path, snapshot.paths),
           ...(stream.standbys.length > 0 ? [`Standby: ${formatStandbys(stream.standbys, snapshot.paths)}`] : []),
