@@ -61,12 +61,43 @@ test("shows ages by the controller's clock when the browser's clock is wrong", a
     Date.now = () => real() + 5 * 60_000;
   });
   await page.goto("/");
+  // The page's clock really is that far off the controller's.
+  const skewMs = await page.evaluate(async () => {
+    const generatedAt = ((await (await fetch("/api/snapshot")).json()) as { generatedAt: string }).generatedAt;
+    return Date.now() - Date.parse(generatedAt);
+  });
+  expect(skewMs).toBeGreaterThan(4 * 60_000);
+
   const tile = page.locator(".tile", { hasText: "Test pattern" });
   await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
   await tile.hover();
-  const freshness = tile.locator(".stat", { hasText: "Freshness" });
-  await expect(freshness).toContainText("Now");
-  await expect(freshness.locator(".fresh")).toBeAttached();
+  const age = tile.locator(".stat", { hasText: "Freshness" }).locator(".stat-value");
+  await expect(age).toHaveText("Now");
+  await expect(age).toHaveClass(/\bfresh\b/);
+});
+
+test("says when it hears nothing from the controller, and recovers when it does again", async ({ page }) => {
+  // Every connection to the event stream is refused, as a reverse proxy does while the controller
+  // restarts: the browser gives up on the stream for good, and the page opens new ones.
+  await page.route("**/api/events", (route) => route.fulfill({ status: 502, body: "bad gateway" }));
+  await page.goto("/");
+  const tile = page.locator(".tile", { hasText: "Test pattern" });
+  await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
+  await tile.hover();
+  const age = tile.locator(".stat", { hasText: "Freshness" }).locator(".stat-value");
+  await expect(age).toHaveText("Now");
+
+  // No snapshot follows the first: after a few seconds what the page shows is old, and it says so.
+  await expect(page.locator("body")).toHaveAttribute("data-stale", "", { timeout: 30_000 });
+  await expect(page.locator("#connection")).toHaveText(/^Reconnecting… last update \d+s ago$/);
+  await expect(age).toHaveText(/^\d+s ago$/);
+  await expect(age).not.toHaveClass(/\bfresh\b/);
+
+  // Once the controller answers again, a new event stream opens by itself.
+  await page.unroute("**/api/events");
+  await expect(page.locator("body")).not.toHaveAttribute("data-stale", "", { timeout: 30_000 });
+  await expect(page.locator("#connection")).toHaveText("Live");
+  await expect(age).toHaveText("Now");
 });
 
 test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {

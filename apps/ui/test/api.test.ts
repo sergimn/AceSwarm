@@ -106,25 +106,79 @@ describe("subscribeSnapshots", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
-  it("opens a new connection when the browser gave up, which it does after an HTTP error answer", () => {
+  it("opens a new connection 3 s after the browser gave up, which it does after an HTTP error answer", () => {
     current().opens();
     current().failsForGood();
     expect(last(statuses)).toBe("reconnecting");
     expect(FakeEventSource.instances).toHaveLength(1);
 
-    vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+    vi.advanceTimersByTime(RECONNECT_DELAY_MS - 1);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
     expect(FakeEventSource.instances).toHaveLength(2);
-    // The controller is still away: it gives up again, and so the page tries again, for as long as it takes.
-    current().failsForGood();
-    vi.advanceTimersByTime(RECONNECT_DELAY_MS);
-    expect(FakeEventSource.instances).toHaveLength(3);
 
     current().opens();
     current().sends({ generatedAt: "2026-11-16T12:01:00Z" });
     expect(last(statuses)).toBe("live");
     expect(snapshots).toHaveLength(1);
-    vi.advanceTimersByTime(SILENT_RECONNECT_MS / 2);
+    // A connection that delivers is left alone.
+    for (let seconds = 0; seconds < 30; seconds += 2) {
+      vi.advanceTimersByTime(2000);
+      current().sends({});
+    }
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it("keeps trying every 3 s for as long as the controller is away, one connection at a time", () => {
+    current().opens();
+    current().failsForGood();
+    // Past the time a silent connection is replaced after: the watchdog stays out of the way.
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+      expect(FakeEventSource.instances).toHaveLength(attempt + 1);
+      current().failsForGood();
+    }
+    vi.advanceTimersByTime(RECONNECT_DELAY_MS - 1);
+    expect(FakeEventSource.instances).toHaveLength(9);
+  });
+
+  it("leaves a connection that is still being made alone until it has had its time, whatever came before", () => {
+    // It delivered a snapshot, dropped for good, and the next one never answers.
+    current().opens();
+    current().sends({});
+    vi.advanceTimersByTime(1000);
+    current().failsForGood();
+    vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    const hung = current();
+
+    // The silence counts from when it was made, not from the last snapshot of the one before.
+    vi.advanceTimersByTime(SILENT_RECONNECT_MS - 2000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(hung.readyState).toBe(FakeEventSource.CONNECTING);
+    vi.advanceTimersByTime(4000);
     expect(FakeEventSource.instances).toHaveLength(3);
+    expect(hung.readyState).toBe(FakeEventSource.CLOSED);
+  });
+
+  it("counts the silence of a slow connection from when it opened", () => {
+    vi.advanceTimersByTime(SILENT_RECONNECT_MS - 1000);
+    current().opens();
+    vi.advanceTimersByTime(4000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(SILENT_RECONNECT_MS);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it("opens one connection, not two, when a silent one fails for good while the next is awaited", () => {
+    current().opens();
+    current().sends({});
+    // Silent for longer than the watchdog allows, but the failure comes first.
+    vi.advanceTimersByTime(SILENT_RECONNECT_MS + 500);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    current().failsForGood();
+    vi.advanceTimersByTime(RECONNECT_DELAY_MS + 2000);
+    expect(FakeEventSource.instances).toHaveLength(2);
   });
 
   it("replaces a connection that is open but delivers nothing", () => {
@@ -149,11 +203,20 @@ describe("subscribeSnapshots", () => {
     expect(last(statuses)).toBe("live");
   });
 
-  it("stops everything when the page unsubscribes", () => {
+  it("stops everything when the page unsubscribes, with a retry pending or without", () => {
     const first = current();
     first.failsForGood();
     stop();
     vi.advanceTimersByTime(RECONNECT_DELAY_MS + SILENT_RECONNECT_MS * 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(first.readyState).toBe(FakeEventSource.CLOSED);
+  });
+
+  it("stops the watchdog when the page unsubscribes", () => {
+    const first = current();
+    first.opens();
+    stop();
+    vi.advanceTimersByTime(SILENT_RECONNECT_MS * 3);
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(first.readyState).toBe(FakeEventSource.CLOSED);
   });

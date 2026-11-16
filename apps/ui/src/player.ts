@@ -37,6 +37,8 @@ export class Player {
   /** The Restart button's label: it enables the stream while that is disabled, since it can't restart. */
   private readonly restartLabel: Text;
   private disabled = false;
+  /** Whether the page hears nothing from the controller: the overlay then stays up to say so. */
+  private stale = false;
   /** Whether it plays the stream's output and counts as its viewer: not while the stream is disabled. */
   private following = false;
   private readonly navigator: Navigator;
@@ -143,7 +145,10 @@ export class Player {
     this.waiting.hidden = !waiting && !disabled;
     setText(this.waitingTitle, disabled ? "This stream is disabled" : "Waiting for the live broadcast");
     setText(this.waitingReason, disabled ? "Enable it to watch it." : (stream.message ?? ""));
-    this.restartLabel.data = disabled ? "Enable stream" : "Restart stream";
+    const restartText = disabled ? "Enable stream" : "Restart stream";
+    if (this.restartLabel.data !== restartText) {
+      this.restartLabel.data = restartText;
+    }
     // A page that hears nothing doesn't know that the stream still plays, so it doesn't say "Now".
     const last = `Last frame: ${formatFreshness(stream.lastFrameAt, time.now, state === "playing" && !time.stale)}`;
     // A disabled stream has no engine: no peers, no speed, no path.
@@ -156,8 +161,19 @@ export class Player {
           ...(stream.standbys.length > 0 ? [`Standby: ${formatStandbys(stream.standbys, snapshot.paths)}`] : []),
         ];
     setText(this.details, [STATE_LABELS[state], last, ...running].join("  ·  "));
+    this.showStale(time);
+  }
+
+  /** While the page hears nothing, a line under the details says so. */
+  private showStale(time: PageTime): void {
     this.connection.hidden = !time.stale;
     setText(this.connection, time.stale ? staleNotice(time) : "");
+    if (time.stale === this.stale) {
+      return;
+    }
+    // The picture just freezes, so the overlay shows the reason, and keeps showing it.
+    this.stale = time.stale;
+    this.showOverlay();
   }
 
   /**
@@ -237,7 +253,9 @@ export class Player {
     this.root.classList.add("show-overlay");
     clearTimeout(this.overlayTimer);
     this.overlayTimer = setTimeout(() => {
-      this.root.classList.remove("show-overlay");
+      if (!this.stale) {
+        this.root.classList.remove("show-overlay");
+      }
     }, OVERLAY_MS);
   }
 

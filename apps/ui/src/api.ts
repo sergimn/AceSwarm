@@ -142,6 +142,7 @@ export function subscribeSnapshots(
   return () => {
     stopped = true;
     clearTimeout(retry);
+    retry = undefined;
     clearInterval(watchdog);
     source?.close();
   };

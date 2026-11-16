@@ -187,13 +187,15 @@ a {
 }
 
 /*
- * The page hears nothing from the controller (see liveness.ts): what it shows is old. The player and
- * the dialogs cover the top bar, so they say it themselves.
+ * The page hears nothing from the controller (see liveness.ts): what it shows is old. The tiles'
+ * contents dim, not the tiles, whose focus ring is how a remote shows where it is, and not the
+ * background of the stats, which would show the name behind it. The player and the dialogs cover
+ * the top bar, so they say it themselves.
  */
-[data-stale] .tile,
-[data-stale] .summary,
-[data-stale] .dialog-body {
-  opacity: 0.5;
+[data-stale] .tile > :not(.tile-stats),
+[data-stale] .tile-stats > *,
+[data-stale] .summary {
+  opacity: 0.6;
 }
 
 [data-stale] .dialog-header::after {
@@ -840,10 +842,6 @@ p.form-error {
 .player-connection {
   margin: 6px 0 0;
   color: var(--amber);
-}
-
-.player-connection[hidden] {
-  display: none;
 }
 
 .player-clock {
