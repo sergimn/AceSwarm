@@ -192,7 +192,7 @@ flowchart LR
 | `shared-engines.spec.ts`     | 1, 2    | one engine per path: turning it on and off moves streams without a gap, one stream failing leaves the shared engine alone, the watched stream failing replaces it, throwaway viewer ids                                                                                                                                                                                                                                                                                                                    |
 | `standby.spec.ts`            | 2       | hot standby: a hot standby on the VPN, failing over within seconds when the engine hangs, without a new engine or the ladder, sticky afterwards, standby sessions on shared engines, turning it off, a broadcast that stops while both its engines hold its old window                                                                                                                                                                                                                                     |
 | `streams.spec.ts`            | 3       | adding from the UI, live stats, content ID and infohash detection, magnet links, persistence across a controller restart, disabling a stream (one Enable button, the age of its last video, no path) and enabling it again, removal                                                                                                                                                                                                                                                                        |
-| `wireguard-only.spec.ts`     | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up, the last profile stays                                                                                                                                                                                                                                                                                                                                          |
+| `wireguard-only.spec.ts`     | 3       | WireGuard only: greyed out without a profile, moves streams off the direct path, enforced by the gateway, streams wait while no VPN is up and the page says so (top bar, Network dialog), the last profile stays                                                                                                                                                                                                                                                                                           |
 
 ### Controller restarts
 
@@ -397,6 +397,7 @@ sequenceDiagram
   T->>AS: stream 2 plays on the VPN
   T->>FW: DROP UDP to 192.0.2.1:51820
   AS->>AS: VPN path down, streams stall and recover in place, never direct
+  T->>AS: top bar says 0/1 paths up, the Network dialog shows the VPN Down and Direct Off as it opens (also reopened)
   T->>AS: stream 3 waits: "no WireGuard path is up", no engine
   T->>FW: remove the DROP rule
   AS->>WG: tunnel back, all three play on the VPN

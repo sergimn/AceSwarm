@@ -86,13 +86,18 @@ export interface NetworkDialog {
   toggle: Locator;
 }
 
+/** The Network dialog's parts, whether it is open or not. */
+export function networkDialog(page: Page): NetworkDialog {
+  const dialog = page.getByRole("dialog", { name: "Network" });
+  const section = (title: string) => dialog.locator(".section", { has: page.getByRole("heading", { name: title }) });
+  return { dialog, section, toggle: dialog.getByRole("switch", { name: "WireGuard only" }) };
+}
+
 /** Opens the Network dialog from the home screen. */
 export async function openNetwork(page: Page): Promise<NetworkDialog> {
   await page.goto("/");
   await page.getByRole("button", { name: "Network", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Network" });
-  const section = (title: string) => dialog.locator(".section", { has: page.getByRole("heading", { name: title }) });
-  return { dialog, section, toggle: dialog.getByRole("switch", { name: "WireGuard only" }) };
+  return networkDialog(page);
 }
 
 /** Uploads a WireGuard profile through the Network dialog, as a user would, and waits for its path. */
