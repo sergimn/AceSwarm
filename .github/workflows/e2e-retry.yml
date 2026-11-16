@@ -1,0 +1,59 @@
+# Re-runs an E2E run that stopped at a runner's NAT. A runner that can't find a public UDP address
+# for the mesh (most often "STUN servers saw different public addresses", see e2e/README.md) fails
+# that step and cancels the run, and which runners get such a NAT is a matter of luck, so the run
+# starts again here until every runner gets through. Nothing else is re-run: a run whose build or
+# tests failed stays as it is.
+name: E2E retry
+
+on:
+  workflow_run:
+    workflows: [E2E]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  retry:
+    name: Re-run E2E after a failed NAT step
+    if: github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # To read the run's jobs and to re-run it.
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      EVENT: ${{ github.event.workflow_run.event }}
+      # The name of the step in e2e.yml.
+      STEP: Find this runner's public UDP address
+      # Attempts per run, the first one included. A new commit starts a new run, which counts from
+      # one again. GitHub itself stops re-running a run after 50.
+      MAX_ATTEMPTS: 30
+    steps:
+      - name: Re-run all jobs if a runner failed at its NAT
+        shell: bash
+        run: |
+          jobs="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100")"
+          failed="$(jq -r --arg step "$STEP" '[.jobs[] | select(any(.steps[]?;
+            .name == $step and .conclusion == "failure")) | .name] | join(", ")' <<<"$jobs")"
+          if [[ -z "$failed" ]]; then
+            echo "::notice::Attempt $ATTEMPT of run $RUN_ID did not fail at \"$STEP\": not re-running it."
+            exit 0
+          fi
+          # Re-running a run that a newer one has replaced would cancel the newer one.
+          newest="$(gh run list --workflow e2e.yml --branch "$BRANCH" --event "$EVENT" --limit 1 \
+            --json databaseId --jq '.[0].databaseId')"
+          if [[ "$newest" != "$RUN_ID" ]]; then
+            echo "::notice::Run $newest has replaced run $RUN_ID: not re-running it."
+            exit 0
+          fi
+          if ((ATTEMPT >= MAX_ATTEMPTS)); then
+            echo "::warning::Run $RUN_ID failed at \"$STEP\" $ATTEMPT times in a row or more: giving up."
+            exit 0
+          fi
+          echo "::notice::\"$STEP\" failed in: $failed. Starting attempt $((ATTEMPT + 1)) of $MAX_ATTEMPTS."
+          gh run rerun "$RUN_ID"
