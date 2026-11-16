@@ -12,11 +12,12 @@
 #                                  (the workflow uploads it as the artifact ${MESH_ARTIFACT_PREFIX}ROLE).
 #                                  Fails if the STUN servers saw different public addresses.
 #   mesh.sh join ROLE PEER...      downloads the peers' artifacts and waits until they answer. A
-#                                  PEER written as NAME? is optional: it is added as soon as its
-#                                  artifact shows up (for up to 10 minutes), and left out if it
-#                                  never does or never answers. Stops waiting for any peer whose
-#                                  job ended without publishing its address (fails for a required
-#                                  one, leaves an optional one out).
+#                                  download that fails right after the upload is tried again for up
+#                                  to a minute. A PEER written as NAME? is optional: it is added as
+#                                  soon as its artifact shows up (for up to 10 minutes), and left
+#                                  out if it never does or never answers. Stops waiting for any
+#                                  peer whose job ended without publishing its address (fails for a
+#                                  required one, leaves an optional one out).
 #   mesh.sh ip ROLE                prints a role's mesh address
 #   mesh.sh share FILE [NAME]      serves FILE to the other runners at http://<mesh ip>:18999/NAME
 #   mesh.sh wait-file ROLE NAME    waits until ROLE serves NAME (or stops answering) and prints it
@@ -204,6 +205,24 @@ download_peer() {
   log "$peer: $(jq -c '{meshIp, endpoint}' "$MESH_DIR/peers/$peer.json")"
 }
 
+# Downloads a peer's artifact that the run lists, trying again for up to MESH_DOWNLOAD_SECONDS if
+# that fails. GitHub lists a new artifact before it can be downloaded: within a second of the upload,
+# `gh run download` has answered "no artifact matches any of the names or patterns provided" and
+# "HTTP 404" for one that the list showed. The peer's job is still running and the artifact does
+# exist, so waiting a few seconds fixes it, and a download that never works still fails the join.
+download_peer_retrying() {
+  local peer="$1" deadline=$((SECONDS + ${MESH_DOWNLOAD_SECONDS:-60})) tries=1
+  until download_peer "$peer"; do
+    if ((SECONDS >= deadline)); then
+      log "could not download the $peer runner's artifact ${MESH_ARTIFACT_PREFIX}$peer ($tries tries)"
+      return 1
+    fi
+    log "downloading the $peer runner's artifact failed (try $tries), trying again in 3 s"
+    ((++tries))
+    sleep 3
+  done
+}
+
 # Waits until the workflow run has the peer's artifact and downloads it.
 fetch_peer() {
   local peer="$1" deadline=$((SECONDS + ${MESH_WAIT_SECONDS:-600})) polls=0
@@ -219,7 +238,7 @@ fetch_peer() {
     fi
     sleep 3
   done
-  download_peer "$peer" || exit 1
+  download_peer_retrying "$peer" || exit 1
 }
 
 add_peer() {
