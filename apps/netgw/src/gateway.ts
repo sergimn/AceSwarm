@@ -108,12 +108,11 @@ export class Gateway {
   /** The direct path first, then one path per tunnel. */
   targets(): ProbeTarget[] {
     return [
-      { id: DIRECT_PATH, kind: "direct", label: "Direct", sourceAddress: undefined, iface: undefined, error: null },
+      { id: DIRECT_PATH, kind: "direct", label: "Direct", iface: undefined, error: null },
       ...this.tunnels.list().map((tunnel): ProbeTarget => ({
         id: tunnel.pathId,
         kind: "wireguard",
         label: tunnel.profile,
-        sourceAddress: tunnel.address,
         iface: tunnel.error === null ? tunnel.iface : undefined,
         error: tunnel.error,
       })),
