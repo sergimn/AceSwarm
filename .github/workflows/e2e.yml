@@ -11,7 +11,8 @@
 # hole punching, using STUN and this run's artifacts to find each other (e2e/mesh.sh). The
 # WireGuard server and the broadcasts then start in parallel. e2e/README.md has diagrams.
 #
-# Re-run all jobs, never only the failed one: the runners only work together.
+# Re-run all jobs, never only the failed one: the runners only work together. e2e-retry.yml does that
+# by itself for a run that stopped at "Find this runner's public UDP address".
 #
 # Every setup and test step has a time limit of a few times its usual length, so a step that hangs
 # fails within minutes rather than at the job's limit, and mesh.sh stops waiting for a runner whose job ended.
@@ -55,6 +56,7 @@ jobs:
         timeout-minutes: 5
         with:
           node-version-file: .node-version
+      # e2e-retry.yml looks for this step by name: it re-runs a run that fails here.
       - name: Find this runner's public UDP address
         # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
         timeout-minutes: 6
@@ -121,6 +123,7 @@ jobs:
         timeout-minutes: 5
         with:
           node-version-file: .node-version
+      # e2e-retry.yml looks for this step by name: it re-runs a run that fails here.
       - name: Find this runner's public UDP address
         # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
         timeout-minutes: 6
@@ -203,6 +206,7 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      # e2e-retry.yml looks for this step by name: it re-runs a run that fails here.
       - name: Find this runner's public UDP address
         # Usually 10-15 s. mesh.sh retries its slow parts, each with a time limit of its own.
         timeout-minutes: 6
