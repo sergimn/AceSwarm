@@ -20,7 +20,7 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 - For a branch without a pull request: Actions, E2E, "Run workflow", and pick the branch. From a session, that is `gh workflow run e2e.yml --ref <branch>`, or the GitHub tool `actions_run_trigger` with `method: run_workflow`, `workflow_id: e2e.yml` and `ref`. The workflow takes no inputs.
 - A new run for the same pull request or branch cancels the one in progress.
 - **Re-run all jobs, never only the failed one.** The runners only work together, and a single job would wait for runners that are gone. From a session: `gh run rerun <run id>` without `--failed`, or `actions_run_trigger` with `method: rerun_workflow_run`, never `rerun_failed_jobs`.
-- **A run that stops at a runner's NAT re-runs by itself.** Workflow **E2E retry** (`.github/workflows/e2e-retry.yml`) re-runs all jobs of a run that has a failed "Find this runner's public UDP address" step, within about a minute, up to 30 attempts per run. Don't re-run those by hand: wait for the next attempt. It re-runs nothing else.
+- **A run that stops at a runner's NAT re-runs by itself.** Workflow **E2E retry** (`.github/workflows/e2e-retry.yml`) re-runs all jobs of a run that has a failed "Find this runner's public UDP address" step, within about a minute, up to 50 attempts per run. Don't re-run those by hand: wait for the next attempt. It re-runs nothing else.
 
 ## 3. Read a run
 
