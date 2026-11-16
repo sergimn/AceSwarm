@@ -208,6 +208,7 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
   - The controller sends the complete list of engine paths every few seconds (`PUT /assignments`). This restores them after a gateway restart and removes the ones of engines that are gone.
   - A starting engine gets its path as soon as its container has an address, before its API answers. A real engine's API only answers after its first DNS lookups, which an engine without a path can't make.
   - A stream that starts while the gateway is unreachable gets its path as soon as the gateway answers again.
+  - The controller asks the gateway for its paths every 5 seconds. While it doesn't answer (a restart, or a poll that timed out), streams treat the paths as unknown, but the snapshot keeps the paths of the last answer and says `gatewayReachable: false`. The UI then writes "network gateway unreachable" in the top bar and "Unknown" on each path in **Network**, instead of "0/0 network paths up" and an empty list: their health is unknown, not zero.
 - **Probes.**
   - Every path is pinged at an interval (`PROBE_TARGETS`, by default `1.1.1.1` and `9.9.9.9`), and its loss and latency become a 0–1 score.
   - A tunnel without a WireGuard handshake in the last three minutes counts as down.

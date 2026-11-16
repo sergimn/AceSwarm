@@ -31,6 +31,8 @@ export class NetworkDialog {
   private readonly dialog: HTMLDialogElement;
   private readonly paths: HTMLElement;
   private readonly strategy: HTMLElement;
+  /** Shown while the gateway doesn't answer: the health of the paths is then unknown. */
+  private readonly gatewayNotice: HTMLElement;
   private readonly profiles: HTMLElement;
   private readonly form: HTMLFormElement;
   private readonly name: HTMLInputElement;
@@ -54,6 +56,11 @@ export class NetworkDialog {
     this.dialog = shell.dialog;
     this.paths = h("ul", { className: "rows" });
     this.strategy = h("p", { className: "muted" });
+    this.gatewayNotice = h("p", {
+      className: "notice",
+      text: "The network gateway isn't answering, so the health of the paths below isn't known.",
+      attrs: { role: "status", hidden: true },
+    });
     // A switch, not a disabled control: a disabled button can't take focus, and remote users
     // would never reach it to read why it is unavailable. It sits on the right, under the dialog's
     // close button and above the profiles' buttons, so Up and Down reach it.
@@ -122,6 +129,7 @@ export class NetworkDialog {
         h("h3", { text: "Paths" }),
         wireguardOnlySetting,
         this.strategy,
+        this.gatewayNotice,
         this.paths,
       ]),
       h("section", { className: "section" }, [h("h3", { text: "WireGuard profiles" }), this.profiles]),
@@ -173,9 +181,12 @@ export class NetworkDialog {
       this.wireguardPaths = wireguardPaths;
     }
     this.renderWireguardOnly();
+    this.gatewayNotice.hidden = snapshot.gatewayReachable;
     const loads = pathLoads(snapshot.streams);
     this.paths.replaceChildren(
-      ...snapshot.paths.map((path) => this.pathRow(path, loads.get(path.id), snapshot.wireguardOnly)),
+      ...snapshot.paths.map((path) =>
+        this.pathRow(path, loads.get(path.id), snapshot.wireguardOnly, snapshot.gatewayReachable),
+      ),
     );
   }
 
@@ -224,14 +235,18 @@ export class NetworkDialog {
     }
   }
 
-  private pathRow(path: PathStatus, load: PathLoad | undefined, wireguardOnly: boolean): HTMLElement {
-    const score = Math.round(path.score * 100);
-    const details = [`RTT ${formatRtt(path.rttMs)}`, `loss ${formatLoss(path.loss)}`, ...formatPathLoad(load)];
+  private pathRow(path: PathStatus, load: PathLoad | undefined, wireguardOnly: boolean, known: boolean): HTMLElement {
+    // Without the gateway's answer the health figures are old: the row says so instead of showing them.
+    const score = known ? Math.round(path.score * 100) : 0;
+    const details = [
+      ...(known ? [`RTT ${formatRtt(path.rttMs)}`, `loss ${formatLoss(path.loss)}`] : ["health unknown"]),
+      ...formatPathLoad(load),
+    ];
     const off = isPathOff(path, wireguardOnly);
     if (off) {
       details.push("not used: WireGuard only is on");
     }
-    if (path.error !== null) {
+    if (path.error !== null && known) {
       details.push(path.error);
     }
     const main = h("div", { className: "row-main" }, [
@@ -241,7 +256,11 @@ export class NetworkDialog {
     const bar = h("div", { className: "score-bar", attrs: { style: `width: ${String(score)}%` } });
     let badge: { className: string; text: string } = { className: "state-stopped", text: "Off" };
     if (!off) {
-      badge = path.up ? { className: "state-playing", text: "Up" } : { className: "state-error", text: "Down" };
+      if (known) {
+        badge = path.up ? { className: "state-playing", text: "Up" } : { className: "state-error", text: "Down" };
+      } else {
+        badge = { className: "state-stopped", text: "Unknown" };
+      }
     }
     return h("li", { className: "row" }, [
       main,
