@@ -1,12 +1,4 @@
-import type {
-  PathStatus,
-  PathStrategyName,
-  PeerStats,
-  PipelineStatus,
-  StreamState,
-  StreamView,
-  PathAssignment,
-} from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus, StreamState, StreamView, PathAssignment } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
@@ -16,46 +8,15 @@ import { sleep, waitAtMost } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { SourceWait } from "./source-wait.ts";
-import { StreamEngines, type MovedStream, type StreamEnginesDeps } from "./stream-engines.ts";
+import { StreamEngines, type MovedStream } from "./stream-engines.ts";
 import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
 import { StreamRecord } from "./stream-record.ts";
 import { streamView } from "./stream-view.ts";
 import type { StreamConfig } from "./stream-store.ts";
+import type { SupervisorDeps } from "./supervisor-deps.ts";
 
-export interface SupervisorSettings {
-  tickMs: number;
-  stallAfterMs: number;
-  startupGraceMs: number;
-  recoveryBaseDelayMs: number;
-  recoveryMaxDelayMs: number;
-  /**
-   * The first wait between tries while the broadcast sends nothing new (stale source); it doubles
-   * up to `recoveryMaxDelayMs`. 30 s when not given.
-   */
-  staleSourceRetryMs?: number;
-  handoverTimeoutMs: number;
-  pathStrategy: PathStrategyName;
-  pathMinDwellMs: number;
-}
-
-/** What a supervisor needs: its stream's engines' needs (see `StreamEngines`), and these. */
-export interface SupervisorDeps extends StreamEnginesDeps {
-  settings: SupervisorSettings;
-  /** Latest network path status from the gateway (empty when it is unreachable). */
-  paths: () => PathStatus[];
-  /** Whether the network policy lets engines use a path (the direct path is off with WireGuard only). */
-  pathAllowed?: (path: string) => boolean;
-  /** Number of running streams per path. */
-  pathLoad: () => ReadonlyMap<string, number>;
-  /** Whether streams share one engine per path (the setting can change at any time). */
-  sharedEngines?: () => boolean;
-  /** Whether streams keep hot standbys on the other paths (the setting can change at any time). */
-  hotStandby?: () => boolean;
-  /** Number of players showing this stream full screen. */
-  viewers?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-}
+export type { SupervisorDeps, SupervisorSettings } from "./supervisor-deps.ts";
 
 /**
  * Keeps one stream alive: owns its engine (or its place on its path's shared engine), playback
@@ -185,6 +146,11 @@ export class StreamSupervisor {
     this.record.update(stream);
   }
 
+  /**
+   * The user asked for a restart. It happens on the next check: a running stream restarts, and one
+   * that has no session yet (it is starting, or its last start failed) starts now instead of after
+   * the ladder's wait.
+   */
   requestRestart(): void {
     this.forceRestart = true;
   }
@@ -205,7 +171,12 @@ export class StreamSupervisor {
   async tick(): Promise<void> {
     await this.engines.expireSpare();
     if (this.engine === undefined || this.session === undefined) {
-      await this.bootstrap();
+      this.startNowIfAsked();
+      if (await this.bootstrap()) {
+        // A restart asked for while it started changes nothing: the stream just started, and a
+        // restart on the next check would replace the engine it started.
+        this.forceRestart = false;
+      }
       return;
     }
     if (this.forceRestart) {
@@ -293,6 +264,21 @@ export class StreamSupervisor {
     await this.runAction("restart-engine", "manual restart");
   }
 
+  /**
+   * A restart was asked for while there is no session to restart: the stream starts now, rather than
+   * when the ladder's wait after a failed start is over. The ladder starts over from there, like it
+   * does when a running stream restarts by hand.
+   */
+  private startNowIfAsked(): void {
+    if (!this.forceRestart) {
+      return;
+    }
+    this.forceRestart = false;
+    this.logger.info("manual restart; the stream has no session, starting it now");
+    this.recovery = { failures: 0, lastActionAt: undefined };
+    this.sourceWait.due();
+  }
+
   private schedule(delayMs: number): void {
     if (!this.running) {
       return;
@@ -322,22 +308,22 @@ export class StreamSupervisor {
     return { engine, session, pipeline, path: this.stream.path };
   }
 
-  private async bootstrap(): Promise<void> {
+  /** Starts the stream's engine and session. Returns true once the stream started. */
+  private async bootstrap(): Promise<boolean> {
     if (this.recovery.lastActionAt !== undefined) {
       const { notBefore } = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), false);
       if (this.now() < notBefore) {
-        return;
+        return false;
       }
     }
     try {
       if (this.paths.noneUsable()) {
         // No engine until there is a path for it: the gateway would only block it.
         this.setState("stalled", this.paths.waitingMessage());
-        return;
+        return false;
       }
       if (this.sharing) {
-        await this.bootstrapShared();
-        return;
+        return await this.bootstrapShared();
       }
       this.setState(this.sourceWait.state("starting"), "starting engine");
       this.engine = await this.engines.startOwn(this.engine, async (starting) => {
@@ -349,32 +335,35 @@ export class StreamSupervisor {
       }
       this.setState(this.sourceWait.state("starting"), "opening stream");
       await this.startPlayback(this.engine);
+      return true;
     } catch (error) {
       this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
       this.setState(this.sourceWait.state("error"), describeError(error));
       this.logger.warn({ err: error }, "could not start stream");
+      return false;
     } finally {
       this.bootstrapped = true;
     }
   }
 
-  /** Starts the stream on its path's shared engine. */
-  private async bootstrapShared(): Promise<void> {
+  /** Starts the stream on its path's shared engine. Returns true once the stream started. */
+  private async bootstrapShared(): Promise<boolean> {
     if (!this.paths.known) {
       // The shared engine to use depends on the path.
       this.setState(this.sourceWait.state("starting"), "waiting for the network gateway");
-      return;
+      return false;
     }
     const path = this.paths.forStart(this.stream.path, this.recovery.failures);
     if (path === undefined) {
       this.setState(this.sourceWait.state("stalled"), this.paths.waitingMessage());
-      return;
+      return false;
     }
     this.setState(this.sourceWait.state("starting"), "starting engine");
     this.engine = await this.engines.startShared(path, this.engine);
     await this.record.persistPath(path);
     this.setState(this.sourceWait.state("starting"), "opening stream");
     await this.startPlayback(this.engine);
+    return true;
   }
 
   /** Moves the stream to the kind of engine the setting asks for (see `StreamEngines.moveToWanted`). */

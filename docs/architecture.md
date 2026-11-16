@@ -80,6 +80,8 @@ When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over 
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this. On a [shared engine](#shared-engines), the engine restart steps only restart the stream's session.
 
+**Restart stream** in the UI acts on the next check, whatever the stream is doing. A stream that plays or stalls restarts its engine (or on a shared engine, its session) and the ladder's delays start over. A stream that has no session yet, because it is still starting or its last start failed, starts at once instead of waiting out the delay after that failure, and the delays start over from there. A restart asked for while the stream is starting, and then starts, is dropped: the engine it just started isn't replaced.
+
 ### Stale sources
 
 A broadcast that stops doesn't look like a stall to the engine. The engine keeps its peers, keeps answering, and keeps serving the window it already has, and so do peers that have the same window. A new session gets that old window too: it plays for a few seconds, then stops. Restarting on every stall therefore loops forever and shows old video each time. Only the engine's **live edge** tells: `livepos.last` in the session's stats, the newest data of the broadcast the engine knows of.
