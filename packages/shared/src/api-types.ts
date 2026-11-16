@@ -135,7 +135,7 @@ export interface Snapshot {
   /**
    * The network gateway's paths and their health. While it doesn't answer (it restarts, or a poll
    * timed out) these are the paths of its last answer, none before it first answered: see
-   * `gatewayReachable`.
+   * `gatewayReachable`. A profile removed meanwhile stays among them until it answers.
    */
   paths: PathStatus[];
   /**

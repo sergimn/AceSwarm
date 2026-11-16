@@ -164,7 +164,7 @@ export class Orchestrator {
     return {
       generatedAt: new Date().toISOString(),
       streams: this.deps.store.list().map((stream) => this.view(stream)),
-      paths: this.gatewayReachable ? this.paths : this.lastKnownPaths,
+      paths: this.lastKnownPaths,
       gatewayReachable: this.gatewayReachable,
       pathStrategy: this.deps.settings.pathStrategy,
       wireguardOnly: this.deps.policy.get().wireguardOnly,

@@ -58,7 +58,6 @@ export class NetworkDialog {
     this.strategy = h("p", { className: "muted" });
     this.gatewayNotice = h("p", {
       className: "notice",
-      text: "The network gateway isn't answering, so the health of the paths below isn't known.",
       attrs: { role: "status", hidden: true },
     });
     // A switch, not a disabled control: a disabled button can't take focus, and remote users
@@ -183,6 +182,10 @@ export class NetworkDialog {
     }
     this.renderWireguardOnly();
     this.gatewayNotice.hidden = snapshot.gatewayReachable;
+    this.gatewayNotice.textContent =
+      snapshot.paths.length > 0
+        ? "The network gateway isn't answering, so the health of the paths below isn't known."
+        : "The network gateway isn't answering, so the network paths aren't known.";
     const loads = pathLoads(snapshot.streams);
     this.paths.replaceChildren(
       ...snapshot.paths.map((path) =>
@@ -265,7 +268,7 @@ export class NetworkDialog {
     }
     return h("li", { className: "row" }, [
       main,
-      h("div", { className: "score", attrs: { title: `Score ${String(score)}/100` } }, [bar]),
+      h("div", { className: "score", attrs: { title: known ? `Score ${String(score)}/100` : "Score unknown" } }, [bar]),
       h("span", { className: `badge ${badge.className}`, text: badge.text }),
     ]);
   }

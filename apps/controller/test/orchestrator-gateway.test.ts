@@ -35,10 +35,13 @@ function path(id: string, up: boolean): PathStatus {
 /** An orchestrator without streams, whose network gateway answers with `answer` until it is told to fail. */
 async function orchestratorWithGateway(answer: PathStatus[]) {
   const dataDir = await mkdtemp(join(tmpdir(), "aceswarm-gateway-"));
-  const gateway = { failing: false, answer };
+  const gateway = { failing: false, answer, syncs: 0 };
   const netgw = {
     paths: () => (gateway.failing ? Promise.reject(new Error("timed out")) : Promise.resolve(gateway.answer)),
-    sync: () => Promise.resolve([]),
+    sync: () => {
+      gateway.syncs += 1;
+      return Promise.resolve([]);
+    },
     reload: () => Promise.resolve(),
   } as unknown as NetgwClient;
   const engines = {
@@ -105,6 +108,12 @@ test("a gateway that stops answering leaves the paths it last reported and says 
   });
   // Not "0 paths": they are there, only their health is unknown.
   expect(orchestrator.snapshot().paths.map((candidate) => candidate.id)).toEqual(["direct", "wg:mullvad-de"]);
+
+  // The controller itself still acts on what the gateway says now, not on its last answer: it
+  // sends no assignments while the gateway is away (they are sent after each answer).
+  const syncs = gateway.syncs;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  expect(gateway.syncs).toBe(syncs);
 
   // The next answer is the truth again, whatever the last one was.
   gateway.answer = [path("direct", true), path("wg:mullvad-de", false)];
