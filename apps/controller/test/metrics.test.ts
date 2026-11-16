@@ -104,10 +104,12 @@ test("exports the age of a stream's last frame while it runs, not once it is sto
     standbys: [],
   };
   let streams = [stream];
+  let since = 0;
   new ControllerMetrics(
     registry,
     () => ({ streams, paths: [] }),
     () => [],
+    { runningSince: () => since },
   );
   const age = async (): Promise<number | undefined> => {
     const match = /^aceswarm_stream_last_frame_age_seconds\{stream="s1"\} (\S+)$/m.exec(await registry.metrics());
@@ -121,4 +123,13 @@ test("exports the age of a stream's last frame while it runs, not once it is sto
   streams = [{ ...stream, enabled: false, state: "stopped", path: null }];
   expect(await age()).toBeUndefined();
   expect(await registry.metrics()).not.toContain('aceswarm_stream_path{stream="s1"');
+
+  // Enabled again a minute ago: the time since its last frame, from before it was disabled, is no
+  // outage. Its age is back with the first video of the new run, and stays when that run recovers.
+  since = Date.now() - 60_000;
+  streams = [{ ...stream, state: "starting" }];
+  expect(await age()).toBeUndefined();
+  streams = [{ ...stream, state: "recovering", lastFrameAt: new Date(Date.now() - 30_000).toISOString() }];
+  expect(await age()).toBeGreaterThanOrEqual(30);
+  expect(await age()).toBeLessThan(40);
 });

@@ -181,6 +181,7 @@ test("a disabled stream says when it last had video, is on no path and can't be 
   expect(disabled).toMatchObject({ enabled: false, state: "stopped", path: null, engine: null });
   expect(Date.parse(disabled?.lastFrameAt ?? "")).toBeGreaterThanOrEqual(playedAt);
   expect(orchestrator.restartStream(added.id)).toBe(false);
+  expect(orchestrator.runningSince(added.id)).toBeUndefined();
 
   // The frames that came between the last check and the stop count too: the stream ends up with
   // the last frame time its pipeline ever reported.
@@ -201,9 +202,11 @@ test("a disabled stream says when it last had video, is on no path and can't be 
     path: null,
   });
 
-  // Enabled again, it shows that time until its new pipeline has video.
+  // Enabled again, it shows that time until its new pipeline has video. It is from before this run.
+  expect(restarted.orchestrator.runningSince(added.id)).toBeUndefined();
   const enabled = await restarted.orchestrator.updateStream(added.id, { enabled: true });
   expect(enabled).toMatchObject({ enabled: true, lastFrameAt: stopped });
+  expect(restarted.orchestrator.runningSince(added.id)).toBeGreaterThanOrEqual(Date.parse(stopped ?? ""));
   await vi.waitFor(() => {
     const now = restarted.orchestrator.getStream(added.id);
     expect(now).toMatchObject({ state: "playing", path: "direct" });

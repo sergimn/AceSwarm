@@ -9,6 +9,8 @@ export interface MetricSources {
   sharedEngines?: () => SharedEngineView[];
   /** Engines running at the last sample; undefined before the first, or when it could not list them. */
   engines?: () => EngineCount | undefined;
+  /** When a stream was last started (see `Orchestrator.runningSince`); undefined while it is disabled. */
+  runningSince?: (stream: string) => number | undefined;
 }
 
 /** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
@@ -32,11 +34,17 @@ function setStandbyGauge(gauge: Gauge<"stream" | "path" | "state">, streams: Str
 
 /**
  * How long ago players could last get a new frame of a stream. A stopped stream keeps that time for
- * the UI, but it isn't expected to have video, so it has no age here.
+ * the UI, but it isn't expected to have video, so it has no age here. Nor has a stream that was
+ * started (`since`) after its last frame: the time it spent disabled, or the stack spent down, is
+ * no outage, and would dwarf every other stream's age until its first new frame.
  */
-function setFrameAge(gauge: Gauge<"stream">, stream: StreamView, now: number): void {
-  if (stream.lastFrameAt !== null && stream.state !== "stopped") {
-    gauge.set({ stream: stream.id }, Math.max(0, (now - Date.parse(stream.lastFrameAt)) / 1000));
+function setFrameAge(gauge: Gauge<"stream">, stream: StreamView, now: number, since = 0): void {
+  if (stream.lastFrameAt === null || stream.state === "stopped") {
+    return;
+  }
+  const lastFrameAt = Date.parse(stream.lastFrameAt);
+  if (lastFrameAt >= since) {
+    gauge.set({ stream: stream.id }, Math.max(0, (now - lastFrameAt) / 1000));
   }
 }
 
@@ -142,7 +150,7 @@ export class ControllerMetrics {
             state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
           }
           up.set(labels, stream.state === "playing" ? 1 : 0);
-          setFrameAge(frameAge, stream, now);
+          setFrameAge(frameAge, stream, now, sources.runningSince?.(stream.id));
           setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
           if (stream.peers.connected !== null) {
             peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
@@ -206,7 +214,9 @@ export class ControllerMetrics {
     });
     const frameAge = new Gauge({
       name: "aceswarm_stream_last_frame_age_seconds",
-      help: "Seconds since players could last get a new video frame of the stream; none while it is disabled",
+      help:
+        "Seconds since players could last get a new video frame of the stream; " +
+        "none while it is disabled, nor before its first video after it was started",
       labelNames: ["stream"],
       registers,
     });

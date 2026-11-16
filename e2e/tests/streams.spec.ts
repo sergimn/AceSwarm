@@ -172,7 +172,22 @@ test("disables a stream, says how long ago it had video, and plays it again once
   const enable = row.getByRole("button", { name: "Enable" });
   await expect(restart).toBeVisible();
   await expect(enable).toBeHidden();
+  // A double press: its second half lands on Enable, which takes Disable's place under the pointer
+  // once the controller answers, and must not undo the first. The page presses Enable the moment
+  // it is there, which a pointer driven from here could not time.
+  await page.evaluate(`(() => {
+    const row = [...document.querySelectorAll("dialog[open] .row")].find((item) => item.textContent.includes("${target!.aceId}"));
+    const second = [...row.querySelectorAll("button")].find((button) => button.textContent === "Enable");
+    new MutationObserver((records, observer) => {
+      if (!second.hidden) {
+        observer.disconnect();
+        second.click();
+        row.dataset.secondPress = "sent";
+      }
+    }).observe(row, { attributes: true, attributeFilter: ["hidden"], subtree: true });
+  })()`);
   await disable.click();
+  await expect(row).toHaveAttribute("data-second-press", "sent");
 
   // One Enable button takes the place of Restart and Disable (a disabled stream has nothing to
   // restart), exactly as wide as the two, and the focus of the press goes to it.

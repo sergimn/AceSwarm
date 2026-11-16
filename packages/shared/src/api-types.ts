@@ -70,8 +70,8 @@ export interface StreamView {
   downloadKBps: number | null;
   uploadKBps: number | null;
   /**
-   * Network path currently used by the stream's engine ("direct" or "wg:<profile>"); null before
-   * it has one, and while the stream is disabled.
+   * Network path of the stream's engine ("direct" or "wg:<profile>"), or the one it used last
+   * while the stream has no engine; null before it has one, and while the stream is disabled.
    */
   path: string | null;
   recoveries: number;

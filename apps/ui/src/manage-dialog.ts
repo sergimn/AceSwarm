@@ -7,6 +7,13 @@ import type { PreviewMode } from "./previews.ts";
 
 const KIND_LABELS = { "content-id": " · content ID", infohash: " · infohash", unknown: "" } as const;
 
+/**
+ * How long a row's Restart, Disable and Enable ignore presses after Enable took the place of the
+ * other two, or gave it back. The new button appears under the pointer and takes the focus, so the
+ * second half of a double press would land on it and undo the first.
+ */
+const SWAP_SETTLE_MS = 500;
+
 interface Row {
   element: HTMLElement;
   name: HTMLElement;
@@ -17,6 +24,8 @@ interface Row {
   restart: HTMLButtonElement;
   disable: HTMLButtonElement;
   enable: HTMLButtonElement;
+  /** When the pair last changed between its two looks (see `SWAP_SETTLE_MS`). */
+  swap: { at: number };
 }
 
 function hotStandbyHint(view: HotStandbyView | undefined, sharing: boolean): string {
@@ -245,6 +254,9 @@ export class ManageDialog {
     // button takes the place of Restart and Disable, so every button a remote lands on does
     // something. Focus follows to the button that is there now.
     const focused = document.activeElement;
+    if (row.enable.hidden !== stream.enabled) {
+      row.swap.at = performance.now();
+    }
     row.pair.classList.toggle("single", !stream.enabled);
     row.enable.hidden = stream.enabled;
     if (!stream.enabled && (focused === row.restart || focused === row.disable)) {
@@ -257,8 +269,13 @@ export class ManageDialog {
   private createRow(stream: StreamView): Row {
     const name = h("span", { className: "row-title" });
     const state = h("span", { className: "badge" });
+    const swap = { at: -Infinity };
+    const settled = (): boolean => performance.now() - swap.at >= SWAP_SETTLE_MS;
     const restart = h("button", { className: "button", attrs: { type: "button" } }, [icon("refresh"), "Restart"]);
     restart.addEventListener("click", () => {
+      if (!settled()) {
+        return;
+      }
       api
         .restartStream(stream.id)
         .then(() => {
@@ -269,6 +286,9 @@ export class ManageDialog {
         });
     });
     const setEnabled = (enabled: boolean): void => {
+      if (!settled()) {
+        return;
+      }
       api
         .updateStream(stream.id, { enabled })
         .then((updated) => {
@@ -286,7 +306,8 @@ export class ManageDialog {
     disable.addEventListener("click", () => {
       setEnabled(false);
     });
-    const enable = h("button", { className: "button", text: "Enable", attrs: { type: "button", hidden: true } });
+    const enable = h("button", { className: "button", text: "Enable", attrs: { type: "button" } });
+    enable.hidden = stream.enabled;
     enable.addEventListener("click", () => {
       setEnabled(true);
     });
@@ -296,6 +317,12 @@ export class ManageDialog {
       h("div", { className: "row-pair-buttons" }, [restart, disable]),
       enable,
     ]);
+    // A held OK or Enter key repeats, and each repeat would press whichever button is there by then.
+    pair.addEventListener("keydown", (event) => {
+      if (event.repeat && event.key === "Enter") {
+        event.preventDefault();
+      }
+    });
     const remove = confirmButton("Remove", "Press again to remove", async () => {
       await api.removeStream(stream.id);
       toast("Stream removed");
@@ -306,6 +333,6 @@ export class ManageDialog {
       state,
       h("div", { className: "row-actions" }, [pair, remove]),
     ]);
-    return { element, name, identifier, state, pair, restart, disable, enable };
+    return { element, name, identifier, state, pair, restart, disable, enable, swap };
   }
 }
