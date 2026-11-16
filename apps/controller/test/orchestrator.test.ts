@@ -48,6 +48,12 @@ const engine: EngineHandle = {
  * they start (or never, without `video`). `start()` gives a new one, as a controller restart does.
  */
 async function harness(video = true) {
+  /** What the fakes were asked to do, in order. */
+  const events: string[] = [];
+  /** Promises the fakes wait for before they answer, set by a test to hold something up. */
+  const holds: { teardown?: Promise<void>; stats?: Promise<void> | undefined } = {};
+  /** The `known` argument of every `removeOrphans` call. */
+  const orphanChecks: string[][] = [];
   const dataDir = await mkdtemp(join(tmpdir(), "aceswarm-orchestrator-"));
   const started: Orchestrator[] = [];
   // The orchestrators stop before their directory goes: stopping saves to it.
@@ -62,6 +68,7 @@ async function harness(video = true) {
   const reported = new Map<string, string>();
   const transcoder = {
     start: (id: string, input: { source: string }) => {
+      events.push(`start pipeline ${id}`);
       const pipeline: PipelineStatus = {
         id,
         state: "running",
@@ -89,19 +96,27 @@ async function harness(video = true) {
       reported.set(id, lastFrameAt);
       return Promise.resolve({ ...pipeline, lastFrameAt });
     },
-    stop: (id: string) => {
+    stop: async (id: string) => {
+      events.push(`stop pipeline ${id}`);
+      await holds.teardown;
       pipelines.delete(id);
-      return Promise.resolve();
     },
     setStandbys: () => Promise.resolve(undefined),
   } as unknown as TranscoderClient;
   const engines = {
     ensureImage: () => Promise.resolve(),
-    removeOrphans: () => Promise.resolve(0),
+    removeOrphans: (known: ReadonlySet<string>) => {
+      orphanChecks.push([...known]);
+      return Promise.resolve(0);
+    },
     find: () => Promise.resolve([]),
-    removeAllFor: () => Promise.resolve(),
+    removeAllFor: (streamId: string) => {
+      events.push(`remove engines ${streamId}`);
+      return Promise.resolve();
+    },
     remove: () => Promise.resolve(),
     create: async (streamId: string, generation: number, onAddress?: OnEngineAddress) => {
+      events.push(`create engine ${streamId}`);
       const handle = { ...engine, streamId, generation };
       await onAddress?.(handle);
       return handle;
@@ -112,7 +127,13 @@ async function harness(video = true) {
     startSession: (baseUrl: string) =>
       Promise.resolve({ playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` }),
     stopSession: () => Promise.resolve(),
-    stats: () => Promise.resolve({ status: "dl", peers: 3, speedDown: 400, speedUp: 0, downloaded: 0, uploaded: 0 }),
+    stats: async () => {
+      if (holds.stats !== undefined) {
+        events.push("stats held");
+      }
+      await holds.stats;
+      return { status: "dl", peers: 3, speedDown: 400, speedUp: 0, downloaded: 0, uploaded: 0 };
+    },
   } as unknown as AcestreamClient;
   const netgw = {
     paths: () => Promise.resolve([direct]),
@@ -162,7 +183,7 @@ async function harness(video = true) {
     await orchestrator.start();
     return { orchestrator, store };
   };
-  return { start, pipelines, reported };
+  return { start, pipelines, reported, events, holds, orphanChecks };
 }
 
 test("a disabled stream says when it last had video, is on no path and can't be restarted", async () => {
@@ -230,4 +251,175 @@ test("a stream that never had video has no last frame time, also once it is disa
     expect(store.get(added.id)?.session).toBeNull();
   });
   expect(orchestrator.getStream(added.id)?.lastFrameAt).toBeNull();
+});
+
+/** The stream added and playing, with the events of getting there forgotten. */
+async function playingStream(setup: Awaited<ReturnType<typeof harness>>) {
+  const { orchestrator, store } = await setup.start();
+  const added = await orchestrator.addStream({ aceId: ACE_ID });
+  await vi.waitFor(() => {
+    expect(orchestrator.getStream(added.id)).toMatchObject({ state: "playing", path: "direct" });
+  });
+  setup.events.length = 0;
+  return { orchestrator, store, id: added.id };
+}
+
+const waitingMessage = "waiting for the previous run to stop";
+
+test("a stream enabled while its previous run is still being torn down starts behind it", async () => {
+  const setup = await harness();
+  const { orchestrator, id } = await playingStream(setup);
+  const { events, holds } = setup;
+
+  // The teardown is held up, as one is behind a step in progress when the stream was disabled.
+  const teardown = Promise.withResolvers<undefined>();
+  holds.teardown = teardown.promise;
+  await orchestrator.updateStream(id, { enabled: false });
+  await vi.waitFor(() => {
+    expect(events).toContain(`stop pipeline ${id}`);
+  });
+
+  // Enabled again before it ended: it says what it waits for, and starts nothing meanwhile.
+  const enabled = await orchestrator.updateStream(id, { enabled: true });
+  expect(enabled).toMatchObject({ enabled: true, state: "starting", message: waitingMessage, engine: null });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(orchestrator.getStream(id)).toMatchObject({ state: "starting", message: waitingMessage });
+  expect(events).toEqual([`stop pipeline ${id}`]);
+
+  // Once the old run is gone, the new one starts its own engine and pipeline, and plays without a
+  // recovery: nothing of the old one is taken over, and nothing of the new one is removed.
+  teardown.resolve(undefined);
+  await vi.waitFor(() => {
+    expect(orchestrator.getStream(id)).toMatchObject({ state: "playing", path: "direct", recoveries: 0 });
+  });
+  expect(events).toEqual([
+    `stop pipeline ${id}`,
+    `remove engines ${id}`,
+    `create engine ${id}`,
+    `start pipeline ${id}`,
+  ]);
+});
+
+test("a stream enabled and disabled again while it waits for its previous run is torn down after it", async () => {
+  const setup = await harness();
+  const { orchestrator, id } = await playingStream(setup);
+  const { events, holds } = setup;
+  const teardown = Promise.withResolvers<undefined>();
+  holds.teardown = teardown.promise;
+  await orchestrator.updateStream(id, { enabled: false });
+  await vi.waitFor(() => {
+    expect(events).toContain(`stop pipeline ${id}`);
+  });
+
+  await orchestrator.updateStream(id, { enabled: true });
+  const disabled = await orchestrator.updateStream(id, { enabled: false });
+  expect(disabled).toMatchObject({ enabled: false, state: "stopped" });
+  teardown.resolve(undefined);
+
+  // Nothing started in between, and the second teardown, which has nothing to remove, also ran.
+  await vi.waitFor(() => {
+    expect(events.filter((event) => event === `stop pipeline ${id}`)).toHaveLength(2);
+  });
+  expect(events.filter((event) => event.startsWith("create") || event.startsWith("start"))).toEqual([]);
+  expect(orchestrator.getStream(id)).toMatchObject({ enabled: false, state: "stopped" });
+  expect(orchestrator.runningSince(id)).toBeUndefined();
+});
+
+test("a stream disabled again while it waits keeps the last video time its previous run saved", async () => {
+  const setup = await harness();
+  const { orchestrator, store, id } = await playingStream(setup);
+  const { events, holds } = setup;
+
+  // A step of the run is in progress when the stream is disabled and enabled again.
+  const step = Promise.withResolvers<undefined>();
+  holds.stats = step.promise;
+  await vi.waitFor(() => {
+    expect(events).toContain("stats held");
+  });
+  await orchestrator.updateStream(id, { enabled: false });
+  await orchestrator.updateStream(id, { enabled: true });
+  const known = store.get(id)?.lastFrameAt ?? "";
+
+  // The step ends and the run saves the last video it saw, then its teardown is held up.
+  const teardown = Promise.withResolvers<undefined>();
+  holds.teardown = teardown.promise;
+  holds.stats = undefined;
+  step.resolve(undefined);
+  await vi.waitFor(() => {
+    expect(events).toContain(`stop pipeline ${id}`);
+  });
+  const saved = store.get(id)?.lastFrameAt ?? "";
+  expect(Date.parse(saved)).toBeGreaterThan(Date.parse(known));
+
+  // The new run never started, so it knows of no newer video than it was created with: disabling
+  // it again must not set the time back.
+  await orchestrator.updateStream(id, { enabled: false });
+  expect(store.get(id)?.lastFrameAt).toBe(saved);
+  teardown.resolve(undefined);
+});
+
+test("a removed stream's engines are removed after its teardown in progress", async () => {
+  const setup = await harness();
+  const { orchestrator, id } = await playingStream(setup);
+  const { events, holds } = setup;
+  const teardown = Promise.withResolvers<undefined>();
+  holds.teardown = teardown.promise;
+  await orchestrator.updateStream(id, { enabled: false });
+  await vi.waitFor(() => {
+    expect(events).toContain(`stop pipeline ${id}`);
+  });
+
+  expect(await orchestrator.removeStream(id)).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(events).toEqual([`stop pipeline ${id}`]);
+  teardown.resolve(undefined);
+  await vi.waitFor(() => {
+    expect(events).toEqual([`stop pipeline ${id}`, `remove engines ${id}`, `remove engines ${id}`]);
+  });
+});
+
+test("shutting down waits a moment for a teardown in progress, not for ever", async () => {
+  const setup = await harness();
+  const { orchestrator, id } = await playingStream(setup);
+  const { events, holds } = setup;
+  const teardown = Promise.withResolvers<undefined>();
+  holds.teardown = teardown.promise;
+  await orchestrator.updateStream(id, { enabled: false });
+  await vi.waitFor(() => {
+    expect(events).toContain(`stop pipeline ${id}`);
+  });
+
+  // One that ends in time is waited for.
+  setTimeout(() => {
+    teardown.resolve(undefined);
+  }, 50);
+  await orchestrator.stop();
+  expect(events).toContain(`remove engines ${id}`);
+
+  // One that doesn't is not (the harness stops waiting after half a second).
+  const stuck = Promise.withResolvers<undefined>();
+  holds.teardown = stuck.promise;
+  const { orchestrator: restarted } = await setup.start();
+  await restarted.updateStream(id, { enabled: true });
+  await vi.waitFor(() => {
+    expect(restarted.getStream(id)).toMatchObject({ state: "playing" });
+  });
+  await restarted.updateStream(id, { enabled: false });
+  const started = Date.now();
+  await restarted.stop();
+  expect(Date.now() - started).toBeLessThan(5000);
+  stuck.resolve(undefined);
+});
+
+test("a starting controller removes the engines of disabled streams as well as deleted ones", async () => {
+  const setup = await harness();
+  const { orchestrator } = await setup.start();
+  const one = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
+  const two = await orchestrator.addStream({ aceId: "b".repeat(40), name: "Two" });
+  await orchestrator.updateStream(two.id, { enabled: false });
+  await orchestrator.stop();
+
+  setup.orphanChecks.length = 0;
+  await setup.start();
+  expect(setup.orphanChecks).toEqual([[one.id]]);
 });
