@@ -13,8 +13,15 @@ export function usablePaths(snapshot: Pick<Snapshot, "paths" | "wireguardOnly">)
   return snapshot.paths.filter((path) => !isPathOff(path, snapshot.wireguardOnly));
 }
 
-/** The top bar's count of the paths streams may use that are up, such as "1/2 network paths up". */
-export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly">): string {
+/**
+ * The top bar's count of the paths streams may use that are up, such as "1/2 network paths up". It
+ * says so when the gateway doesn't answer: the paths are there and the streams may play on them,
+ * but nobody knows their health, so "0/0" or "0/2" would be wrong.
+ */
+export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly" | "gatewayReachable">): string {
+  if (!snapshot.gatewayReachable) {
+    return "network gateway unreachable";
+  }
   const usable = usablePaths(snapshot);
   return `${String(usable.filter((path) => path.up).length)}/${String(usable.length)} network paths up`;
 }

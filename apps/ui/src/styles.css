@@ -642,6 +642,12 @@ p.form-error {
   font-size: 1em;
 }
 
+/* Empty, and so without height, while there is nothing to say. */
+.notice {
+  margin: 0;
+  color: var(--amber);
+}
+
 .setting {
   display: flex;
   flex-wrap: wrap;
