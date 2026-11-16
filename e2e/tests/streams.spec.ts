@@ -46,7 +46,7 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   // The broadcast runner is the peer, placed in Spain (GEOIP_STATIC in e2e/compose.e2e.yaml).
   await expect(stats.locator(".country-code")).toHaveText(["ES"]);
   await expect(stats.locator(".fi.fi-es")).toBeAttached();
-  await expect(stats.locator(".stat", { hasText: "Download" })).toContainText(/KB\/s|MB\/s/);
+  await expect(stats.locator(".stat", { hasText: "Download" })).toContainText(/KiB\/s|MiB\/s/);
 
   // A bare value (acestream:// links carry one) is tried as a content ID first, which works here.
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === contentId);
@@ -244,6 +244,13 @@ test("disables a stream, says how long ago it had video, and plays it again once
   const enable = row.getByRole("button", { name: "Enable" });
   await expect(restart).toBeVisible();
   await expect(enable).toBeHidden();
+  // Every change of the stream the page asks for, to tell that the double press below sent one.
+  const patches: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "PATCH" && new URL(request.url()).pathname === `/api/streams/${id}`) {
+      patches.push(request.postData() ?? "");
+    }
+  });
   // A double press: its second half lands on Enable, which takes Disable's place under the pointer
   // once the controller answers, and must not undo the first. The page presses Enable the moment
   // it is there, which a pointer driven from here could not time.
@@ -260,11 +267,15 @@ test("disables a stream, says how long ago it had video, and plays it again once
   })()`);
   await disable.click();
   await expect(row).toHaveAttribute("data-second-press", "sent");
+  // Only the first half asked for anything: the row ignores a press that lands as its buttons swap.
+  expect(patches, "the second half of the double press changed the stream too").toEqual(['{"enabled":false}']);
 
   // One Enable button takes the place of Restart and Disable (a disabled stream has nothing to
   // restart), exactly as wide as the two, and the focus of the press goes to it.
   await expect(row.locator(".badge")).toHaveText("Disabled");
   await expect(enable).toBeFocused();
+  // Nothing followed late either.
+  expect(patches).toEqual(['{"enabled":false}']);
   await expect(restart).toBeHidden();
   await expect(disable).toBeHidden();
   const width = async (selector: string) => (await row.locator(selector).boundingBox())?.width;

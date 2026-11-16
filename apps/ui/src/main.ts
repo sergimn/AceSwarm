@@ -5,13 +5,12 @@ import { AddStreamDialog } from "./add-stream-dialog.ts";
 import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { onTick, startClock } from "./clock.ts";
 import { errorMessage, placeToasts, setText, toast } from "./dom.ts";
-import { formatDisabledCount, shownState } from "./format.ts";
 import { Grid } from "./grid.ts";
 import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
-import { formatPathsUp } from "./paths.ts";
+import { formatSummary } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
 import { WatchReporter } from "./watch.ts";
@@ -108,15 +107,7 @@ class App {
     this.showConnection(time);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
-    const live = snapshot.streams.filter((stream) => shownState(stream) === "playing").length;
-    this.summary.textContent = [
-      `${String(snapshot.streams.length)} streams`,
-      `${String(live)} live`,
-      formatDisabledCount(snapshot.streams),
-      formatPathsUp(snapshot),
-    ]
-      .filter((part) => part !== undefined)
-      .join(" · ");
+    this.summary.textContent = formatSummary(snapshot);
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
       return;

@@ -304,7 +304,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       error: data.has(source) ? null : (fakes.standbyError?.value ?? null),
       liveEdge:
         fakes.standbyStale?.on === true
-          ? { state: "stale", edgeAt: null, advancedAt: null, behindSeconds: null }
+          ? { state: "stale", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null }
           : null,
     }));
   };
@@ -1497,6 +1497,7 @@ function stale(now: number): LiveEdgeView {
     state: "stale",
     edgeAt: new Date(0).toISOString(),
     advancedAt: new Date(now - 61_000).toISOString(),
+    quietSince: new Date(now - 61_000).toISOString(),
     behindSeconds: 0,
   };
 }
@@ -1587,7 +1588,7 @@ describe("a broadcast that sends nothing new (stale source)", () => {
     expect(fake.instance.view().state).toBe("stale-source");
 
     // A try while it waits shows as waiting for the broadcast, not as a start.
-    liveEdge.value = { state: "waiting", edgeAt: null, advancedAt: null, behindSeconds: null };
+    liveEdge.value = { state: "waiting", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null };
     fake.clock.now += 1000;
     await fake.instance.tick();
     expect(fake.instance.view()).toMatchObject({
@@ -1595,7 +1596,7 @@ describe("a broadcast that sends nothing new (stale source)", () => {
       message: "waiting for the broadcast; waiting for video",
     });
 
-    liveEdge.value = { state: "live", edgeAt: null, advancedAt: null, behindSeconds: 0 };
+    liveEdge.value = { state: "live", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: 0 };
     video.on = true;
     fake.clock.now += 1000;
     await fake.instance.tick();
@@ -1697,6 +1698,26 @@ describe("sharing one engine per path", () => {
     expect(fake.instance.view().message).toContain("replacing the shared engine");
   });
 
+  test("keeps counting how long the broadcast sent nothing new when a retry opens on a newer window", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    const lastNewData = fake.clock.now;
+
+    // The broadcast stopped. Eleven minutes later a retry's session, which started a minute ago,
+    // is stale too: its own edge was first seen then, but nothing new came since the broadcast stopped.
+    video.on = false;
+    fake.clock.now += 660_000;
+    liveEdge.value = { ...stale(fake.clock.now), quietSince: new Date(lastNewData).toISOString() };
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({
+      state: "stale-source",
+      message: expect.stringContaining("no new data from the broadcast for 11m;") as string,
+    });
+  });
+
   test("doesn't blame the shared engine for a broadcast that sends nothing new", async () => {
     const pool = sharedEngines();
     const liveEdge: { value: LiveEdgeView | null } = { value: null };
@@ -1706,6 +1727,7 @@ describe("sharing one engine per path", () => {
       state: "stale",
       edgeAt: null,
       advancedAt: new Date(fake.clock.now - 61_000).toISOString(),
+      quietSince: new Date(fake.clock.now - 61_000).toISOString(),
       behindSeconds: 0,
     };
     await stallAndRecover(fake, 3);

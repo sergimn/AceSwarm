@@ -10,6 +10,7 @@ function edge(state: LiveEdgeView["state"], edgeAtSeconds: number | null): LiveE
     state,
     edgeAt: edgeAtSeconds === null ? null : new Date(edgeAtSeconds * 1000).toISOString(),
     advancedAt: null,
+    quietSince: null,
     behindSeconds: 0,
   };
 }

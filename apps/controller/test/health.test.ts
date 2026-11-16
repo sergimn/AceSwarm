@@ -74,11 +74,12 @@ describe("evaluateHealth", () => {
   });
 });
 
-function stale(advancedAt: number, behindSeconds = 0): PipelineStatus["liveEdge"] {
+function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): PipelineStatus["liveEdge"] {
   return {
     state: "stale",
     edgeAt: new Date(advancedAt).toISOString(),
     advancedAt: new Date(advancedAt).toISOString(),
+    quietSince: new Date(quietSince).toISOString(),
     behindSeconds,
   };
 }
@@ -93,13 +94,22 @@ describe("a source whose live edge stopped", () => {
     });
   });
 
+  it("counts how long the broadcast sent nothing new from when it last did, not from a retry's own edge", () => {
+    // A retry's session started 61 s ago on a slightly later end of the old window, but the
+    // broadcast has been quiet for 11 minutes.
+    const retried = pipeline({ liveEdge: stale(NOW - 61_000, 0, NOW - 660_000) });
+    expect(evaluateHealth(inputs({ pipeline: retried })).reason).toBe("no new data from the broadcast for 11m");
+  });
+
   it("says when the engine serves the broadcast far behind its live edge", () => {
     const late = pipeline({ liveEdge: stale(NOW - 1000, 75) });
     expect(evaluateHealth(inputs({ pipeline: late })).reason).toBe("the engine serves the broadcast 75s late");
   });
 
   it("waits for video while a new source's live edge has not moved yet", () => {
-    const waiting = pipeline({ liveEdge: { state: "waiting", edgeAt: null, advancedAt: null, behindSeconds: null } });
+    const waiting = pipeline({
+      liveEdge: { state: "waiting", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null },
+    });
     expect(evaluateHealth(inputs({ pipeline: waiting })).state).toBe("starting");
   });
 });

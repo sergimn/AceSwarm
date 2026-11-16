@@ -78,6 +78,19 @@ describe("streamView", () => {
     expect(view(false)).toMatchObject({ connected: null, active: 2, uploading: 1 });
   });
 
+  it("leaves figures the engine's answer left out unknown", () => {
+    const silent: EngineStats = {
+      status: "prebuf",
+      peers: null,
+      speedDown: null,
+      speedUp: null,
+      downloaded: null,
+      uploaded: null,
+    };
+    const view = streamView(stream, 0, { ...live(12, 1), stats: silent });
+    expect(view).toMatchObject({ downloadKBps: null, uploadKBps: null, peers: { connected: null, uploading: 1 } });
+  });
+
   it("gives the countries of the engine's sending peers as the gateway counted them", () => {
     const countries = ["ES", "FR", "DE", "NL", "IT"].map((code, index) => ({ code, count: 5 - index }));
     const view = streamView(stream, 0, { ...live(12, 1), peers: { ...peers, countries } });

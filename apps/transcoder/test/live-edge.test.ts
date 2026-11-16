@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LiveEdge, parseLiveSample, type LiveSample } from "../src/live-edge.ts";
+import { LiveEdge, parseLiveSample, type LiveEdgeSeed, type LiveSample } from "../src/live-edge.ts";
 
 const SETTINGS = { staleAfterMs: 60_000, noLiveAfterPolls: 3 };
 
@@ -7,8 +7,8 @@ function sample(last: number | undefined, downloaded: number, pos = last): LiveS
   return { status: "dl", downloaded, last, pos };
 }
 
-function edgeWithClock(seed?: { edge: number; since: number }): { edge: LiveEdge; clock: { now: number } } {
-  const clock = { now: 1_000_000 };
+function edgeWithClock(seed?: LiveEdgeSeed, start = 1_000_000): { edge: LiveEdge; clock: { now: number } } {
+  const clock = { now: start };
   return { edge: new LiveEdge(SETTINGS, () => clock.now, seed), clock };
 }
 
@@ -193,6 +193,85 @@ describe("LiveEdge", () => {
       edge.failed();
     }
     expect(edge.state()).toBe("stale");
+  });
+});
+
+const iso = (ms: number): string => new Date(ms).toISOString();
+
+describe("when the broadcast last had new data (quietSince)", () => {
+  it("is the last time a live session's edge moved, and a later session does not start it over", () => {
+    const first = edgeWithClock();
+    feed(first.edge, first.clock, [5000, 5001, 5002, 5003]);
+    const lastMove = first.clock.now;
+    expect(first.edge.state()).toBe("live");
+    expect(first.edge.view().quietSince).toBe(iso(lastMove));
+
+    // The broadcast stopped. Ten minutes later a retry's peers know of an end of the old window a
+    // few seconds later than the first session saw, and its edge never moves again.
+    const { edge, clock } = edgeWithClock(first.edge.snapshot(), lastMove + 600_000);
+    edge.observe(sample(5006, 100));
+    expect(edge.view()).toMatchObject({ state: "waiting", advancedAt: iso(clock.now), quietSince: iso(lastMove) });
+    clock.now += 61_000;
+    expect(edge.state()).toBe("stale");
+    // The session's own edge was first seen 61 s ago; the broadcast has been quiet for 11 minutes.
+    expect(edge.view()).toMatchObject({ advancedAt: iso(clock.now - 61_000), quietSince: iso(lastMove) });
+  });
+
+  it("goes on from the first time any session of the stream saw an edge, while none was live", () => {
+    const first = edgeWithClock();
+    first.edge.observe(sample(5000, 100));
+    const seen = first.clock.now;
+    first.clock.now += 61_000;
+    expect(first.edge.state()).toBe("stale");
+
+    // A session that has no live position yet passes the seed on as it is.
+    const silent = edgeWithClock(first.edge.snapshot(), seen + 300_000);
+    silent.edge.observe({ status: "prebuf", downloaded: 0, last: undefined, pos: undefined });
+    const { edge, clock } = edgeWithClock(silent.edge.snapshot(), seen + 600_000);
+    edge.observe(sample(5006, 100));
+    clock.now += 61_000;
+    expect(edge.state()).toBe("stale");
+    expect(edge.view().quietSince).toBe(iso(seen));
+  });
+
+  it("goes on through a session that starts far behind the stream's edge, as after the broadcaster's clock jumped back", () => {
+    const first = edgeWithClock();
+    feed(first.edge, first.clock, [9000, 9001, 9002, 9003]);
+    const lastMove = first.clock.now;
+    const { edge, clock } = edgeWithClock(first.edge.snapshot(), lastMove + 600_000);
+    edge.observe(sample(5000, 100));
+    expect(edge.view().quietSince).toBe(iso(lastMove));
+    clock.now += 61_000;
+    expect(edge.state()).toBe("stale");
+    expect(edge.view().quietSince).toBe(iso(lastMove));
+  });
+
+  it("does not move for an edge that only catches up on the old window", () => {
+    const first = edgeWithClock();
+    feed(first.edge, first.clock, [5000, 5001, 5002, 5003]);
+    const lastMove = first.clock.now;
+    const { edge, clock } = edgeWithClock(first.edge.snapshot(), lastMove + 600_000);
+    // Its edge rises past the stream's, but faster than time passes, and then stops.
+    feed(edge, clock, [5000, 5010, 5020, 5030]);
+    expect(edge.state()).toBe("waiting");
+    expect(edge.view().quietSince).toBe(iso(lastMove));
+  });
+
+  it("moves to now once a session of the stream is live again, and stays with its last move after that", () => {
+    const first = edgeWithClock();
+    feed(first.edge, first.clock, [5000, 5001, 5002, 5003]);
+    const { edge, clock } = edgeWithClock(first.edge.snapshot(), first.clock.now + 600_000);
+    feed(edge, clock, [5400, 5401, 5402, 5403, 5404]);
+    expect(edge.state()).toBe("live");
+    expect(edge.view().quietSince).toBe(iso(clock.now));
+    const lastMove = clock.now;
+    clock.now += 61_000;
+    expect(edge.state()).toBe("stale");
+    expect(edge.view().quietSince).toBe(iso(lastMove));
+  });
+
+  it("is null until an edge was seen", () => {
+    expect(edgeWithClock().edge.view().quietSince).toBeNull();
   });
 });
 

@@ -152,6 +152,7 @@ flowchart TB
 - **A runner that fails early.** While `mesh.sh join` waits for a peer's artifact, it also checks every 15 s or so whether that peer's job has ended. If it has, a required peer fails the join at once and an optional one is left out, instead of waiting out ten minutes for a runner that will never publish its address. Usually the failed runner has already cancelled the run by then; this covers the cases where it didn't, such as a crashed runner or a pull request from a fork, whose token can't cancel runs. A stack job whose join failed only waits for the runners it reached before then to fetch its `done`.
 - **A runner that can't join the mesh cancels the run.** If any step up to and including `mesh.sh join` fails on any of the four runners (most often hole punching: "no connectivity to …", or "STUN servers saw different public addresses" while finding the public UDP address), that job cancels the whole run (`gh run cancel`). Without `wg` or `source` nothing can run. Without a stack the other stack could still run its tests, but a run with a stack missing can't validate a change, so it is cancelled too, for a faster red result at the cost of the other stack's test result. All four jobs then usually show as cancelled, the one that cancelled included: look for the jobs with a failed step (a red ✗ on "Join the mesh" or earlier). Between `wg` and `source` a failed hole punch fails on both ends, so there can be more than one: start with the one whose step failed first. Failures after the mesh is up don't cancel anything, so one stack's failing tests never stop the other's.
 - **Re-runs.** Use "Re-run all jobs". Re-running a single job can't work, because it would wait for runners that are gone.
+- **A run that stops at a runner's NAT re-runs by itself.** When a finished run has a job whose "Find this runner's public UDP address" step failed, the workflow **E2E retry** (`.github/workflows/e2e-retry.yml`) re-runs all its jobs, usually within a minute, and again after each attempt that stops there, up to 30 attempts per run. Which runners get a NAT that can't hole punch is a matter of luck, so a run often needs several attempts. It leaves every other failure alone (a build, a test, or "Join the mesh"), and also a run that a newer one for the same branch has replaced, because re-running that would cancel the newer one. Each of its own runs says what it decided, in a notice on its summary page.
 
 ## The broadcasts
 
@@ -409,7 +410,7 @@ sequenceDiagram
 
 - **Each job's last step prints its logs:** the mesh (`wg show`), the WireGuard server, or the broadcasts (tracker, ffmpeg and engine logs).
 - **Each stack job also uploads** `e2e-results-<docker|podman>-<attempt>` on failure: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine).
-- **"STUN servers saw different public addresses" in `mesh.sh prepare`** means that runner's NAT picks a port per destination, so it can't hole punch, and the run was cancelled. Recent runs often get at least one such runner; until the suite has a relay, re-run all jobs.
+- **"STUN servers saw different public addresses" in `mesh.sh prepare`** means that runner's NAT picks a port per destination, so it can't hole punch, and the run was cancelled. Recent runs often get at least one such runner. The **E2E retry** workflow re-runs the run by itself, up to 30 attempts (see "Workflow" above); after that, re-run all jobs by hand.
 - **"no connectivity to …" in `mesh.sh join`** means hole punching failed although STUN looked fine. Check that both STUN servers answered (two entries in `mappings` in each runner's "public UDP address" line): with one answer the check can't see a mismatch.
 - **Tests time out waiting for playback** while the mesh is fine: check the tracker log in the source job. Each engine should announce and get its source as a peer.
 
@@ -418,6 +419,7 @@ sequenceDiagram
 | File                                     | Role                                                                 |
 | ---------------------------------------- | -------------------------------------------------------------------- |
 | `.github/workflows/e2e.yml`              | the jobs                                                             |
+| `.github/workflows/e2e-retry.yml`        | re-runs a run that stopped at a runner's NAT                         |
 | `e2e/mesh.sh`                            | STUN, artifacts, the WireGuard mesh, file sharing                    |
 | `e2e/stun.ts`                            | minimal STUN client with keepalive                                   |
 | `e2e/vpn.sh`, `e2e/wg-server/`           | the WireGuard server under test                                      |

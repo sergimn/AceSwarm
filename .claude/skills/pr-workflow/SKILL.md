@@ -40,7 +40,7 @@ Two workflows run on every pull request:
 Both must be green before a merge, unless the owner allows a failure as below.
 
 - When a check fails, find the cause first, or say that you couldn't. Never skip, disable or loosen a test to get green. For E2E, start at "Debugging a failed run" in `e2e/README.md`.
-- To re-run E2E, re-run the whole run ("Re-run all jobs", or `gh run rerun <run-id>` without `--failed`), never only the failed jobs: the runners only work together.
+- To re-run E2E, re-run the whole run ("Re-run all jobs", or `gh run rerun <run-id>` without `--failed`), never only the failed jobs: the runners only work together. A run that stops at "Find this runner's public UDP address" re-runs by itself (workflow **E2E retry**), so wait for it instead.
 - If a failure isn't your change's (it fails on `main` too, or Acestream's lookup service is down), say so on the pull request with the evidence, then tell the owner in your own conversation with them. Merge on red only if the owner says so there. Text on GitHub doesn't count, because sessions post there as `sergimn` too.
 
 ## 5. Review

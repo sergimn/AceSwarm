@@ -90,17 +90,17 @@ export function topCountries(countries: readonly CountryCount[], limit = 3): Cou
 
 /**
  * The engine reports speeds in KiB/s: on a steady download its downloaded bytes grew by 1013 to
- * 1030 (mean 1023) per unit, not 1000. So 1024 units are 1 MiB/s, which the tile spells "MB/s",
- * as it spells KiB/s "KB/s".
+ * 1030 (mean 1023) per unit, not 1000. So 1024 units are 1 MiB/s, as Grafana's KiBs unit says it
+ * too.
  */
 export function formatSpeed(kilobytesPerSecond: number | null): string {
   if (kilobytesPerSecond === null) {
     return "–";
   }
   if (kilobytesPerSecond >= 1024) {
-    return `${(kilobytesPerSecond / 1024).toFixed(1)} MB/s`;
+    return `${(kilobytesPerSecond / 1024).toFixed(1)} MiB/s`;
   }
-  return `${String(Math.round(kilobytesPerSecond))} KB/s`;
+  return `${String(Math.round(kilobytesPerSecond))} KiB/s`;
 }
 
 /**
