@@ -224,10 +224,11 @@ export class EngineManager {
   }
 
   /**
-   * Removes engines of this stack whose stream is no longer configured. Shared engines belong to a
-   * path rather than a stream: `SharedEngines` removes the ones nobody uses.
+   * Removes engines of this stack whose stream is not in `keepStreamIds`: the ones of deleted
+   * streams, and of disabled ones (the caller passes the enabled streams). Shared engines belong to
+   * a path rather than a stream: `SharedEngines` removes the ones nobody uses.
    */
-  async removeOrphans(knownStreamIds: ReadonlySet<string>): Promise<number> {
+  async removeOrphans(keepStreamIds: ReadonlySet<string>): Promise<number> {
     const containers = await this.docker.listContainers({
       [STACK_LABEL]: this.options.stack,
       [ROLE_LABEL]: "engine",
@@ -238,7 +239,7 @@ export class EngineManager {
         continue;
       }
       const streamId = container.Labels[STREAM_LABEL];
-      if (streamId !== undefined && knownStreamIds.has(streamId)) {
+      if (streamId !== undefined && keepStreamIds.has(streamId)) {
         continue;
       }
       await this.remove({ containerId: container.Id, name: container.Names[0] ?? container.Id });

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AceIdKind } from "@aceswarm/shared/ace-id";
 import { z } from "zod";
 import { Mutex, readJsonFile, writeJsonFile } from "./json-file.ts";
+import { newestFrame } from "./stream-view.ts";
 
 const streamSchema = z.object({
   id: z.string().regex(/^[a-z0-9]{6,32}$/),
@@ -115,7 +116,11 @@ export class StreamStore {
       if (current === undefined) {
         return;
       }
-      const updated = streamSchema.parse({ ...current, ...patch });
+      // The last frame time only moves forward: whoever saves one may know less than the store does
+      // (a run waiting for the one before it, say, which saves a newer one as it ends).
+      const lastFrameAt =
+        patch.lastFrameAt === undefined ? current.lastFrameAt : newestFrame(current.lastFrameAt, patch.lastFrameAt);
+      const updated = streamSchema.parse({ ...current, ...patch, lastFrameAt });
       const next = [...this.streams];
       next[index] = updated;
       await this.persist(next);
