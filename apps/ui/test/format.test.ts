@@ -113,8 +113,11 @@ const stream = (enabled: boolean, state: "playing" | "stopped" | "starting") => 
 describe("small formatters", () => {
   it("formats speeds, latency and loss", () => {
     expect(formatSpeed(null)).toBe("–");
-    expect(formatSpeed(512.4)).toBe("512 KB/s");
-    expect(formatSpeed(1536)).toBe("1.5 MB/s");
+    expect(formatSpeed(512.4)).toBe("512 KiB/s");
+    // 1024 KiB/s are 1 MiB/s; an engine value of 3000, which Grafana shows as 2.93 MiB/s, is 2.9 here.
+    expect(formatSpeed(1024)).toBe("1.0 MiB/s");
+    expect(formatSpeed(1536)).toBe("1.5 MiB/s");
+    expect(formatSpeed(3000)).toBe("2.9 MiB/s");
     expect(formatRtt(12.6)).toBe("13 ms");
     expect(formatRtt(null)).toBe("–");
     expect(formatLoss(0.256)).toBe("26%");
