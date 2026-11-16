@@ -44,9 +44,11 @@ export interface ProbeTarget {
   id: string;
   kind: PathKind;
   label: string;
-  /** Source address for the probe; undefined uses the default route (direct path). */
-  sourceAddress: string | undefined;
-  /** WireGuard interface, used to read the handshake age. */
+  /**
+   * WireGuard interface of a tunnel path: the probe leaves through it and its handshake age is
+   * read from it. Undefined for the direct path, whose probe takes the default route. Tunnels are
+   * told apart by interface only, because profiles may share an Address.
+   */
   iface: string | undefined;
   /** Configuration problem that keeps the path down regardless of probes. */
   error: string | null;
@@ -81,7 +83,7 @@ export class Prober {
       const latest = parseLatestHandshake(output.stdout);
       handshakeAgeSeconds = latest === 0 ? null : Math.max(0, Math.round(this.now() / 1000 - latest));
     }
-    const ping = await this.ping(path.sourceAddress);
+    const ping = await this.ping(path.iface);
     const handshakeOk =
       path.iface === undefined || (handshakeAgeSeconds !== null && handshakeAgeSeconds <= this.handshakeMaxAgeSeconds);
     const up = ping.loss < 1 && handshakeOk;
@@ -102,13 +104,17 @@ export class Prober {
     };
   }
 
-  /** Pings the targets in order and returns the first that answers at all. */
-  private async ping(sourceAddress: string | undefined): Promise<PingResult> {
+  /**
+   * Pings the targets in order and returns the first that answers at all. With an interface the
+   * socket is bound to it, so the probe can only leave through that tunnel, and only a reply that
+   * arrives through it counts.
+   */
+  private async ping(iface: string | undefined): Promise<PingResult> {
     let last: PingResult = { loss: 1, rttMs: null };
     for (const target of this.targets) {
       const args = ["-n", "-q", "-c", "3", "-i", "0.3", "-W", "2"];
-      if (sourceAddress !== undefined) {
-        args.push("-I", sourceAddress);
+      if (iface !== undefined) {
+        args.push("-I", iface);
       }
       args.push(target);
       const result = await this.runner.run("ping", args, { allowFailure: true, timeoutMs: 10_000 });

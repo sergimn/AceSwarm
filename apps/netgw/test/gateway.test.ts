@@ -11,7 +11,7 @@ import type { Prober, ProbeTarget } from "../src/probe.ts";
 import type { Router } from "../src/router.ts";
 import type { Tunnel, TunnelManager } from "../src/tunnels.ts";
 
-const tunnel = { profile: "vpn", pathId: "wg:vpn", iface: "wg-vpn", address: "10.13.13.2", error: null } as Tunnel;
+const tunnel = { profile: "vpn", pathId: "wg:vpn", iface: "wg-vpn", error: null } as Tunnel;
 
 /** A gateway whose parts record what they are asked to do, in order. */
 async function setup(policy: string | undefined, reconcile: () => Promise<void> = () => Promise.resolve()) {

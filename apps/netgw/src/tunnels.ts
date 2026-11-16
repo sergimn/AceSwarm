@@ -10,15 +10,12 @@ export interface Tunnel {
   pathId: string;
   iface: string;
   table: number;
-  /** IPv4 address of the tunnel; probes use it as source so they follow the tunnel's table. */
-  address: string | undefined;
   config: WireguardConfig | undefined;
   text: string;
   error: string | null;
 }
 
 const TABLE_BASE = 100;
-const PROBE_RULE_PRIORITY = 900;
 const DEFAULT_MTU = 1420;
 
 export function pathIdFor(profile: string): string {
@@ -29,6 +26,11 @@ export function pathIdFor(profile: string): string {
  * Brings WireGuard tunnels up and down to match the profile directory. Each tunnel gets an
  * interface `aswg<N>` and its own routing table `100+N` holding a default route through the
  * tunnel and an unreachable fallback, so traffic routed to a tunnel never leaks elsewhere.
+ *
+ * Nothing here is keyed by the tunnel's Address: providers hand the same one to every profile
+ * (every ProtonVPN profile is 10.2.0.2/32), and Linux accepts one address on several interfaces.
+ * The interface and the table number are what tell tunnels apart. The probes bind to the
+ * interface (see Prober) instead of following a rule.
  */
 export class TunnelManager {
   private readonly runner: CommandRunner;
@@ -124,7 +126,6 @@ export class TunnelManager {
       pathId: pathIdFor(profile),
       iface: `aswg${String(slot)}`,
       table: TABLE_BASE + slot,
-      address: undefined,
       config: undefined,
       text,
       error: null,
@@ -163,19 +164,10 @@ export class TunnelManager {
     for (const address of ipv4) {
       await ip(["-4", "address", "add", address.includes("/") ? address : `${address}/32`, "dev", tunnel.iface]);
     }
-    tunnel.address = ipv4[0]?.split("/", 1)[0];
     await ip(["link", "set", "dev", tunnel.iface, "mtu", String(config.iface.mtu ?? DEFAULT_MTU), "up"]);
     const table = String(tunnel.table);
     await ip(["-4", "route", "replace", "default", "dev", tunnel.iface, "table", table]);
     await ip(["-4", "route", "replace", "unreachable", "default", "metric", "4096", "table", table]);
-    if (tunnel.address !== undefined) {
-      await this.runner.run(
-        "ip",
-        ["-4", "rule", "del", "from", tunnel.address, "priority", String(PROBE_RULE_PRIORITY)],
-        { allowFailure: true },
-      );
-      await ip(["-4", "rule", "add", "from", tunnel.address, "lookup", table, "priority", String(PROBE_RULE_PRIORITY)]);
-    }
     this.logger.info({ profile: tunnel.profile, iface: tunnel.iface, table: tunnel.table }, "tunnel up");
   }
 
@@ -200,13 +192,6 @@ export class TunnelManager {
   }
 
   private async down(tunnel: Tunnel): Promise<void> {
-    if (tunnel.address !== undefined) {
-      await this.runner.run(
-        "ip",
-        ["-4", "rule", "del", "from", tunnel.address, "priority", String(PROBE_RULE_PRIORITY)],
-        { allowFailure: true },
-      );
-    }
     await this.runner.run("ip", ["-4", "route", "flush", "table", String(tunnel.table)], { allowFailure: true });
     await this.runner.run("ip", ["link", "del", tunnel.iface], { allowFailure: true });
     this.logger.info({ profile: tunnel.profile, iface: tunnel.iface }, "tunnel down");
