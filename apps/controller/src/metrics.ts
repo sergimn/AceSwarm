@@ -156,7 +156,13 @@ export class ControllerMetrics {
           for (const candidate of STREAM_STATES) {
             state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
           }
-          up.set(labels, stream.state === "playing" ? 1 : 0);
+          // A disabled stream is not expected to deliver: it has no value, so neither the alert,
+          // the dashboard's outages nor its availability count the time it was off. One that is
+          // enabled counts from the start, even before its run exists (the controller listens
+          // while it is still starting up), as an outage.
+          if (stream.enabled) {
+            up.set(labels, stream.state === "playing" ? 1 : 0);
+          }
           setFrameAge(frameAge, stream, now, sources.runningSince?.(stream.id));
           setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
           if (stream.peers.connected !== null) {
@@ -213,7 +219,7 @@ export class ControllerMetrics {
     });
     const up = new Gauge({
       name: "aceswarm_stream_up",
-      help: "1 while the stream is playing, 0 otherwise",
+      help: "1 while the stream is playing, 0 while it is enabled and not playing; no value while it is disabled",
       labelNames: ["stream"],
       registers,
     });
@@ -255,7 +261,7 @@ export class ControllerMetrics {
     });
     const speed = new Gauge({
       name: "aceswarm_stream_speed_kbytes",
-      help: "P2P transfer rate of the stream in KB/s",
+      help: "P2P transfer rate of the stream in KiB/s (1024 bytes per second, as the engine reports it)",
       labelNames: ["stream", "direction"],
       registers,
     });
@@ -317,7 +323,7 @@ export class ControllerMetrics {
     });
     const standbys = new Gauge({
       name: "aceswarm_stream_standby",
-      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed",
+      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed (also a path that lost its standbys and waits for a new one)",
       labelNames: ["stream", "path", "state"],
       registers,
     });

@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "(aceswarm_stream_up * on (stream) (1 + 2 * (max by (stream) (aceswarm_stream_standby{state=\"hot\"}) or on (stream) 0 * aceswarm_stream_up)) + on (stream) 2 * aceswarm_stream_state{state=\"stale-source\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "((aceswarm_stream_up * on (stream) (1 + 2 * (max by (stream) (aceswarm_stream_standby{state=\"hot\"}) or on (stream) 0 * aceswarm_stream_up)) + on (stream) 2 * aceswarm_stream_state{state=\"stale-source\"}) or on (stream) max by (stream) (4 * (aceswarm_stream_info{enabled=\"false\"} == 1))) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
           "legendFormat": "{{name}}",
@@ -534,6 +534,10 @@
                 "3": {
                   "text": "High availability",
                   "color": "blue"
+                },
+                "4": {
+                  "text": "Disabled",
+                  "color": "#8f8f8f"
                 }
               }
             }
@@ -549,7 +553,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "High availability (blue): the stream plays (Live in the UI) and produces new video frames, and at least one hot standby on another path receives the live broadcast too, so a failover takes seconds. A standby is hot while it got data in the last 10 seconds and its live edge moves (aceswarm_stream_standby{state=\"hot\"}). Delivering (green): the stream plays and produces new video frames (aceswarm_stream_up), with no hot standby. Waiting for source (dark red): the stream is stale-source, because its source's live edge has not moved for STALE_SOURCE_SECONDS (60 by default) or the engine serves the stream that far behind its live edge. No old video is published, and the stream retries until the broadcast is back. Not delivering (red): every other state (starting, buffering, stalled, recovering, switching path, disabled or error). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
+      "description": "High availability (blue): the stream plays (Live in the UI) and produces new video frames, and at least one hot standby on another path receives the live broadcast too, so a failover takes seconds. A standby is hot while it got data in the last 10 seconds and its live edge moves (aceswarm_stream_standby{state=\"hot\"}). Delivering (green): the stream plays and produces new video frames (aceswarm_stream_up), with no hot standby. Waiting for source (dark red): the stream is stale-source, because its source's live edge has not moved for STALE_SOURCE_SECONDS (60 by default) or the engine serves the stream that far behind its live edge. No old video is published, and the stream retries until the broadcast is back. Disabled (grey): the stream was turned off (aceswarm_stream_info{enabled=\"false\"}); it is no outage, and its time off does not count in Availability in range. Not delivering (red): every other state (starting, buffering, stalled, recovering, switching path or error). Only video from a source whose live edge moves counts, so a broadcast that stops shows as one outage: red, then dark red."
     },
     {
       "type": "bargauge",
@@ -559,6 +563,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "The share of the time each stream was enabled that it delivered new frames (aceswarm_stream_up), over the dashboard's range. The time a stream was disabled does not count; a stream disabled for the whole range is not listed.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -666,6 +671,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Seconds since players could last get a new video frame of the stream. It keeps growing for as long as an enabled stream has no video, however many recovery steps that takes. A disabled stream has no value, and neither has a stream that was started and has not had video since (aceswarm_stream_last_frame_age_seconds).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -878,7 +884,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "KBs"
+          "unit": "KiBs"
         },
         "overrides": []
       },
@@ -1033,7 +1039,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "KBs",
+          "unit": "KiBs",
           "min": 0
         },
         "overrides": []

@@ -5,6 +5,7 @@ import { AddStreamDialog } from "./add-stream-dialog.ts";
 import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { onTick, startClock } from "./clock.ts";
 import { errorMessage, placeToasts, setText, toast } from "./dom.ts";
+import { formatDisabledCount, shownState } from "./format.ts";
 import { Grid } from "./grid.ts";
 import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
@@ -107,12 +108,15 @@ class App {
     this.showConnection(time);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
-    const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
+    const live = snapshot.streams.filter((stream) => shownState(stream) === "playing").length;
     this.summary.textContent = [
       `${String(snapshot.streams.length)} streams`,
       `${String(live)} live`,
+      formatDisabledCount(snapshot.streams),
       formatPathsUp(snapshot),
-    ].join(" · ");
+    ]
+      .filter((part) => part !== undefined)
+      .join(" · ");
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
       return;
