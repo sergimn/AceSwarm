@@ -4,7 +4,7 @@ import type { Snapshot } from "@aceswarm/shared/api-types";
 import { AddStreamDialog } from "./add-stream-dialog.ts";
 import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { startClock } from "./clock.ts";
-import { errorMessage, toast } from "./dom.ts";
+import { errorMessage, placeToasts, toast } from "./dom.ts";
 import { Grid } from "./grid.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
@@ -49,7 +49,7 @@ function savePreviewMode(mode: PreviewMode): void {
 
 /** Wires the grid, the player and the dialogs to the live snapshot. */
 class App {
-  private readonly navigator = new Navigator(element("#app"));
+  private readonly navigator = new Navigator(element("#app"), placeToasts);
   private readonly previews = new PreviewManager(loadPreviewMode(), MAX_PREVIEWS);
   private readonly watch = new WatchReporter();
   private readonly player = new Player(this.navigator, this.watch);

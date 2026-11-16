@@ -70,7 +70,12 @@ test("is greyed out until a WireGuard profile exists", async ({ page, request })
   await page.keyboard.press("ArrowDown");
   await expect(toggle).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.locator(".toast.error")).toContainText("Add a WireGuard profile first.");
+  const toast = page.locator(".toast.error");
+  await expect(toast).toContainText("Add a WireGuard profile first.");
+  // A toast raised in a modal dialog is drawn inside it. Beside it the browser would keep it inert,
+  // dimmed under the dialog's backdrop, and a click at its position would reach the dialog: a trial
+  // click checks, without clicking, that the toast is what is at its own position.
+  await toast.click({ trial: true });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
 
   // The API refuses it too.
