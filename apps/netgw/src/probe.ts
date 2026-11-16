@@ -107,7 +107,8 @@ export class Prober {
   /**
    * Pings the targets in order and returns the first that answers at all. With an interface the
    * socket is bound to it, so the probe can only leave through that tunnel, and only a reply that
-   * arrives through it counts.
+   * arrives through it counts. The kernel lets the reply in because the gateway runs with loose
+   * reverse-path filtering (`rp_filter` 2 in compose.yaml).
    */
   private async ping(iface: string | undefined): Promise<PingResult> {
     let last: PingResult = { loss: 1, rttMs: null };
