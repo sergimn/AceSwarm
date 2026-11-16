@@ -27,11 +27,10 @@ jobs:
       RUN_ID: ${{ github.event.workflow_run.id }}
       ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
       BRANCH: ${{ github.event.workflow_run.head_branch }}
-      EVENT: ${{ github.event.workflow_run.event }}
       # The name of the step in e2e.yml.
       STEP: Find this runner's public UDP address
       # Attempts per run, the first one included. A new commit starts a new run, which counts from
-      # one again. GitHub itself stops re-running a run after 50.
+      # one again. GitHub itself allows 50 re-runs of a run.
       MAX_ATTEMPTS: 30
     steps:
       - name: Re-run all jobs if a runner failed at its NAT
@@ -44,9 +43,10 @@ jobs:
             echo "::notice::Attempt $ATTEMPT of run $RUN_ID did not fail at \"$STEP\": not re-running it."
             exit 0
           fi
-          # Re-running a run that a newer one has replaced would cancel the newer one.
-          newest="$(gh run list --workflow e2e.yml --branch "$BRANCH" --event "$EVENT" --limit 1 \
-            --json databaseId --jq '.[0].databaseId')"
+          # Re-running a run that a newer one for its branch has replaced would cancel the newer one.
+          # A run of any event counts: a push and a manual run on a branch share a concurrency group.
+          newest="$(gh run list --workflow e2e.yml --branch "$BRANCH" --limit 1 --json databaseId \
+            --jq '.[0].databaseId')"
           if [[ "$newest" != "$RUN_ID" ]]; then
             echo "::notice::Run $newest has replaced run $RUN_ID: not re-running it."
             exit 0
