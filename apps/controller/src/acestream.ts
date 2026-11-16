@@ -15,13 +15,14 @@ export interface EngineSession {
   commandUrl: string;
 }
 
+/** What an engine's stat answer says about a session. A figure the engine left out is `null`, not 0. */
 export interface EngineStats {
   status: string;
-  peers: number;
-  speedDown: number;
-  speedUp: number;
-  downloaded: number;
-  uploaded: number;
+  peers: number | null;
+  speedDown: number | null;
+  speedUp: number | null;
+  downloaded: number | null;
+  uploaded: number | null;
 }
 
 interface Envelope<T> {
@@ -87,11 +88,11 @@ export class AcestreamClient {
     const stats = unwrap(body, "stats");
     return {
       status: stats.status ?? "unknown",
-      peers: stats.peers ?? 0,
-      speedDown: stats.speed_down ?? 0,
-      speedUp: stats.speed_up ?? 0,
-      downloaded: stats.downloaded ?? 0,
-      uploaded: stats.uploaded ?? 0,
+      peers: stats.peers ?? null,
+      speedDown: stats.speed_down ?? null,
+      speedUp: stats.speed_up ?? null,
+      downloaded: stats.downloaded ?? null,
+      uploaded: stats.uploaded ?? null,
     };
   }
 
