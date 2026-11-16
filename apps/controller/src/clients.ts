@@ -67,6 +67,23 @@ export class TranscoderClient {
     }
   }
 
+  /**
+   * What each standby source of the stream brought so far, without changing which ones the
+   * transcoder reads (unlike `setStandbys`). Returns undefined while the stream has no pipeline.
+   */
+  async standbyStatus(id: string): Promise<StandbyReaderStatus[] | undefined> {
+    try {
+      return await requestJson<StandbyReaderStatus[]>(`${this.baseUrl}/standbys/${encodeURIComponent(id)}`, {
+        timeoutMs: 3000,
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 404) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async list(): Promise<PipelineStatus[]> {
     return requestJson<PipelineStatus[]>(`${this.baseUrl}/pipelines`, { timeoutMs: 3000 });
   }

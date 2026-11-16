@@ -5,16 +5,17 @@ import type {
   PathAssignment,
   PathStatus,
   PipelineStatus,
+  StandbyReaderStatus,
   StandbySource,
 } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AcestreamClient, EngineSession } from "../src/acestream.ts";
 import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { FailureReport, SharedEngines } from "../src/shared-engines.ts";
-import { DEFAULT_STANDBY_SETTINGS, type StandbySettings } from "../src/standby.ts";
+import { DEFAULT_STANDBY_SETTINGS, StreamStandbys, type StandbySettings } from "../src/standby.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
 import { MoveSlots } from "../src/stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
@@ -153,6 +154,18 @@ interface Fakes {
   lastFrameAt?: string;
   /** The live edge the transcoder reports for the source it reads (none by default). */
   liveEdge?: { value: LiveEdgeView | null };
+  /** Requests that wait while the test holds them (see `Hold`). */
+  hold?: Hold;
+  /** The number of peers an engine session's stats report, by its stat URL (1 by default). */
+  peersOf?: (statUrl: string) => number;
+}
+
+/** What the fakes hold up until a test lets them go, to keep a supervision step waiting. */
+interface Hold {
+  /** Opening a session waits for this, and fails when it rejects. */
+  session?: Promise<unknown> | undefined;
+  /** A stats request waits for the promise of its stat URL. */
+  stats?: Map<string, Promise<unknown>>;
 }
 
 /** A supervisor whose dependencies are fakes; `paths` is what the gateway reports. */
@@ -211,6 +224,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
         return new Promise(() => undefined);
       }
       await fakes.sessionGate;
+      await fakes.hold?.session;
       sessions += 1;
       if (fakes.failFirstSession === true && sessions === 1) {
         throw new Error("engine died");
@@ -221,10 +235,14 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       stopped.push(commandUrl);
       return Promise.resolve();
     },
-    stats: () =>
-      fakes.sessionsForgotten?.on === true
-        ? Promise.reject(new Error("unknown playback session"))
-        : Promise.resolve({ status: "dl", peers: 1, speedDown: 0, speedUp: 0, downloaded: 0, uploaded: 0 }),
+    stats: async (statUrl: string) => {
+      await fakes.hold?.stats?.get(statUrl);
+      if (fakes.sessionsForgotten?.on === true) {
+        throw new Error("unknown playback session");
+      }
+      const peers = fakes.peersOf?.(statUrl) ?? 1;
+      return { status: "dl", peers, speedDown: 0, speedUp: 0, downloaded: 0, uploaded: 0 };
+    },
   } as unknown as AcestreamClient;
   // The source a path move asked the transcoder to cut over to, and the one it plays from.
   let pending: string | undefined;
@@ -268,6 +286,20 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     }
     const source = real.active;
     return { ...pipeline, state, source, pendingSource: real.pending ?? null, lastFrameAt: real.lastFrameAt };
+  };
+  const readerStatus = (sources: string[]): StandbyReaderStatus[] | undefined => {
+    if (fakes.sources === undefined || real.active === undefined) {
+      return undefined;
+    }
+    const data = fakes.standbyData ?? delivering();
+    return sources.map((source) => ({
+      source,
+      state: data.has(source) ? "receiving" : "connecting",
+      bytes: 0,
+      lastDataAt: data.has(source) ? new Date(clock.now).toISOString() : null,
+      error: null,
+      liveEdge: null,
+    }));
   };
   const transcoderStarts: string[] = [];
   const transcoder = {
@@ -323,21 +355,13 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       }
       const sources = standbys.map((standby) => standby.source);
       readers.push(sources);
-      if (fakes.sources === undefined || real.active === undefined) {
-        return Promise.resolve(undefined);
-      }
-      const data = fakes.standbyData ?? delivering();
-      return Promise.resolve(
-        sources.map((source) => ({
-          source,
-          state: data.has(source) ? "receiving" : "connecting",
-          bytes: 0,
-          lastDataAt: data.has(source) ? new Date(clock.now).toISOString() : null,
-          error: null,
-          liveEdge: null,
-        })),
-      );
+      return Promise.resolve(readerStatus(sources));
     },
+    // The readers the last `setStandbys` asked for, as they are now.
+    standbyStatus: () =>
+      fakes.transcoderDown?.on === true
+        ? Promise.reject(new Error("transcoder unreachable"))
+        : Promise.resolve(readerStatus(readers.at(-1) ?? [])),
   } as unknown as TranscoderClient;
   const netgw = {
     assign: (assignment: PathAssignment) => {
@@ -865,6 +889,57 @@ test("shutting down waits only a moment for a step in progress", async () => {
   const started = Date.now();
   await fake.instance.stop(false, 50);
   expect(Date.now() - started).toBeLessThan(1000);
+});
+
+describe("starting behind the stream's previous run", () => {
+  test("does nothing until that run is gone, and says what it waits for", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    const previous = Promise.withResolvers<undefined>();
+    fake.instance.start(previous.promise);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", message: "waiting for the previous run to stop" });
+    // It has no engine to assign yet, so the others needn't wait for it.
+    expect(fake.instance.settled).toBe(true);
+    expect(fake.instance.triedEngine).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.creates()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+
+    previous.resolve(undefined);
+    await vi.waitFor(() => {
+      expect(fake.transcoderStarts).toHaveLength(1);
+    });
+    expect(fake.creates()).toBe(1);
+    await fake.instance.stop(true);
+  });
+
+  test("starts when that run's teardown failed", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    fake.instance.start(Promise.reject(new Error("docker said no")));
+    await vi.waitFor(() => {
+      expect(fake.transcoderStarts).toHaveLength(1);
+    });
+    await fake.instance.stop(true);
+  });
+
+  test("stopped meanwhile, it starts nothing and is torn down once that run is gone", async () => {
+    const fake = supervisor([direct]);
+    const previous = Promise.withResolvers<undefined>();
+    fake.instance.start(previous.promise);
+    let stopped = false;
+    const stopping = fake.instance.stop(true).then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(stopped).toBe(false);
+
+    previous.resolve(undefined);
+    await stopping;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.creates()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+    expect(fake.instance.view().state).toBe("stopped");
+  });
 });
 
 describe("moving a stream to another path", () => {
@@ -1823,6 +1898,17 @@ const main = own(1);
 const standbyEngine = own(2);
 const play = (handle: EngineHandle): string => `${handle.baseUrl}/play`;
 
+/** A promise that stays pending until `open` is called. */
+function latch() {
+  const { promise, resolve } = Promise.withResolvers<undefined>();
+  return {
+    promise,
+    open: () => {
+      resolve(undefined);
+    },
+  };
+}
+
 /** Lets the standbys' background work finish. */
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 10; turn += 1) {
@@ -1865,6 +1951,31 @@ describe("hot standby on the other paths", () => {
     await settle();
     await fake.instance.tick();
     return { ...fake, paths, sources };
+  }
+
+  /** A manual restart whose new session never opens until `open` is called. */
+  async function restarting(fakes: Fakes = {}) {
+    const hold: Hold = {};
+    const fake = await withStandby({ hold, ...fakes });
+    const gate = latch();
+    hold.session = gate.promise;
+    fake.instance.requestRestart();
+    const step = fake.instance.tick();
+    await settle();
+    return { ...fake, step, open: gate.open };
+  }
+
+  /** Restarts the stream by hand while its engine refuses every new session. */
+  async function stuck(fakes: Fakes = {}) {
+    const hold: Hold = {};
+    const fake = await withStandby({ hold, ...fakes });
+    const refused = Promise.reject(new Error("engine said no"));
+    refused.catch(() => undefined);
+    hold.session = refused;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("stalled");
+    return { ...fake, hold };
   }
 
   test("keeps a hot standby on the other path once the stream plays", async () => {
@@ -1950,6 +2061,75 @@ describe("hot standby on the other paths", () => {
     expect(fake.transcoderStarts).toEqual([]);
     // The first check stops the readers the previous run left at the transcoder.
     expect(fake.readers[0]).toEqual([]);
+  });
+
+  describe("while a restart takes long", () => {
+    test("keeps a standby hot while no check runs", async () => {
+      const fake = await restarting();
+      fake.clock.now += 30_000;
+      // Nobody asked the transcoder for 30 s, so its last data looks old.
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+      await fake.instance.observe();
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "hot" }]);
+      // The restart stopped the stream's session: nothing to show of it until the new one is polled.
+      expect(fake.instance.view()).toMatchObject({ peers: { connected: null }, downloadKBps: null });
+      fake.open();
+      await fake.step;
+    });
+
+    test("goes on when the transcoder can't be reached", async () => {
+      const transcoderDown = { on: false };
+      const fake = await restarting({ transcoderDown });
+      transcoderDown.on = true;
+      fake.clock.now += 30_000;
+      await expect(fake.instance.observe()).resolves.toBeUndefined();
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+      fake.open();
+      await fake.step;
+    });
+
+    test("doesn't take the data of a standby that stopped for hot", async () => {
+      const standbyData = new Set([play(standbyEngine)]);
+      const fake = await restarting({ standbyData });
+      standbyData.clear();
+      fake.clock.now += 30_000;
+      await fake.instance.observe();
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+      fake.open();
+      await fake.step;
+    });
+  });
+
+  describe("while the stream can't open a session", () => {
+    test("keeps learning which standbys are hot", async () => {
+      const fake = await stuck();
+      for (let check = 0; check < 5; check += 1) {
+        fake.clock.now += 6000;
+        await fake.instance.tick();
+      }
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "hot" }]);
+    });
+
+    test("removes its standbys when hot standby is turned off", async () => {
+      const hotStandby = { on: true };
+      const fake = await stuck({ hotStandby });
+      expect(fake.instance.view().standbys).toHaveLength(1);
+      hotStandby.on = false;
+      fake.clock.now += 6000;
+      await fake.instance.tick();
+      await settle();
+      expect(fake.instance.view().standbys).toEqual([]);
+      expect(fake.removed).toEqual([standbyEngine.containerId]);
+    });
+
+    test("removes its standbys once it has not played for a while", async () => {
+      const fake = await stuck();
+      expect(fake.instance.view().standbys).toHaveLength(1);
+      fake.clock.now += 11 * 60_000;
+      await fake.instance.tick();
+      await settle();
+      expect(fake.instance.view().standbys).toEqual([]);
+    });
   });
 
   test("fails over to the hot standby before any other recovery step", async () => {
@@ -2288,5 +2468,232 @@ describe("hot standby on the other paths", () => {
       ]);
       expect(fake.instance.assignments()).toEqual([]);
     });
+  });
+});
+
+describe("the figures of a stream during a long step", () => {
+  const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+  const replacement: EngineHandle = {
+    ...engine,
+    containerId: "c2",
+    name: "aceswarm-engine-s1-2",
+    generation: 2,
+    ip: "172.31.250.11",
+    baseUrl: "http://172.31.250.11:6878",
+  };
+  const oldStat = `${engine.baseUrl}/stat`;
+  /** Peers of the engine the stream plays from and of the one it moves to. */
+  const peersOf = (peers: { value: number }) => (statUrl: string) => (statUrl === oldStat ? peers.value : 2);
+
+  /** A stream that plays from its own engine on the direct path, until the policy turns that path off. */
+  async function playing() {
+    const { state, pathAllowed } = policy(false);
+    const hold: Hold = {};
+    const peers = { value: 5 };
+    const fake = supervisor([direct, vpn], {
+      created: [engine, replacement],
+      video: { on: true },
+      handover: "delivers",
+      pathAllowed,
+      hold,
+      peersOf: peersOf(peers),
+    });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", lastFrameAt: iso(fake.clock.now) });
+    /** Turns the direct path off: the move to the VPN waits for the new engine's session until `open`. */
+    const move = async () => {
+      const gate = latch();
+      hold.session = gate.promise;
+      state.on = true;
+      const step = fake.instance.tick();
+      await settle();
+      return { step, open: gate.open };
+    };
+    return { ...fake, hold, peers, move };
+  }
+
+  test("a playing stream keeps its video time, peers and speed while it moves to another engine", async () => {
+    const fake = await playing();
+    const before = fake.clock.now;
+    const moving = await fake.move();
+    fake.clock.now += 40_000;
+    fake.peers.value = 7;
+    // No check ran for 40 s, so far: the old engine delivers all the while.
+    expect(fake.instance.view()).toMatchObject({ lastFrameAt: iso(before), peers: { connected: 5 } });
+
+    await fake.instance.observe();
+    expect(fake.instance.view()).toMatchObject({ state: "switching", lastFrameAt: iso(fake.clock.now) });
+    expect(fake.instance.view().peers.connected).toBe(7);
+
+    moving.open();
+    await moving.step;
+    expect(fake.instance.path).toBe("wg:a");
+  });
+
+  test("shows no peers once the stream moved, until the new engine's are polled", async () => {
+    const fake = await playing();
+    const moving = await fake.move();
+    moving.open();
+    await moving.step;
+    // The old engine's are gone, and the commit doesn't wait to poll the new one.
+    expect(fake.instance.view().peers.connected).toBeNull();
+    await fake.instance.observe();
+    expect(fake.instance.view().peers.connected).toBe(2);
+  });
+
+  test("drops what an observation polled from an engine the stream has left", async () => {
+    const fake = await playing();
+    const moving = await fake.move();
+    // The poll of the old engine is on its way when the move finishes.
+    const answer = latch();
+    fake.hold.stats = new Map([[oldStat, answer.promise]]);
+    fake.peers.value = 9;
+    fake.clock.now += 5000;
+    const observing = fake.instance.observe();
+    await settle();
+
+    moving.open();
+    await moving.step;
+    expect(fake.instance.view().peers.connected).toBeNull();
+    answer.open();
+    await observing;
+    // What it polled from the old engine does not come back.
+    expect(fake.instance.view().peers.connected).toBeNull();
+    await fake.instance.observe();
+    expect(fake.instance.view().peers.connected).toBe(2);
+  });
+
+  test("shows no peers or speed once its session ended, until a new session is polled", async () => {
+    const hold: Hold = {};
+    const fake = supervisor([direct], { video: { on: true }, hold, peersOf: () => 5 });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().peers.connected).toBe(5);
+
+    // The restart stops its session, and the engine refuses a new one.
+    const refused = Promise.reject(new Error("engine said no"));
+    refused.catch(() => undefined);
+    hold.session = refused;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    const gone = { peers: { connected: null, active: null, uploading: null, countries: [] }, downloadKBps: null };
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", ...gone, uploadKBps: null });
+
+    // Every later check only tries to start it again.
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "error", ...gone });
+
+    hold.session = undefined;
+    fake.clock.now += settings.recoveryMaxDelayMs;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", peers: { connected: 5 } });
+  });
+
+  test("a failing check of the standbys does not hold up the start of a stream without a session", async () => {
+    vi.spyOn(StreamStandbys.prototype, "maintain").mockRejectedValue(new Error("the standbys broke"));
+    const fake = supervisor([direct], { video: { on: true } });
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "starting", message: "opening stream" });
+  });
+
+  test("keeps polling while it waits for a network path", async () => {
+    const paths: PathStatus[] = [];
+    const peers = { value: 3 };
+    const fake = supervisor(paths, { peersOf: () => peers.value });
+    // The gateway's paths are unknown: the engine starts without one, and its session opens.
+    await fake.instance.tick();
+    paths.push({ ...direct, up: false });
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", peers: { connected: 3 } });
+    peers.value = 4;
+    await fake.instance.tick();
+    expect(fake.instance.view().peers.connected).toBe(4);
+  });
+});
+
+describe("the timer that observes a long step", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("brings the view up to date while a step waits, and not before the step took a tick", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const { state, pathAllowed } = policy(false);
+    const hold: Hold = {};
+    const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+    const next: EngineHandle = { ...engine, containerId: "c2", generation: 2, ip: "172.31.250.11" };
+    const fake = supervisor([direct, vpn], { created: [engine, next], video: { on: true }, pathAllowed, hold });
+    fake.instance.start();
+    for (let tick = 0; tick < 3; tick += 1) {
+      await vi.advanceTimersByTimeAsync(tick === 0 ? 0 : settings.tickMs);
+      fake.clock.now += settings.tickMs;
+    }
+    expect(fake.instance.view()).toMatchObject({ state: "playing" });
+
+    // The step that moves the stream waits for the new engine's session.
+    hold.session = latch().promise;
+    state.on = true;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    const polled = fake.clock.now;
+    expect(fake.instance.view()).toMatchObject({ state: "switching", lastFrameAt: iso(polled) });
+
+    // Less than a tick into the step, nothing is observed.
+    fake.clock.now += settings.tickMs / 2;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    expect(fake.instance.view().lastFrameAt).toBe(iso(polled));
+
+    fake.clock.now += 30_000;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    expect(fake.instance.view().lastFrameAt).toBe(iso(fake.clock.now));
+
+    vi.useRealTimers();
+    await fake.instance.stop(false, 0);
+  });
+
+  test("stops observing when the stream stops, whatever step is still running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const { state, pathAllowed } = policy(false);
+    const hold: Hold = {};
+    const polls = { count: 0 };
+    const peersOf = () => {
+      polls.count += 1;
+      return 2;
+    };
+    const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+    const next: EngineHandle = { ...engine, containerId: "c2", generation: 2, ip: "172.31.250.11" };
+    const fake = supervisor([direct, vpn], {
+      created: [engine, next],
+      video: { on: true },
+      pathAllowed,
+      hold,
+      peersOf,
+    });
+    fake.instance.start();
+    for (let tick = 0; tick < 3; tick += 1) {
+      await vi.advanceTimersByTimeAsync(tick === 0 ? 0 : settings.tickMs);
+      fake.clock.now += settings.tickMs;
+    }
+    const session = latch();
+    hold.session = session.promise;
+    state.on = true;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    fake.clock.now += 30_000;
+    const before = polls.count;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    const observed = polls.count;
+    expect(observed).toBeGreaterThan(before);
+
+    // The step goes on, but nobody follows the stream any more: the timer is gone.
+    const stopping = fake.instance.stop(false, 0);
+    fake.clock.now += 30_000;
+    await vi.advanceTimersByTimeAsync(10 * settings.tickMs);
+    expect(polls.count).toBe(observed);
+
+    session.open();
+    vi.useRealTimers();
+    await stopping;
   });
 });
