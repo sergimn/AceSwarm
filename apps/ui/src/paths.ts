@@ -27,7 +27,9 @@ export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly"
 }
 
 /** The top bar: how many streams there are and how many play, and the paths that are up. */
-export function formatSummary(snapshot: Pick<Snapshot, "streams" | "paths" | "wireguardOnly">): string {
+export function formatSummary(
+  snapshot: Pick<Snapshot, "streams" | "paths" | "wireguardOnly" | "gatewayReachable">,
+): string {
   const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
   return [count(snapshot.streams.length, "stream"), `${String(live)} live`, formatPathsUp(snapshot)].join(" · ");
 }

@@ -38,17 +38,13 @@ describe("the top bar", () => {
   const paths = [path("direct", true)];
   const playing = stream({ state: "playing" });
   const stalled = stream({ state: "stalled" });
+  const summary = (streams: StreamView[]): string =>
+    formatSummary({ streams, paths, wireguardOnly: false, gatewayReachable: true });
 
   it("counts streams and says so in the singular for one", () => {
-    expect(formatSummary({ streams: [], paths, wireguardOnly: false })).toBe(
-      "0 streams · 0 live · 1/1 network paths up",
-    );
-    expect(formatSummary({ streams: [playing], paths, wireguardOnly: false })).toBe(
-      "1 stream · 1 live · 1/1 network paths up",
-    );
-    expect(formatSummary({ streams: [playing, stalled], paths, wireguardOnly: false })).toBe(
-      "2 streams · 1 live · 1/1 network paths up",
-    );
+    expect(summary([])).toBe("0 streams · 0 live · 1/1 network paths up");
+    expect(summary([playing])).toBe("1 stream · 1 live · 1/1 network paths up");
+    expect(summary([playing, stalled])).toBe("2 streams · 1 live · 1/1 network paths up");
   });
 });
 

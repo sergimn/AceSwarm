@@ -304,7 +304,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       error: data.has(source) ? null : (fakes.standbyError?.value ?? null),
       liveEdge:
         fakes.standbyStale?.on === true
-          ? { state: "stale", edgeAt: null, advancedAt: null, behindSeconds: null }
+          ? { state: "stale", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null }
           : null,
     }));
   };
