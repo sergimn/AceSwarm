@@ -137,6 +137,7 @@ export class StreamSupervisor {
       return;
     }
     this.waitingForPrevious = true;
+    this.logger.info("waiting for the stream's previous run to stop before starting");
     this.setState("starting", "waiting for the previous run to stop");
     // `stop` waits for it too, so a run stopped while it waits is torn down after the previous one.
     this.current = previous

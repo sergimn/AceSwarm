@@ -52,7 +52,7 @@ async function harness(video = true) {
   const events: string[] = [];
   /** Promises the fakes wait for before they answer, set by a test to hold something up. */
   const holds: { teardown?: Promise<void>; stats?: Promise<void> | undefined } = {};
-  /** The `known` argument of every `removeOrphans` call. */
+  /** The streams to keep, as `removeOrphans` was asked on each start. */
   const orphanChecks: string[][] = [];
   const dataDir = await mkdtemp(join(tmpdir(), "aceswarm-orchestrator-"));
   const started: Orchestrator[] = [];
@@ -105,8 +105,8 @@ async function harness(video = true) {
   } as unknown as TranscoderClient;
   const engines = {
     ensureImage: () => Promise.resolve(),
-    removeOrphans: (known: ReadonlySet<string>) => {
-      orphanChecks.push([...known]);
+    removeOrphans: (keep: ReadonlySet<string>) => {
+      orphanChecks.push([...keep]);
       return Promise.resolve(0);
     },
     find: () => Promise.resolve([]),
@@ -407,7 +407,7 @@ test("shutting down waits a moment for a teardown in progress, not for ever", as
   await restarted.updateStream(id, { enabled: false });
   const started = Date.now();
   await restarted.stop();
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(Date.now() - started).toBeLessThan(2000);
   stuck.resolve(undefined);
 });
 

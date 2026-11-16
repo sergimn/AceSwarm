@@ -263,7 +263,7 @@ test("enabling a stream right after disabling it starts it clean, once its old r
   await enabled(false);
   await enabled(true);
 
-  // It plays from an engine of its own, and recovered from nothing on the way there.
+  // It plays from an engine of its own, and needed no recovery on the way there.
   await waitForPlaying(request, id);
   const now = engineIds();
   expect(now).toHaveLength(1);
