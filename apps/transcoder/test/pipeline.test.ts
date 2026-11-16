@@ -36,6 +36,8 @@ function exit(child: ChildProcess | undefined, code = 183): void {
   child?.emit("exit", code, null);
 }
 
+const iso = (ms: number): string => new Date(ms).toISOString();
+
 /** The source an ffmpeg run reads. */
 function sourceOf(args: string[] | undefined): string | undefined {
   const index = args?.indexOf("-i") ?? -1;
@@ -488,6 +490,55 @@ describe("Pipeline with a source's live edge", () => {
       expect(await playlist(instance)).toBeUndefined();
     }
     expect(instance.status()).toMatchObject({ lastFrameAt: null, liveEdge: { state: "stale" } });
+  });
+
+  it("goes on counting how long the broadcast sent nothing new through retries on slightly newer windows", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    const lastNewData = clock.now;
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "live", quietSince: iso(lastNewData) });
+
+    // The broadcast stopped. Ten minutes later another engine knows of a few more seconds of the
+    // old window than the stream's session did, and its edge never moves again.
+    clock.now += 600_000;
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    stat(1, 5006, 100);
+    clock.now += 61_000;
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({
+      state: "stale",
+      advancedAt: iso(clock.now - 61_000),
+      quietSince: iso(lastNewData),
+    });
+
+    // The next retry starts from that one, and still counts from the last new data.
+    await instance.start("http://e3/play", false, 0, "http://e3/stat");
+    stat(2, 5008, 100);
+    clock.now += 61_000;
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "stale", quietSince: iso(lastNewData) });
+  });
+
+  it("counts the quiet time from the last time any session of the stream was live, whichever had the newest edge", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 9000);
+    // The next session is far behind it, as after the broadcaster's clock jumped back, and moves on its own.
+    clock.now += 100_000;
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    live(1, 5000);
+    const lastNewData = clock.now;
+
+    // The first session has the newest edge, but the second one was live later. A retry on a
+    // slightly newer window than the second one's starts from both.
+    clock.now += 100_000;
+    await instance.start("http://e3/play", false, 0, "http://e3/stat");
+    stat(2, 5006, 100);
+    clock.now += 61_000;
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "stale", quietSince: iso(lastNewData) });
   });
 
   it("does not hand over to a source whose live edge does not move, and gives up once it is stale", async () => {

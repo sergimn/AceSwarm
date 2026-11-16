@@ -26,6 +26,8 @@ export interface LiveEdgeSettings {
 export interface LiveEdgeSeed {
   edge: number;
   since: number;
+  /** Since when the broadcast is known to send nothing new (see `LiveEdge.quietSince`); `since` when absent. */
+  quietSince?: number | undefined;
 }
 
 /** Rises of a new session's edge compared, by our clock (see `LiveEdge`). */
@@ -49,6 +51,14 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  * that only has the same old window is no newer, and the time since the edge last moved goes on,
  * so it is stale at once rather than after another `staleAfterMs`.
  *
+ * `quietSince` is what to tell people about how long the broadcast sent nothing new: the last time
+ * the edge of a live session moved, or until one did, when the stream's first session saw an edge.
+ * It goes on across the stream's sessions, unlike the time the edge last moved: a retry whose peers
+ * know of a slightly later end of the old window has an edge newer than the previous session's,
+ * which starts that time over (it gets another `staleAfterMs` to show it moves), though the
+ * broadcast is as quiet as before. A session that was live and sees its own edge move again after
+ * it went stale is live again, and does start `quietSince` over.
+ *
  * - waiting: no new data seen yet. A new session counts once it downloaded and its own edge kept
  *   moving past the newest edge the stream's previous session saw, at about the broadcast's pace:
  *   two rises at least 1.5 s apart by our clock, by no more than that time plus 3 s. Moving once
@@ -67,6 +77,8 @@ export class LiveEdge {
   /** The newest `livepos.last` seen, and when it last moved (or was first seen). */
   private edge: number | undefined;
   private edgeSince: number | undefined;
+  /** Since when the broadcast sent nothing new, by the stream's sessions: see the class comment. */
+  private quietSince: number | undefined;
   /** This session's own newest `livepos.last`, and its recent rises past `baseline` (our clock). */
   private own: number | undefined;
   private rises: { at: number; edge: number }[] = [];
@@ -90,7 +102,7 @@ export class LiveEdge {
   snapshot(): LiveEdgeSeed | undefined {
     return this.edge === undefined || this.edgeSince === undefined
       ? this.seed
-      : { edge: this.edge, since: this.edgeSince };
+      : { edge: this.edge, since: this.edgeSince, quietSince: this.quietSince };
   }
 
   observe(sample: LiveSample): void {
@@ -119,6 +131,9 @@ export class LiveEdge {
       }
       if (sample.last > (this.baseline ?? -Infinity)) {
         this.rose(sample.last, now);
+        if (this.verified) {
+          this.quietSince = now;
+        }
       }
     }
   }
@@ -140,6 +155,8 @@ export class LiveEdge {
     const seed = this.seed;
     const window = this.settings.staleAfterMs / 1000;
     this.own = last;
+    // Whatever edge the session starts on, it is no news until it is seen to move (see `rose`).
+    this.quietSince = seed === undefined ? now : (seed.quietSince ?? seed.since);
     if (seed !== undefined && last <= seed.edge && last >= seed.edge - window) {
       // The same window the previous session had: no newer, and its clock goes on.
       this.edge = seed.edge;
@@ -183,6 +200,7 @@ export class LiveEdge {
       state: this.state(),
       edgeAt: this.edge === undefined ? null : new Date(this.edge * 1000).toISOString(),
       advancedAt: this.edgeSince === undefined ? null : new Date(this.edgeSince).toISOString(),
+      quietSince: this.quietSince === undefined ? null : new Date(this.quietSince).toISOString(),
       behindSeconds: this.edge === undefined || this.pos === undefined ? null : Math.max(0, this.edge - this.pos),
     };
   }

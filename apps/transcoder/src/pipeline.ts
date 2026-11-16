@@ -460,16 +460,24 @@ export class Pipeline {
     return generation;
   }
 
-  /** The newest live edge any of the stream's sources showed so far. */
+  /**
+   * The newest live edge any of the stream's sources showed so far, with the latest time any of
+   * them found the broadcast sending new data (that is the stream's, not one source's).
+   */
   private newestEdge(also?: Generation): LiveEdgeSeed | undefined {
     let newest = this.lastEdge;
+    let quietSince = newest?.quietSince ?? newest?.since;
     for (const generation of [this.active, this.pending, also]) {
       const seen = generation?.watch?.edge.snapshot();
-      if (seen !== undefined && (newest === undefined || seen.edge >= newest.edge)) {
+      if (seen === undefined) {
+        continue;
+      }
+      quietSince = Math.max(quietSince ?? -Infinity, seen.quietSince ?? seen.since);
+      if (newest === undefined || seen.edge >= newest.edge) {
         newest = seen;
       }
     }
-    return newest;
+    return newest === undefined ? undefined : { ...newest, quietSince };
   }
 
   /** Starts the generation's ffmpeg, unless it was retired or the pipeline stopped meanwhile. */
