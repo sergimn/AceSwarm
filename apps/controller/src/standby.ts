@@ -9,6 +9,7 @@ import type { ControllerMetrics } from "./metrics.ts";
 import { nextRecovery, type RecoveryPolicy } from "./recovery.ts";
 import type { SharedEngines } from "./shared-engines.ts";
 import { StandbyEngine, type OpenSession, type StandbyEngineDeps } from "./standby-engine.ts";
+import { readerNote, standbyView, waitingView } from "./standby-view.ts";
 import type { MoveSlots } from "./stream-paths.ts";
 
 export interface StandbySettings {
@@ -124,8 +125,10 @@ export class StreamStandbys {
   private readonly standbys = new Map<string, StandbyEngine>();
   /** Standbys that went and are not removed yet (some wait for their start to end). */
   private readonly leaving = new Set<StandbyEngine>();
-  /** Failed standbys per path, and when the path may get a new one. */
-  private readonly pathRetries = new Map<string, { failures: number; retryAt: number }>();
+  /** Failed standbys per path, when the path may get a new one, and why the last one failed. */
+  private readonly pathRetries = new Map<string, { failures: number; retryAt: number; reason: string }>();
+  /** Whether standbys were wanted at the last check: hot standby is on and the stream played lately. */
+  private wanted = false;
   private readonly running = new Set<Promise<void>>();
   /** The candidates of the last check, best first, to pick the best standby for a failover. */
   private ranking: readonly string[] = [];
@@ -170,6 +173,7 @@ export class StreamStandbys {
     for (const standby of this.standbys.values()) {
       if (this.isHot(standby)) {
         standby.failures = 0;
+        standby.failure = undefined;
         this.pathRetries.delete(standby.path);
       }
       this.advance(standby, context);
@@ -188,7 +192,8 @@ export class StreamStandbys {
     } else if (!context.active) {
       this.dropAll("the stream has not played lately");
     }
-    return context.enabled && context.active;
+    this.wanted = context.enabled && context.active;
+    return this.wanted;
   }
 
   /**
@@ -291,17 +296,21 @@ export class StreamStandbys {
     return this.gateway.list();
   }
 
+  /**
+   * The standbys, and the paths that lost theirs and wait for a new one (or were given up), which
+   * stay as failed ones without an engine, so that the stream's figure doesn't read as if there
+   * were nothing to wait for.
+   */
   view(): StandbyView[] {
     const { hotWithinMs } = this.deps.settings;
-    return this.standbys
-      .values()
-      .map((standby) => ({
-        path: standby.path,
-        state: standby.state(hotWithinMs),
-        engine: standby.engine === undefined ? null : { name: standby.engine.name, shared: standby.shared },
-      }))
-      .toArray()
-      .toSorted((a, b) => a.path.localeCompare(b.path, "en"));
+    const own = this.standbys.values().map((standby) => standbyView(standby, hotWithinMs));
+    const waiting = this.wanted
+      ? this.pathRetries
+          .entries()
+          .filter(([path]) => !this.standbys.has(path) && this.ranking.includes(path))
+          .map(([path, retry]) => waitingView(path, retry))
+      : [];
+    return [...own, ...waiting].toSorted((a, b) => a.path.localeCompare(b.path, "en"));
   }
 
   /**
@@ -408,7 +417,10 @@ export class StreamStandbys {
       return;
     }
     // Without data for too long, it starts again, unless that was its last try.
-    if (this.fail(standby, `no data for ${String(Math.round(quietMs / 1000))}s`)) {
+    // What the reader reports is the reason it brings no data, so that is what the UI says.
+    const quiet = `no data for ${String(Math.round(quietMs / 1000))}s`;
+    const note = standby.readerNote;
+    if (this.fail(standby, note === undefined ? quiet : `${quiet}: ${note}`, note ?? quiet)) {
       slot?.();
       return;
     }
@@ -512,9 +524,13 @@ export class StreamStandbys {
     }
   }
 
-  /** A try failed: waits before the next one, and after the last one, the standby goes (returns true). */
-  private fail(standby: StandbyEngine, why: string): boolean {
+  /**
+   * A try failed: waits before the next one, and after the last one, the standby goes (returns
+   * true). `why` is logged, and `shown` (by default the same) is the reason the stream's view gives.
+   */
+  private fail(standby: StandbyEngine, why: string, shown = why): boolean {
     standby.failures += 1;
+    standby.failure = shown;
     standby.retryAt = this.retryAfter(standby.failures);
     const last = standby.failures >= STANDBY_MAX_FAILURES;
     this.logger.warn(
@@ -527,7 +543,11 @@ export class StreamStandbys {
     // The path gets a new standby later, after a longer wait each time, and none after a few rounds.
     const failures = (this.pathRetries.get(standby.path)?.failures ?? 0) + STANDBY_MAX_FAILURES;
     const done = failures >= STANDBY_MAX_FAILURES * STANDBY_MAX_PATH_ROUNDS;
-    this.pathRetries.set(standby.path, { failures, retryAt: done ? Infinity : this.retryAfter(failures) });
+    this.pathRetries.set(standby.path, {
+      failures,
+      retryAt: done ? Infinity : this.retryAfter(failures),
+      reason: shown,
+    });
     if (done) {
       this.logger.warn({ path: standby.path }, "no new standby on the path until it goes down or the stream moves");
     }
@@ -610,10 +630,13 @@ export class StreamStandbys {
     return new Map(open.map(({ standby, session }) => [session.playbackUrl, standby]));
   }
 
-  /** Notes when each standby's reader last got data. */
+  /** Notes when each standby's reader last got data, and what it says is wrong with the session. */
   private learn(sessions: ReadonlyMap<string, StandbyEngine>, readers: readonly StandbyReaderStatus[]): void {
     for (const reader of readers) {
       const standby = sessions.get(reader.source);
+      if (standby !== undefined) {
+        standby.readerNote = readerNote(reader);
+      }
       const at = reader.lastDataAt === null ? undefined : Date.parse(reader.lastDataAt);
       // Data from before its session opened, or before a failed failover, doesn't count. Nor does
       // data older than what a check already learned while this answer was on its way.

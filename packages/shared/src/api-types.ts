@@ -103,6 +103,13 @@ export interface StandbyView {
   state: StandbyState;
   /** Its engine, once it answers; a shared engine also plays other streams. */
   engine: { name: string; shared: boolean } | null;
+  /**
+   * Why it is not hot, as far as the controller knows: what the transcoder's reader of its session
+   * reports (such as that ffmpeg decodes no video from it), why its last try failed, or that the
+   * path was given up. A path that lost its standbys stays listed as failed, without an engine,
+   * for as long as it gets no new one. Null while it is hot, starting, or nothing is known.
+   */
+  reason: string | null;
 }
 
 export type PathKind = "direct" | "wireguard";

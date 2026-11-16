@@ -317,7 +317,7 @@ export class ControllerMetrics {
     });
     const standbys = new Gauge({
       name: "aceswarm_stream_standby",
-      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed",
+      help: "Each stream's standbys on other paths (value is always 1), by state: starting, warming, hot, failed (also a path that lost its standbys and waits for a new one)",
       labelNames: ["stream", "path", "state"],
       registers,
     });

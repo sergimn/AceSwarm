@@ -45,6 +45,10 @@ export class StandbyEngine {
   busy = false;
   /** Failed tries since it was last hot. */
   failures = 0;
+  /** Why the last try failed, until it is hot. */
+  failure: string | undefined;
+  /** What the transcoder's reader of its session says is wrong with it, from the last answer. */
+  readerNote: string | undefined;
   /** No new try before this time. */
   retryAt = 0;
   /** A failover to it failed: no other one before this time. */
@@ -92,6 +96,15 @@ export class StandbyEngine {
     return this.session === undefined ? "starting" : "warming";
   }
 
+  /** Why it is not hot, as far as is known (see `StandbyView.reason`). */
+  reason(hotWithinMs: number): string | null {
+    const state = this.state(hotWithinMs);
+    if (state === "failed") {
+      return this.failure ?? null;
+    }
+    return state === "warming" ? (this.readerNote ?? null) : null;
+  }
+
   /** Whether the engine is this standby's, or the one it is starting. */
   owns(engine: EngineHandle): boolean {
     return this.engine?.containerId === engine.containerId || (!this.shared && this.generation === engine.generation);
@@ -125,6 +138,7 @@ export class StandbyEngine {
     }
     this.openedAt = this.deps.now();
     this.lastDataAt = undefined;
+    this.readerNote = undefined;
     this.played = false;
     this.deps.logger.info({ path: this.path, engine: engine.name }, "standby session open; waiting for data");
   }

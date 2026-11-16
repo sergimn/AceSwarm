@@ -148,6 +148,10 @@ interface Fakes {
   standbyStarts?: MoveSlots;
   /** The playback URLs whose standby readers get data (`sources` by default). */
   standbyData?: Set<string>;
+  /** What the standby readers that get no data report as their error (none by default). */
+  standbyError?: { value: string | null };
+  /** While on, the standby readers report their broadcast's live edge as stale. */
+  standbyStale?: { on: boolean };
   /** While on, the transcoder can't be reached. */
   transcoderDown?: { on: boolean };
   /** When the stream last had video in an earlier run. */
@@ -297,8 +301,11 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       state: data.has(source) ? "receiving" : "connecting",
       bytes: 0,
       lastDataAt: data.has(source) ? new Date(clock.now).toISOString() : null,
-      error: null,
-      liveEdge: null,
+      error: data.has(source) ? null : (fakes.standbyError?.value ?? null),
+      liveEdge:
+        fakes.standbyStale?.on === true
+          ? { state: "stale", edgeAt: null, advancedAt: null, behindSeconds: null }
+          : null,
     }));
   };
   const transcoderStarts: string[] = [];
@@ -1982,7 +1989,7 @@ describe("hot standby on the other paths", () => {
     const fake = await withStandby();
     expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
     expect(fake.instance.view().standbys).toEqual([
-      { path: "wg:a", state: "hot", engine: { name: standbyEngine.name, shared: false } },
+      { path: "wg:a", state: "hot", engine: { name: standbyEngine.name, shared: false }, reason: null },
     ]);
     expect(fake.instance.assignments()).toEqual([
       { ip: main.ip, path: "direct" },
@@ -2054,7 +2061,7 @@ describe("hot standby on the other paths", () => {
     await fake.instance.tick();
     expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0, engine: { name: main.name } });
     expect(fake.instance.view().standbys).toEqual([
-      { path: "wg:a", state: "hot", engine: { name: next.name, shared: false } },
+      { path: "wg:a", state: "hot", engine: { name: next.name, shared: false }, reason: null },
     ]);
     // Only the new standby opened a session, and no ffmpeg started: the stream's own went on.
     expect(fake.sessions()).toBe(1);
@@ -2195,7 +2202,10 @@ describe("hot standby on the other paths", () => {
     }
     expect(fake.restarted).toEqual([standbyEngine.containerId, standbyEngine.containerId]);
     expect(fake.removed).toEqual([standbyEngine.containerId]);
-    expect(fake.instance.view().standbys).toEqual([]);
+    // The path stays listed while it waits for a new standby, with why the last one failed.
+    expect(fake.instance.view().standbys).toEqual([
+      { path: "wg:a", state: "failed", engine: null, reason: expect.stringMatching(/^no data for \d+s$/) as string },
+    ]);
     expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
   });
 
@@ -2290,7 +2300,15 @@ describe("hot standby on the other paths", () => {
     // Three rounds of three tries each, then no more.
     expect(removals).toBe(3);
     expect(fake.creates()).toBe(4);
-    expect(fake.instance.view().standbys).toEqual([]);
+    // It says so, rather than reading as if there were no other path to use.
+    expect(fake.instance.view().standbys).toEqual([
+      {
+        path: "wg:a",
+        state: "failed",
+        engine: null,
+        reason: expect.stringMatching(/^gave up, no data for \d+s$/) as string,
+      },
+    ]);
 
     fake.paths[1] = { ...vpn, up: false };
     await fake.instance.tick();
@@ -2298,6 +2316,58 @@ describe("hot standby on the other paths", () => {
     await fake.instance.tick();
     await settle();
     expect(fake.creates()).toBe(5);
+    expect(fake.instance.view().standbys).toMatchObject([
+      { path: "wg:a", state: expect.stringMatching(/starting|warming/) as string, reason: null },
+    ]);
+  });
+
+  test("says why a standby is not hot: what its reader reports, and that its broadcast is stale", async () => {
+    const standbyError = { value: "ffmpeg decoded no video from it" as string | null };
+    const standbyStale = { on: false };
+    const standbyData = new Set<string>();
+    const fake = await withStandby({ standbyData, standbyError, standbyStale });
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toEqual([
+      {
+        path: "wg:a",
+        state: "warming",
+        engine: { name: standbyEngine.name, shared: false },
+        reason: "ffmpeg decoded no video from it",
+      },
+    ]);
+    standbyError.value = null;
+    standbyStale.on = true;
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toMatchObject([
+      { state: "warming", reason: "its broadcast sends no new data" },
+    ]);
+    // Once its data comes, there is nothing to say.
+    standbyStale.on = false;
+    standbyData.add(play(standbyEngine));
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toMatchObject([{ state: "hot", reason: null }]);
+  });
+
+  test("keeps the reader's note in the reason a failed standby gives, and says nothing once hot standby is off", async () => {
+    const hotStandby = { on: true };
+    const standbyError = { value: "the engine answered 500" as string | null };
+    const fake = await withStandby({ standbyData: new Set(), standbyError, hotStandby });
+    for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.instance.view().standbys).toMatchObject([
+      {
+        path: "wg:a",
+        state: "failed",
+        engine: null,
+        reason: expect.stringMatching(/^the engine answered 500$/) as string,
+      },
+    ]);
+    hotStandby.on = false;
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toEqual([]);
   });
 
   test("removes its standbys once the stream hasn't played for a while, and starts none", async () => {
@@ -2416,7 +2486,7 @@ describe("hot standby on the other paths", () => {
       const fake = await withStandby({ shared: pool.shared, sharing: { on: true }, sources });
       expect(pool.calls).toEqual(["acquire direct as play", "acquire wg:a as standby"]);
       expect(fake.instance.view().standbys).toEqual([
-        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true } },
+        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true }, reason: null },
       ]);
       // The shared engines manage their gateway paths.
       expect(fake.instance.assignments()).toEqual([]);
@@ -2464,7 +2534,7 @@ describe("hot standby on the other paths", () => {
       expect(fake.instance.view().engine).toEqual({ name: onDirect.name, shared: true });
       expect(fake.removed).toEqual(expect.arrayContaining([main.containerId, standbyEngine.containerId]));
       expect(fake.instance.view().standbys).toEqual([
-        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true } },
+        { path: "wg:a", state: "hot", engine: { name: onVpn.name, shared: true }, reason: null },
       ]);
       expect(fake.instance.assignments()).toEqual([]);
     });

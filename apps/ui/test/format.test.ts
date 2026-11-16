@@ -130,11 +130,24 @@ describe("formatStandbys", () => {
     expect(
       formatStandbys(
         [
-          { path: "wg:a", state: "hot", engine: { name: "e1", shared: false } },
-          { path: "direct", state: "warming", engine: null },
+          { path: "wg:a", state: "hot", engine: { name: "e1", shared: false }, reason: null },
+          { path: "direct", state: "warming", engine: null, reason: null },
         ],
         [vpn],
       ),
     ).toBe("VPN A (hot), Direct (warming up)");
+  });
+
+  it("says why a standby is not hot, and that a path was given up", () => {
+    const vpn = { id: "wg:a", label: "VPN A" } as PathStatus;
+    expect(
+      formatStandbys(
+        [
+          { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
+          { path: "wg:a", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+        ],
+        [vpn],
+      ),
+    ).toBe("Direct (warming up: ffmpeg decoded no video from it), VPN A (failed: gave up, no data for 90s)");
   });
 });

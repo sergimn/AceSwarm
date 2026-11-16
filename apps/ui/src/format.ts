@@ -127,9 +127,15 @@ const STANDBY_LABELS: Record<StandbyState, string> = {
   failed: "failed",
 };
 
-/** A stream's standbys on other paths, such as "VPN A (hot)"; "–" without any. */
+/**
+ * A stream's standbys on other paths, such as "VPN A (hot)", with why one is not hot when the
+ * controller knows, such as "VPN A (warming up: ffmpeg decoded no video from it)"; "–" without any.
+ */
 export function formatStandbys(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
-  const labels = standbys.map((standby) => `${pathLabel(standby.path, paths)} (${STANDBY_LABELS[standby.state]})`);
+  const labels = standbys.map(({ path, state, reason }) => {
+    const detail = reason === null ? STANDBY_LABELS[state] : `${STANDBY_LABELS[state]}: ${reason}`;
+    return `${pathLabel(path, paths)} (${detail})`;
+  });
   return labels.length === 0 ? "–" : labels.join(", ");
 }
 
