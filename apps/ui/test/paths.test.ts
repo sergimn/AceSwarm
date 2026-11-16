@@ -45,6 +45,10 @@ describe("the top bar", () => {
     expect(summary([])).toBe("0 streams · 0 live · 1/1 network paths up");
     expect(summary([playing])).toBe("1 stream · 1 live · 1/1 network paths up");
     expect(summary([playing, stalled])).toBe("2 streams · 1 live · 1/1 network paths up");
+    // A stream that was turned off does not count as live, and is counted as disabled.
+    expect(summary([playing, stream({ enabled: false, state: "stopped" })])).toBe(
+      "2 streams · 1 live · 1 disabled · 1/1 network paths up",
+    );
   });
 });
 

@@ -2,7 +2,8 @@ groups:
   - name: aceswarm-stability
     interval: 1m
     rules:
-      # Share of time each stream delivered new frames, kept for long-term stability history.
+      # Share of time each stream delivered new frames, kept for long-term stability history. A
+      # disabled stream has no aceswarm_stream_up, so the time it was off counts neither way.
       - record: aceswarm:stream_up:ratio_1h
         expr: avg_over_time(aceswarm_stream_up[1h])
       - record: aceswarm:stream_recoveries:increase_1h

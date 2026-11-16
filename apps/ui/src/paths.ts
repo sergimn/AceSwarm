@@ -1,4 +1,5 @@
 import type { PathStatus, Snapshot, StreamView } from "@aceswarm/shared/api-types";
+import { formatDisabledCount, shownState } from "./format.ts";
 
 /**
  * The direct path while WireGuard only is on. The gateway still probes it, and so it can report it
@@ -26,12 +27,19 @@ export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly"
   return `${String(usable.filter((path) => path.up).length)}/${String(usable.length)} network paths up`;
 }
 
-/** The top bar: how many streams there are and how many play, and the paths that are up. */
+/** The top bar: how many streams there are, how many play and how many are turned off, and the paths that are up. */
 export function formatSummary(
   snapshot: Pick<Snapshot, "streams" | "paths" | "wireguardOnly" | "gatewayReachable">,
 ): string {
-  const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
-  return [count(snapshot.streams.length, "stream"), `${String(live)} live`, formatPathsUp(snapshot)].join(" · ");
+  const live = snapshot.streams.filter((stream) => shownState(stream) === "playing").length;
+  return [
+    count(snapshot.streams.length, "stream"),
+    `${String(live)} live`,
+    formatDisabledCount(snapshot.streams),
+    formatPathsUp(snapshot),
+  ]
+    .filter((part) => part !== undefined)
+    .join(" · ");
 }
 
 /** What runs through one path right now. */

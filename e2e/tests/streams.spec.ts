@@ -152,6 +152,12 @@ test("keeps streams and their detected kind across a controller restart", async 
   }
 });
 
+/** One series' value in the controller's metrics text; the registry adds a service label of its own. */
+function metricValue(text: string, name: string, labels: string): number | undefined {
+  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(text);
+  return match === null ? undefined : Number(match[1]);
+}
+
 test("disables a stream, says how long ago it had video, and plays it again once enabled", async ({
   page,
   request,
@@ -202,8 +208,15 @@ test("disables a stream, says how long ago it had video, and plays it again once
   const stopped = await streamById(request, id);
   expect(stopped).toMatchObject({ enabled: false, state: "stopped", path: null });
   expect(Date.parse(stopped!.lastFrameAt!)).toBeGreaterThanOrEqual(Date.parse(playing.lastFrameAt!));
-  expect((await request.post(`/api/streams/${id}/restart`)).status()).toBe(404);
+  const refused = await request.post(`/api/streams/${id}/restart`);
+  expect(refused.status()).toBe(404);
+  expect(await refused.json()).toEqual({ error: "stream is disabled" });
   await expect.poll(() => engineContainers(id), { timeout: 30_000 }).toEqual([]);
+  // It is no outage in the metrics: the stream is listed and says why, but has no up value, so the
+  // alert, the dashboard's outages and its availability leave the time it is off out.
+  const off = await (await request.get("/metrics")).text();
+  expect(metricValue(off, "aceswarm_stream_state", `stream="${id}",state="stopped"`)).toBe(1);
+  expect(metricValue(off, "aceswarm_stream_up", `stream="${id}"`)).toBeUndefined();
 
   // The tile says so: "Disabled", no path, the age of its last video (not "Never"), no peers.
   await page.goBack();
@@ -215,6 +228,7 @@ test("disables a stream, says how long ago it had video, and plays it again once
   const stat = (label: string) => tile.locator(".tile-stats .stat", { hasText: label }).locator(".stat-value");
   await expect(stat("Freshness")).toHaveText(/^\d+[sm] ago$/);
   await expect(stat("Peers")).toHaveText("–");
+  await expect(page.locator("#summary")).toContainText("1 disabled");
 
   // The player says why there is no picture, offers to enable it, and counts nobody as watching.
   await tile.click();
@@ -237,6 +251,10 @@ test("disables a stream, says how long ago it had video, and plays it again once
     .poll(async () => Date.parse((await streamById(request, id))?.lastFrameAt ?? ""), { timeout: 30_000 })
     .toBeGreaterThan(Date.parse(stopped!.lastFrameAt!));
   await expect(tile).toHaveAttribute("data-state", "playing");
+  await expect(page.locator("#summary")).not.toContainText("disabled");
+  await expect
+    .poll(async () => metricValue(await (await request.get("/metrics")).text(), "aceswarm_stream_up", `stream="${id}"`))
+    .toBe(1);
   expect(engineContainers(id)).toHaveLength(1);
 });
 
