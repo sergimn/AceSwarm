@@ -136,6 +136,10 @@ interface Fakes {
   savedSession?: EngineSession;
   /** While on, opening a session never finishes. */
   hangSessions?: boolean;
+  /** Opening a session waits until this promise settles. */
+  sessionGate?: Promise<void>;
+  /** While on, starting an engine fails the way a Docker API error does. */
+  failEngineStarts?: { on: boolean };
   /** While on, the stream keeps hot standbys on the other paths (off by default). */
   hotStandby?: { on: boolean };
   standby?: Partial<StandbySettings>;
@@ -189,6 +193,9 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     },
     create: async (_streamId: string, _generation: number, onAddress?: OnEngineAddress) => {
       creates += 1;
+      if (fakes.failEngineStarts?.on === true) {
+        throw new Error("docker said no");
+      }
       const handle = (created.length > 1 ? created.shift() : created[0]) ?? engine;
       await onAddress?.(handle);
       assignedWhenReady.push([...assigned]);
@@ -199,14 +206,16 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   let sessions = 0;
   const stopped: string[] = [];
   const ace = {
-    startSession: (baseUrl: string) => {
+    startSession: async (baseUrl: string) => {
       if (fakes.hangSessions === true) {
         return new Promise(() => undefined);
       }
+      await fakes.sessionGate;
       sessions += 1;
-      return fakes.failFirstSession === true && sessions === 1
-        ? Promise.reject(new Error("engine died"))
-        : Promise.resolve({ playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` });
+      if (fakes.failFirstSession === true && sessions === 1) {
+        throw new Error("engine died");
+      }
+      return { playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` };
     },
     stopSession: (commandUrl: string) => {
       stopped.push(commandUrl);
@@ -475,6 +484,144 @@ test("stops sending the address of an engine that was replaced", async () => {
   expect(assigned.at(-1)).toEqual({ ip: replacement.ip, path: "direct" });
   expect(unassigned).toEqual([engine.ip]);
   expect(instance.assignments()).toEqual([{ ip: replacement.ip, path: "direct" }]);
+});
+
+describe("a manual restart of a stream that has no session", () => {
+  const SHORT = 1000;
+
+  test("starts it at once instead of when the ladder's wait is over", async () => {
+    const fake = supervisor([direct], { failFirstSession: true });
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "error", message: "engine died" });
+
+    // Without a restart, the next start waits for the ladder.
+    fake.clock.now += SHORT / 2;
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(1);
+
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(2);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", message: "opening stream", recoveries: 0 });
+    expect(fake.restarted).toEqual([]);
+  });
+
+  test("starts a stream whose engine could not start at once", async () => {
+    const failEngineStarts = { on: true };
+    const fake = supervisor([direct], { failEngineStarts });
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "error", message: "docker said no" });
+    failEngineStarts.on = false;
+    fake.clock.now += SHORT / 2;
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(1);
+
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(2);
+    expect(fake.sessions()).toBe(1);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", recoveries: 0 });
+  });
+
+  test("starts the ladder's waits over", async () => {
+    const failEngineStarts = { on: true };
+    const fake = supervisor([direct], { failEngineStarts });
+    // Three failed starts: the next one would wait four times the first delay.
+    for (const wait of [0, 1001, 2001]) {
+      fake.clock.now += wait;
+      await fake.instance.tick();
+    }
+    expect(fake.creates()).toBe(3);
+    fake.clock.now += 1001;
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(3);
+
+    // It fails again, but the waits count from this try on: the first delay again.
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(4);
+    fake.clock.now += 1001;
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(5);
+  });
+
+  test("tries only once per request", async () => {
+    const failEngineStarts = { on: true };
+    const fake = supervisor([direct], { failEngineStarts });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(2);
+    // That start failed too: the ladder's wait applies again.
+    fake.clock.now += SHORT / 2;
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(2);
+  });
+
+  test("a request before the first check doesn't restart the engine it starts", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(1);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("a request while it starts, and it starts, doesn't restart the engine it started", async () => {
+    const { promise: sessionGate, resolve: open } = Promise.withResolvers<undefined>();
+    const fake = supervisor([direct], { video: { on: true }, sessionGate });
+    const starting = fake.instance.tick();
+    await setImmediate();
+    fake.instance.requestRestart();
+    open(undefined);
+    await starting;
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(1);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("a request while it starts, and it fails, starts it again at once", async () => {
+    const { promise: sessionGate, resolve: open } = Promise.withResolvers<undefined>();
+    const fake = supervisor([direct], { failFirstSession: true, sessionGate });
+    const starting = fake.instance.tick();
+    await setImmediate();
+    fake.instance.requestRestart();
+    open(undefined);
+    await starting;
+    expect(fake.instance.view().state).toBe("error");
+    fake.clock.now += SHORT / 2;
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(2);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", recoveries: 0 });
+  });
+
+  test("a request while no path is up waits for one, and doesn't restart the engine that starts then", async () => {
+    const paths: PathStatus[] = [{ ...direct, up: false }];
+    const fake = supervisor(paths, { video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(0);
+    expect(fake.instance.view().state).toBe("stalled");
+
+    paths[0] = direct;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(1);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("a stream that has a session restarts as before", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.restarted).toEqual([engine.containerId]);
+    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
+  });
 });
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -1609,6 +1756,38 @@ describe("sharing one engine per path", () => {
     expect(fake.stopped).toEqual([`${sharedEngine.baseUrl}/cmd`]);
   });
 
+  test("a manual restart while the stream starts on the shared engine doesn't replace that engine", async () => {
+    const pool = sharedEngines();
+    const { promise: sessionGate, resolve: open } = Promise.withResolvers<undefined>();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, sessionGate, video: { on: true } });
+    const starting = fake.instance.tick();
+    await setImmediate();
+    fake.instance.requestRestart();
+    open(undefined);
+    await starting;
+    await fake.instance.tick();
+    expect(pool.restarts).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("a manual restart while the gateway's paths are unknown waits for them, then starts without a restart", async () => {
+    const pool = sharedEngines();
+    const paths: PathStatus[] = [];
+    const fake = supervisor(paths, { shared: pool.shared, sharing: { on: true }, video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view().message).toBe("waiting for the network gateway");
+    expect(pool.acquired).toEqual([]);
+
+    paths.push(direct);
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(pool.acquired).toEqual(["direct"]);
+    expect(pool.restarts).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
   test("a manual restart replaces the shared engine and restarts the stream's session", async () => {
     const pool = sharedEngines();
     const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
@@ -1617,6 +1796,20 @@ describe("sharing one engine per path", () => {
     await fake.instance.tick();
     expect(pool.restarts).toEqual([sharedEngine.containerId]);
     expect(fake.restarted).toEqual([]);
+  });
+
+  test("a manual restart of a stream whose start failed starts it at once, and doesn't replace the engine", async () => {
+    const pool = sharedEngines();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, failFirstSession: true });
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("error");
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.sessions()).toBe(2);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", recoveries: 0 });
+    // It started, so there was nothing to restart: the engine other streams play from stays.
+    await fake.instance.tick();
+    expect(pool.restarts).toEqual([]);
   });
 });
 
