@@ -80,7 +80,7 @@ class App {
       this.streamList.open(this.snapshot);
     });
     element("[data-action=network]").addEventListener("click", () => {
-      this.network.open(this.snapshot);
+      this.network.open();
     });
   }
 
