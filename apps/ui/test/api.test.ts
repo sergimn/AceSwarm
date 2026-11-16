@@ -112,7 +112,7 @@ describe("subscribeSnapshots", () => {
     expect(last(statuses)).toBe("reconnecting");
     expect(FakeEventSource.instances).toHaveLength(1);
 
-    vi.advanceTimersByTime(RECONNECT_DELAY_MS - 1);
+    vi.advanceTimersByTime(2999);
     expect(FakeEventSource.instances).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(FakeEventSource.instances).toHaveLength(2);
@@ -134,11 +134,11 @@ describe("subscribeSnapshots", () => {
     current().failsForGood();
     // Past the time a silent connection is replaced after: the watchdog stays out of the way.
     for (let attempt = 1; attempt <= 8; attempt++) {
-      vi.advanceTimersByTime(RECONNECT_DELAY_MS);
+      vi.advanceTimersByTime(3000);
       expect(FakeEventSource.instances).toHaveLength(attempt + 1);
       current().failsForGood();
     }
-    vi.advanceTimersByTime(RECONNECT_DELAY_MS - 1);
+    vi.advanceTimersByTime(2999);
     expect(FakeEventSource.instances).toHaveLength(9);
   });
 
@@ -178,6 +178,15 @@ describe("subscribeSnapshots", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     current().failsForGood();
     vi.advanceTimersByTime(RECONNECT_DELAY_MS + 2000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it("replaces a connection after 10 s of silence, not before", () => {
+    current().opens();
+    current().sends({});
+    vi.advanceTimersByTime(10_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(2000);
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 

@@ -93,6 +93,16 @@ test("says when it hears nothing from the controller, and recovers when it does 
   await expect(age).toHaveText(/^\d+s ago$/);
   await expect(age).not.toHaveClass(/\bfresh\b/);
 
+  // The player covers the top bar, so it says so too, and its overlay stays up: it would fade after
+  // 4 s, which leaves a frozen picture with no cue.
+  await tile.click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player.locator(".player-connection")).toHaveText(/^Reconnecting… last update \d+s ago$/);
+  await page.waitForTimeout(5500);
+  await expect(player).toHaveClass(/\bshow-overlay\b/);
+  await player.getByRole("button", { name: "Back" }).click();
+  await expect(player).toBeHidden();
+
   // Once the controller answers again, a new event stream opens by itself.
   await page.unroute("**/api/events");
   await expect(page.locator("body")).not.toHaveAttribute("data-stale", "", { timeout: 30_000 });
