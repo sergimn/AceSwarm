@@ -186,6 +186,30 @@ a {
   color: var(--amber);
 }
 
+/*
+ * The page hears nothing from the controller (see liveness.ts): what it shows is old. The tiles'
+ * contents dim, not the tiles, whose focus ring is how a remote shows where it is, and not the
+ * background of the stats, which would show the name behind it. The player and the dialogs cover
+ * the top bar, so they say it themselves.
+ */
+[data-stale] .tile > :not(.tile-stats),
+[data-stale] .tile-stats > *,
+[data-stale] .summary {
+  opacity: 0.6;
+}
+
+[data-stale] .dialog-header::after {
+  content: "Not updating";
+  order: 1;
+  margin: 0 16px 0 auto;
+  color: var(--amber);
+  font-size: 0.85em;
+}
+
+[data-stale] .dialog-header .icon-button {
+  order: 2;
+}
+
 .footer {
   margin-top: auto;
   padding-top: 16px;
@@ -834,6 +858,11 @@ p.form-error {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+}
+
+.player-connection {
+  margin: 6px 0 0;
+  color: var(--amber);
 }
 
 .player-clock {

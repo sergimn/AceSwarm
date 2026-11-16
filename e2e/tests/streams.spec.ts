@@ -53,6 +53,72 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   expect(stream?.aceIdKind).toBe("content-id");
 });
 
+test("shows ages by the controller's clock when the browser's clock is wrong", async ({ page }) => {
+  // A TV whose clock is 5 minutes fast, as one whose time was never set can be: measured against
+  // it, every frame would be minutes old.
+  await page.addInitScript(() => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + 5 * 60_000;
+  });
+  await page.goto("/");
+  // The page's clock really is that far off the controller's.
+  const skewMs = await page.evaluate(async () => {
+    const generatedAt = ((await (await fetch("/api/snapshot")).json()) as { generatedAt: string }).generatedAt;
+    return Date.now() - Date.parse(generatedAt);
+  });
+  expect(skewMs).toBeGreaterThan(4 * 60_000);
+
+  const tile = page.locator(".tile", { hasText: "Test pattern" });
+  await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
+  await tile.hover();
+  const age = tile.locator(".stat", { hasText: "Freshness" }).locator(".stat-value");
+  await expect(age).toHaveText("Now");
+  await expect(age).toHaveClass(/\bfresh\b/);
+
+  // The player's "Last frame" is measured on the same clock.
+  await tile.click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player.locator(".player-details")).toContainText("Last frame: Now");
+  await player.getByRole("button", { name: "Back" }).click();
+  await expect(player).toBeHidden();
+});
+
+test("says when it hears nothing from the controller, and recovers when it does again", async ({ page }) => {
+  // Every connection to the event stream is refused, as a reverse proxy does while the controller
+  // restarts: the browser gives up on the stream for good, and the page opens new ones.
+  await page.route("**/api/events", (route) => route.fulfill({ status: 502, body: "bad gateway" }));
+  await page.goto("/");
+  const tile = page.locator(".tile", { hasText: "Test pattern" });
+  await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
+  await tile.hover();
+  const age = tile.locator(".stat", { hasText: "Freshness" }).locator(".stat-value");
+  await expect(age).toHaveText("Now");
+
+  // No snapshot follows the first: after a few seconds what the page shows is old, and it says so.
+  await expect(page.locator("body")).toHaveAttribute("data-stale", "", { timeout: 30_000 });
+  await expect(page.locator("#connection")).toHaveText(/^Reconnecting… last update \d+s ago$/);
+  await expect(age).toHaveText(/^\d+s ago$/);
+  await expect(age).not.toHaveClass(/\bfresh\b/);
+
+  // The player covers the top bar, so it says so too, and its overlay stays up: it would fade after
+  // 4 s, which leaves a frozen picture with no cue.
+  await tile.click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player.locator(".player-connection")).toHaveText(/^Reconnecting… last update \d+s ago$/);
+  // Its clock shows too, whether or not the browser let it enter full screen.
+  await expect(player.locator(".player-clock")).toHaveText(/^\d\d:\d\d$/);
+  await page.waitForTimeout(5500);
+  await expect(player).toHaveClass(/\bshow-overlay\b/);
+  await player.getByRole("button", { name: "Back" }).click();
+  await expect(player).toBeHidden();
+
+  // Once the controller answers again, a new event stream opens by itself.
+  await page.unroute("**/api/events");
+  await expect(page.locator("body")).not.toHaveAttribute("data-stale", "", { timeout: 30_000 });
+  await expect(page.locator("#connection")).toHaveText("Live");
+  await expect(age).toHaveText("Now");
+});
+
 test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
   expect(stream).toBeDefined();

@@ -89,23 +89,71 @@ export const api = {
 
 export type ConnectionStatus = "connecting" | "live" | "reconnecting";
 
-/** Receives a snapshot every couple of seconds over Server-Sent Events (the browser reconnects). */
+/** How long a source that the browser gave up on is left alone before a new one replaces it. */
+export const RECONNECT_DELAY_MS = 3000;
+/**
+ * A connection that delivers nothing for this long is replaced, although it never reported an
+ * error: the controller sends a snapshot every 2 seconds, and one that dropped silently (a lost
+ * Wi-Fi) can look open for minutes.
+ */
+export const SILENT_RECONNECT_MS = 10_000;
+const WATCHDOG_MS = 2000;
+
+/**
+ * Receives a snapshot every couple of seconds over Server-Sent Events. The browser reconnects by
+ * itself after a dropped connection, but not after an HTTP error answer (a reverse proxy's 502
+ * while the controller restarts): the source is then closed for good. So a closed source, and a
+ * silent one, are replaced with a new one.
+ */
 export function subscribeSnapshots(
   onSnapshot: (snapshot: Snapshot) => void,
   onStatus: (status: ConnectionStatus) => void,
 ): () => void {
+  let source: EventSource | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let heardAt = performance.now();
+  let stopped = false;
+
+  const connect = (): void => {
+    heardAt = performance.now();
+    const current = new EventSource("/api/events");
+    source = current;
+    current.addEventListener("open", () => {
+      heardAt = performance.now();
+      onStatus("live");
+    });
+    current.addEventListener("error", () => {
+      onStatus("reconnecting");
+      if (current.readyState === EventSource.CLOSED && retry === undefined && !stopped) {
+        retry = setTimeout(() => {
+          retry = undefined;
+          if (!stopped) {
+            connect();
+          }
+        }, RECONNECT_DELAY_MS);
+      }
+    });
+    current.addEventListener("snapshot", (event) => {
+      heardAt = performance.now();
+      onSnapshot(JSON.parse((event as MessageEvent<string>).data) as Snapshot);
+    });
+  };
+
   onStatus("connecting");
-  const source = new EventSource("/api/events");
-  source.addEventListener("open", () => {
-    onStatus("live");
-  });
-  source.addEventListener("error", () => {
+  connect();
+  const watchdog = setInterval(() => {
+    if (retry !== undefined || performance.now() - heardAt <= SILENT_RECONNECT_MS) {
+      return;
+    }
+    source?.close();
     onStatus("reconnecting");
-  });
-  source.addEventListener("snapshot", (event) => {
-    onSnapshot(JSON.parse((event as MessageEvent<string>).data) as Snapshot);
-  });
+    connect();
+  }, WATCHDOG_MS);
   return () => {
-    source.close();
+    stopped = true;
+    clearTimeout(retry);
+    retry = undefined;
+    clearInterval(watchdog);
+    source?.close();
   };
 }

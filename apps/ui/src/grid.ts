@@ -1,5 +1,5 @@
 import type { Snapshot, StreamState, StreamView } from "@aceswarm/shared/api-types";
-import { h } from "./dom.ts";
+import { h, setText } from "./dom.ts";
 import {
   countryHint,
   formatFreshness,
@@ -14,6 +14,7 @@ import {
   STATE_LABELS,
   topCountries,
 } from "./format.ts";
+import type { PageTime } from "./liveness.ts";
 import type { PreviewManager } from "./previews.ts";
 
 const THUMBNAIL_REFRESH_MS = 10_000;
@@ -37,6 +38,9 @@ class Tile {
   private readonly standbys: HTMLElement;
   private readonly message: HTMLElement;
   private thumbnailTick = -1;
+  /** What the age shown in Freshness is measured from, kept to show it older every second. */
+  private lastFrameAt: string | null = null;
+  private playing = false;
   /** The countries it shows, as a key; none yet, so that the first render also shows that there are none. */
   private countryKey: string | undefined;
 
@@ -85,7 +89,7 @@ class Tile {
     });
   }
 
-  update(stream: StreamView, snapshot: Snapshot, now: number): void {
+  update(stream: StreamView, snapshot: Snapshot, time: PageTime): void {
     const state = shownState(stream);
     this.element.dataset["state"] = state;
     this.element.setAttribute("aria-label", `${stream.name}, ${STATE_LABELS[state]}`);
@@ -96,9 +100,9 @@ class Tile {
     // A stopped stream is on no path, whatever path it was on.
     this.path.hidden = stream.path === null || state === "stopped";
 
-    const playing = state === "playing";
-    this.freshness.textContent = formatFreshness(stream.lastFrameAt, now, playing);
-    this.freshness.classList.toggle("fresh", isFresh(stream.lastFrameAt, now, playing));
+    this.lastFrameAt = stream.lastFrameAt;
+    this.playing = state === "playing";
+    this.refreshAge(time);
     const shared = stream.engine?.shared === true;
     this.peers.textContent = formatPeers(stream.peers, state, shared);
     this.peers.title = state === "stopped" ? "" : peersHint(shared);
@@ -112,7 +116,17 @@ class Tile {
     this.message.hidden = stream.message === null;
     this.renderCountries(stream);
 
-    this.renderPoster(stream, state, now);
+    this.renderPoster(stream, state, time.now);
+  }
+
+  /**
+   * The age of the last frame. A page that hears nothing doesn't know that the stream still plays:
+   * "Now", and its green, would say it does.
+   */
+  refreshAge(time: PageTime): void {
+    const playing = this.playing && !time.stale;
+    setText(this.freshness, formatFreshness(this.lastFrameAt, time.now, playing));
+    this.freshness.classList.toggle("fresh", isFresh(this.lastFrameAt, time.now, playing));
   }
 
   private renderPoster(stream: StreamView, state: StreamState, now: number): void {
@@ -178,7 +192,14 @@ export class Grid {
     return this.container.querySelector<HTMLElement>(".tile") ?? undefined;
   }
 
-  render(snapshot: Snapshot, now: number): void {
+  /** Ages the Freshness of every tile, between snapshots. */
+  refreshAges(time: PageTime): void {
+    for (const tile of this.tiles.values()) {
+      tile.refreshAge(time);
+    }
+  }
+
+  render(snapshot: Snapshot, time: PageTime): void {
     const seen = new Set<string>();
     let previous: Element | null = null;
     for (const stream of snapshot.streams) {
@@ -189,7 +210,7 @@ export class Grid {
         this.tiles.set(stream.id, tile);
         this.previews.register(tile.video, stream.hls.preview);
       }
-      tile.update(stream, snapshot, now);
+      tile.update(stream, snapshot, time);
       this.previews.setWanted(tile.video, stream.enabled && PREVIEW_STATES.has(stream.state));
       // Keep DOM order equal to the snapshot order without moving nodes that are already placed
       // (moving the focused tile would drop focus).

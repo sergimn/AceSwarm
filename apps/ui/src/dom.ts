@@ -35,6 +35,13 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+/** Sets an element's text, leaving it alone when it already says that. */
+export function setText(element: HTMLElement, text: string): void {
+  if (element.textContent !== text) {
+    element.textContent = text;
+  }
+}
+
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
