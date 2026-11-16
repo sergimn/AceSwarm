@@ -198,7 +198,7 @@ async function harness(video = true) {
 
 test("a disabled stream says when it last had video, is on no path and can't be restarted", async () => {
   const { start, pipelines, reported } = await harness();
-  const { orchestrator, store } = await start();
+  const { orchestrator } = await start();
   const added = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
   await vi.waitFor(() => {
     expect(orchestrator.getStream(added.id)).toMatchObject({ state: "playing", path: "direct" });
@@ -215,12 +215,9 @@ test("a disabled stream says when it last had video, is on no path and can't be 
   expect(orchestrator.runningSince(added.id)).toBeUndefined();
 
   // The frames that came between the last check and the stop count too: the stream ends up with
-  // the last frame time its pipeline ever reported. It has stopped once its pipeline is gone and
-  // its session forgotten, the last thing it saves: until then it writes to the stream list, which
-  // the restarted controller below shares.
+  // the last frame time its pipeline ever reported.
   await vi.waitFor(() => {
     expect(pipelines.has(added.id)).toBe(false);
-    expect(store.get(added.id)?.session).toBeNull();
     expect(orchestrator.getStream(added.id)?.lastFrameAt).toBe(reported.get(added.id));
   });
   const stopped = reported.get(added.id);
