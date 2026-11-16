@@ -1,7 +1,8 @@
-import type { HotStandbyView, Settings, SharedEnginesView, Snapshot, StreamView } from "@aceswarm/shared/api-types";
+import type { HotStandbyView, Settings, Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import { api } from "./api.ts";
 import { confirmButton, dialogShell, errorMessage, h, icon, toast } from "./dom.ts";
 import { shownState, STATE_LABELS } from "./format.ts";
+import { sharedEnginesHint } from "./hints.ts";
 import type { Navigator } from "./navigation.ts";
 import type { PreviewMode } from "./previews.ts";
 
@@ -122,19 +123,6 @@ class SettingSwitch {
 async function saveSetting<K extends keyof Settings>(key: K, value: Settings[K]): Promise<Settings[K]> {
   const settings = await api.updateSettings({ [key]: value });
   return settings[key];
-}
-
-function sharedEnginesHint(view: SharedEnginesView | undefined): string {
-  if (view?.enabled !== true) {
-    return "Off: every stream has an engine of its own.";
-  }
-  return [
-    "On: streams on the same network path share one engine, which needs much less memory.",
-    `It restarts only when a stream someone is watching fails, or more than ${String(view.maxFailures)}`,
-    `of its streams fail within ${String(view.failureWindowSeconds)} s.`,
-    "A stream's connected peers are its own, but the peers sending data and their countries are the engine's:",
-    "every stream on it shows the same.",
-  ].join(" ");
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   engineContainers,
   gatewayAssignments,
   gatewayRequest,
+  networkDialog,
   openNetwork,
   resetStack,
   streamById,
@@ -152,12 +153,34 @@ test("streams wait instead of going direct while no WireGuard path is up", async
   const before = await waitForPlaying(request, vpnOnly.id);
   expect(before.path).toBe(VPN_PATH);
 
+  // The Network dialog shows the tunnel up, and is closed again: when it opens later it has
+  // shown something else, and must not show that.
+  const opened = await openNetwork(page);
+  await expect(opened.section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Up", { timeout: 90_000 });
+  await opened.dialog.getByRole("button", { name: "Close" }).click();
+  await expect(opened.dialog).toBeHidden();
+
   // Make the WireGuard server unreachable: the tunnel stops carrying anything, its probes fail and
   // the path goes down, while the direct path stays up.
   setVpnServerUnreachable(true);
   try {
-    const { section } = await openNetwork(page);
-    await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 60_000 });
+    // WireGuard only is on, so the top bar counts the tunnel alone: no path a stream may use is up,
+    // although the direct one is. Once it says so the page has the snapshot, and the dialog must
+    // draw it as it opens, at once: not what it showed before, and (on a page that has just
+    // loaded) not an empty list.
+    const { dialog, section } = networkDialog(page);
+    const expectOutage = async (): Promise<void> => {
+      await page.getByRole("button", { name: "Network", exact: true }).click();
+      await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 200 });
+      await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off", { timeout: 200 });
+    };
+    await expect(page.locator("#summary")).toContainText("0/1 network paths up", { timeout: 60_000 });
+    await expectOutage();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toBeHidden();
+    await page.goto("/");
+    await expect(page.locator("#summary")).toContainText("0/1 network paths up", { timeout: 60_000 });
+    await expectOutage();
 
     // The stream stalls once the engine's buffer runs out, and tries to recover where it is. With
     // WireGuard only off, its first recovery would move it to the direct path, which is up and

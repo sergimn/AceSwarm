@@ -9,6 +9,7 @@ import { Grid } from "./grid.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
+import { formatPathsUp } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
 import { WatchReporter } from "./watch.ts";
@@ -79,7 +80,7 @@ class App {
       this.streamList.open(this.snapshot);
     });
     element("[data-action=network]").addEventListener("click", () => {
-      this.network.open(this.snapshot);
+      this.network.open();
     });
   }
 
@@ -103,11 +104,10 @@ class App {
     this.streamList.update(snapshot);
     this.network.update(snapshot);
     const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
-    const pathsUp = snapshot.paths.filter((path) => path.up).length;
     this.summary.textContent = [
       `${String(snapshot.streams.length)} streams`,
       `${String(live)} live`,
-      `${String(pathsUp)}/${String(snapshot.paths.length)} network paths up`,
+      formatPathsUp(snapshot),
     ].join(" · ");
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
