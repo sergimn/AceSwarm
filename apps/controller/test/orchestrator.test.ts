@@ -19,6 +19,19 @@ import { WireguardStore } from "../src/wireguard-store.ts";
 
 const ACE_ID = "6d325cda6ed591647ef5e91edd043147bce8be30";
 
+/**
+ * These tests use real stores, and every store write flushes its file to the disk: a stream that
+ * starts takes five or six, so what the tests wait for takes as long as the disk does, which is
+ * seconds on a slow one. Their waits and the tests themselves get limits that only a hang reaches.
+ */
+const WAIT_MS = 20_000;
+const SLOW_DISK = { timeout: 60_000 };
+
+/** `vi.waitFor` that allows for a slow disk. */
+async function waitFor(check: () => void): Promise<void> {
+  await vi.waitFor(check, { timeout: WAIT_MS });
+}
+
 const direct: PathStatus = {
   id: "direct",
   kind: "direct",
@@ -56,7 +69,7 @@ async function harness(video = true) {
       await orchestrator.stop();
     }
     await rm(dataDir, { recursive: true, force: true });
-  });
+  }, SLOW_DISK.timeout);
   const pipelines = new Map<string, PipelineStatus>();
   /** The last frame time the transcoder reported for each stream. */
   const reported = new Map<string, string>();
@@ -156,7 +169,10 @@ async function harness(video = true) {
         pathStrategy: "sticky-best",
         pathMinDwellMs: 300_000,
       },
-      stopWaitMs: 500,
+      // However long a step takes on a slow disk, `stop()` waits for it: a step left running would
+      // keep writing to the stream list after `stop()` returned, while the next orchestrator or the
+      // removal of the directory is under way.
+      stopWaitMs: Infinity,
     });
     started.push(orchestrator);
     await orchestrator.start();
@@ -165,11 +181,11 @@ async function harness(video = true) {
   return { start, pipelines, reported };
 }
 
-test("a disabled stream says when it last had video, is on no path and can't be restarted", async () => {
+test("a disabled stream says when it last had video, is on no path and can't be restarted", SLOW_DISK, async () => {
   const { start, pipelines, reported } = await harness();
-  const { orchestrator } = await start();
+  const { orchestrator, store } = await start();
   const added = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
-  await vi.waitFor(() => {
+  await waitFor(() => {
     expect(orchestrator.getStream(added.id)).toMatchObject({ state: "playing", path: "direct" });
   });
   const playing = orchestrator.getStream(added.id);
@@ -184,9 +200,12 @@ test("a disabled stream says when it last had video, is on no path and can't be 
   expect(orchestrator.runningSince(added.id)).toBeUndefined();
 
   // The frames that came between the last check and the stop count too: the stream ends up with
-  // the last frame time its pipeline ever reported.
-  await vi.waitFor(() => {
+  // the last frame time its pipeline ever reported. It has stopped once its pipeline is gone and
+  // its session forgotten, the last thing it saves: until then it writes to the stream list, which
+  // the restarted controller below shares.
+  await waitFor(() => {
     expect(pipelines.has(added.id)).toBe(false);
+    expect(store.get(added.id)?.session).toBeNull();
     expect(orchestrator.getStream(added.id)?.lastFrameAt).toBe(reported.get(added.id));
   });
   const stopped = reported.get(added.id);
@@ -207,25 +226,25 @@ test("a disabled stream says when it last had video, is on no path and can't be 
   const enabled = await restarted.orchestrator.updateStream(added.id, { enabled: true });
   expect(enabled).toMatchObject({ enabled: true, lastFrameAt: stopped });
   expect(restarted.orchestrator.runningSince(added.id)).toBeGreaterThanOrEqual(Date.parse(stopped ?? ""));
-  await vi.waitFor(() => {
+  await waitFor(() => {
     const now = restarted.orchestrator.getStream(added.id);
     expect(now).toMatchObject({ state: "playing", path: "direct" });
     expect(Date.parse(now?.lastFrameAt ?? "")).toBeGreaterThan(Date.parse(stopped ?? ""));
   });
 });
 
-test("a stream that never had video has no last frame time, also once it is disabled", async () => {
+test("a stream that never had video has no last frame time, also once it is disabled", SLOW_DISK, async () => {
   const { start, pipelines } = await harness(false);
   const { orchestrator, store } = await start();
   const added = await orchestrator.addStream({ aceId: ACE_ID });
-  await vi.waitFor(() => {
+  await waitFor(() => {
     expect(store.get(added.id)?.session).not.toBeNull();
   });
   expect(orchestrator.getStream(added.id)).toMatchObject({ state: "starting", lastFrameAt: null });
 
   const disabled = await orchestrator.updateStream(added.id, { enabled: false });
   expect(disabled).toMatchObject({ state: "stopped", lastFrameAt: null, path: null });
-  await vi.waitFor(() => {
+  await waitFor(() => {
     expect(pipelines.has(added.id)).toBe(false);
     expect(store.get(added.id)?.session).toBeNull();
   });
