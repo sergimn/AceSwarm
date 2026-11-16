@@ -102,6 +102,49 @@ describe("a loop of supervision steps", () => {
     expect(runs).toBe(1);
   });
 
+  test("started behind a previous run, it waits for it, and starts even if it failed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    let runs = 0;
+    const { instance } = looping(() => {
+      runs += 1;
+      return Promise.resolve();
+    });
+    const previous = Promise.withResolvers<undefined>();
+    instance.start(previous.promise);
+    expect(instance.running).toBe(true);
+    expect(instance.waiting).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runs).toBe(0);
+
+    previous.reject(new Error("the teardown failed"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(instance.waiting).toBe(false);
+    expect(runs).toBe(1);
+    await instance.stop(Infinity);
+  });
+
+  test("stopped while it waits for a previous run, it starts none and ends after that run", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    let runs = 0;
+    const { instance } = looping(() => {
+      runs += 1;
+      return Promise.resolve();
+    });
+    const previous = Promise.withResolvers<undefined>();
+    instance.start(previous.promise);
+    let stopped = false;
+    const stopping = instance.stop(Infinity).then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(stopped).toBe(false);
+
+    previous.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(1000);
+    await stopping;
+    expect(runs).toBe(0);
+  });
+
   test("a stop before the first step ran starts none", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     let runs = 0;

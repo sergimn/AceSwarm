@@ -891,6 +891,57 @@ test("shutting down waits only a moment for a step in progress", async () => {
   expect(Date.now() - started).toBeLessThan(1000);
 });
 
+describe("starting behind the stream's previous run", () => {
+  test("does nothing until that run is gone, and says what it waits for", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    const previous = Promise.withResolvers<undefined>();
+    fake.instance.start(previous.promise);
+    expect(fake.instance.view()).toMatchObject({ state: "starting", message: "waiting for the previous run to stop" });
+    // It has no engine to assign yet, so the others needn't wait for it.
+    expect(fake.instance.settled).toBe(true);
+    expect(fake.instance.triedEngine).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.creates()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+
+    previous.resolve(undefined);
+    await vi.waitFor(() => {
+      expect(fake.transcoderStarts).toHaveLength(1);
+    });
+    expect(fake.creates()).toBe(1);
+    await fake.instance.stop(true);
+  });
+
+  test("starts when that run's teardown failed", async () => {
+    const fake = supervisor([direct], { video: { on: true } });
+    fake.instance.start(Promise.reject(new Error("docker said no")));
+    await vi.waitFor(() => {
+      expect(fake.transcoderStarts).toHaveLength(1);
+    });
+    await fake.instance.stop(true);
+  });
+
+  test("stopped meanwhile, it starts nothing and is torn down once that run is gone", async () => {
+    const fake = supervisor([direct]);
+    const previous = Promise.withResolvers<undefined>();
+    fake.instance.start(previous.promise);
+    let stopped = false;
+    const stopping = fake.instance.stop(true).then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(stopped).toBe(false);
+
+    previous.resolve(undefined);
+    await stopping;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.creates()).toBe(0);
+    expect(fake.transcoderStarts).toEqual([]);
+    expect(fake.instance.view().state).toBe("stopped");
+  });
+});
+
 describe("moving a stream to another path", () => {
   const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
   const replacement: EngineHandle = {

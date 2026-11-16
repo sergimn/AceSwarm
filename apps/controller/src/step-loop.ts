@@ -23,6 +23,7 @@ export class StepLoop {
   private timer: NodeJS.Timeout | undefined;
   private current: Promise<void> = Promise.resolve();
   private active = false;
+  private waitingForPrevious = false;
 
   constructor(options: StepLoopOptions) {
     this.options = options;
@@ -33,14 +34,32 @@ export class StepLoop {
     return this.active;
   }
 
-  /** The first step runs at once. */
-  start(): void {
+  /** True while the first step waits for `previous` (see `start`). */
+  get waiting(): boolean {
+    return this.waitingForPrevious;
+  }
+
+  /**
+   * The first step runs at once, or, with `previous`, once that has settled (a failure of it is
+   * ignored). `stop` waits for it too, so a loop stopped while it waits ends after `previous`.
+   */
+  start(previous?: Promise<void>): void {
     if (this.active) {
       return;
     }
     this.active = true;
     this.watch.start();
-    this.schedule(0);
+    if (previous === undefined) {
+      this.schedule(0);
+      return;
+    }
+    this.waitingForPrevious = true;
+    this.current = previous
+      .catch(() => undefined)
+      .then(() => {
+        this.waitingForPrevious = false;
+        this.schedule(0);
+      });
   }
 
   /**

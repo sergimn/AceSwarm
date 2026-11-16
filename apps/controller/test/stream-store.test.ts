@@ -111,6 +111,22 @@ describe("StreamStore", () => {
     expect(older.get(stream.id)?.lastFrameAt).toBeNull();
   });
 
+  it("never sets the last video time back to an older one", async () => {
+    const directory = await tempDirectory();
+    const store = new StreamStore(directory);
+    await store.load();
+    const stream = await store.add({ aceId: ID_A });
+    const newer = "2026-11-15T20:00:00.000Z";
+    await store.update(stream.id, { lastFrameAt: newer });
+    await store.update(stream.id, { lastFrameAt: "2026-11-15T19:00:00.000Z", name: "Renamed" });
+    expect(store.get(stream.id)).toMatchObject({ lastFrameAt: newer, name: "Renamed" });
+    await store.update(stream.id, { lastFrameAt: null });
+    expect(store.get(stream.id)?.lastFrameAt).toBe(newer);
+    const newest = "2026-11-15T21:00:00.000Z";
+    await store.update(stream.id, { lastFrameAt: newest });
+    expect(store.get(stream.id)?.lastFrameAt).toBe(newest);
+  });
+
   it("returns copies, not internal state", async () => {
     const directory = await tempDirectory();
     const store = new StreamStore(directory);

@@ -114,9 +114,12 @@ export class StreamSupervisor {
     return this.engines.assignments();
   }
 
-  /** True once the first start attempt finished, so `assignments()` is complete. */
+  /**
+   * True once the first start attempt finished, so `assignments()` is complete. A run that still
+   * waits for the previous one has no engine yet, so it has nothing to assign.
+   */
   get settled(): boolean {
-    return this.bootstrapped || !this.loop.running;
+    return this.bootstrapped || !this.loop.running || this.loop.waiting;
   }
 
   /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
@@ -124,8 +127,20 @@ export class StreamSupervisor {
     return this.engines.tried || !this.loop.running;
   }
 
-  start(): void {
-    this.loop.start();
+  /**
+   * Starts supervising. With `previous`, the stream's earlier run being torn down (see `stop`), it
+   * waits for that first: the teardown removes every engine, session and pipeline of the stream by
+   * its id, and this run would take them over and then lose them.
+   */
+  start(previous?: Promise<void>): void {
+    if (this.loop.running) {
+      return;
+    }
+    if (previous !== undefined) {
+      this.logger.info("waiting for the stream's previous run to stop before starting");
+      this.setState("starting", "waiting for the previous run to stop");
+    }
+    this.loop.start(previous);
   }
 
   /**
