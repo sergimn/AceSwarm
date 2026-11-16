@@ -1,4 +1,4 @@
-import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList } from "@aceswarm/shared/ace-id-list";
+import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseOneAceId } from "@aceswarm/shared/ace-id-list";
 import { api, ApiError } from "./api.ts";
 import {
   leftoverText,
@@ -91,10 +91,13 @@ export class AddStreamDialog {
       // What is selected is what a paste replaces. The rest of the field goes first, after a list
       // that is in the box already: one typed before the switch was turned back.
       const { value } = this.aceId;
-      const typed =
-        value.slice(0, this.aceId.selectionStart ?? value.length) +
-        value.slice(this.aceId.selectionEnd ?? value.length);
-      this.list.value = [this.list.value.trimEnd(), typed.trim(), pasted].filter((part) => part.length > 0).join("\n");
+      const typed = (
+        value.slice(0, this.aceId.selectionStart ?? value.length) + value.slice(this.aceId.selectionEnd ?? value.length)
+      ).trim();
+      const box = this.list.value.trimEnd();
+      // Unless the box has it as a line: it took what was typed when the switch was turned on.
+      const lines = box.split(/\r\n|\r|\n/).map((line) => line.trim());
+      this.list.value = [box, lines.includes(typed) ? "" : typed, pasted].filter((part) => part.length > 0).join("\n");
       this.aceId.value = "";
       this.setSeveral(true);
       this.list.focus();
@@ -121,6 +124,10 @@ export class AddStreamDialog {
     this.summary = h("p", { className: "muted small", attrs: { id: "add-list-summary" } });
     this.start = switchSetting("add-start", "Start them right away");
     this.start.button.addEventListener("click", () => {
+      // Like the other switch, it waits while a request is out.
+      if (this.busy) {
+        return;
+      }
       this.startNow = !this.startNow;
       this.renderStart();
     });
@@ -225,17 +232,17 @@ export class AddStreamDialog {
   }
 
   /**
-   * While a request is out the fields can't be changed: its answer rewrites the box or closes the
-   * dialog, and what was typed meanwhile would be lost. They are read-only and not disabled, and
-   * so is the button: a disabled control drops the focus, and a remote would have nowhere to
-   * move from.
+   * While a request is out the fields and the switches can't be changed: its answer rewrites the
+   * box or closes the dialog, and what was typed meanwhile would be lost. The fields are read-only
+   * and not disabled, and so are the buttons: a disabled control drops the focus, and a remote
+   * would have nowhere to move from.
    */
   private setBusy(busy: boolean): void {
     this.busy = busy;
     for (const field of [this.aceId, this.name, this.list]) {
       field.readOnly = busy;
     }
-    for (const button of [this.submitButton, this.mode.button]) {
+    for (const button of [this.submitButton, this.mode.button, this.start.button]) {
       button.setAttribute("aria-busy", String(busy));
     }
   }
@@ -282,7 +289,8 @@ export class AddStreamDialog {
 
   private async addOne(visit: number): Promise<void> {
     const text = this.aceId.value.trim();
-    if (streamCount(parseAceIdList(text)) > 1) {
+    // Read as the controller reads it, so the dialog refuses nothing that the controller takes.
+    if (parseOneAceId(text) === "several") {
       this.showError('This names more than one stream. Turn on "Add several at once" to add them together.');
       return;
     }

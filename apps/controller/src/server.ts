@@ -3,8 +3,7 @@ import type { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
-import { parseAceId } from "@aceswarm/shared/ace-id";
-import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseAceIdText } from "@aceswarm/shared/ace-id-list";
+import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseOneAceId } from "@aceswarm/shared/ace-id-list";
 import type { BulkAddResponse, BulkAddResult, Settings } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Service } from "@aceswarm/shared/service";
@@ -97,16 +96,12 @@ export async function registerRoutes(
     if (!parsed.success) {
       return badRequest(reply, "expected { aceId, name? }");
     }
-    // First as one identifier or link, as it always was read. Then as a line of a list is, so the
-    // same untidy text works here: quotes or a comma around the identifier, or other text beside it.
-    const text = parsed.data.aceId;
-    const ace = parseAceId(text) ?? parseAceIdText(text);
-    if (ace === undefined) {
-      const streams = new Set(parseAceIdList(text).map((entry) => entry.ace?.id));
-      streams.delete(undefined);
+    // The dialog reads the text with the same function before it sends it.
+    const ace = parseOneAceId(parsed.data.aceId);
+    if (typeof ace === "string") {
       return badRequest(
         reply,
-        streams.size > 1
+        ace === "several"
           ? "that names more than one stream: send them as a list to POST /api/streams/bulk"
           : "that does not look like an Acestream ID or infohash (40 hex characters, an acestream:// or a magnet link)",
       );

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseAceIdList, parseAceIdText } from "../src/ace-id-list.ts";
+import { parseAceId } from "../src/ace-id.ts";
+import { parseAceIdList, parseOneAceId } from "../src/ace-id-list.ts";
 
 const A = "6d325cda6ed591647ef5e91edd043147bce8be30";
 const B = "b146ee4b6e16c9df58e27bd02ffd6cea840ff212";
@@ -126,18 +127,38 @@ describe("parseAceIdList", () => {
       { line: 1, id: A, kind: "infohash" },
     ]);
     expect(read(`Sports:magnet:?xt=urn:sha1:${A}`)).toEqual([{ line: 1, id: undefined, kind: undefined }]);
+    // A word that ends in "magnet" starts no link.
+    expect(read(`electromagnet:${A}`)).toEqual([{ line: 1, id: A, kind: null }]);
   });
 
-  it("finds an identifier in a link that is escaped inside another link", () => {
+  it("reads a link that is escaped inside another link as the link it is", () => {
     expect(read(`plugin://program.plexus/?url=acestream%3A%2F%2F${A}&mode=1`)).toEqual([
       { line: 1, id: A, kind: null },
     ]);
     expect(
       read(`http://proxy.example/play?url=http%3A%2F%2F127.0.0.1%3A6878%2Face%2Fgetstream%3Finfohash%3D${A}`),
     ).toEqual([{ line: 1, id: A, kind: "infohash" }]);
-    expect(read(`http://proxy.example/play?url=magnet%3A%3Fxt%3Durn%3Abtih%3A${A}`)).toEqual([
-      { line: 1, id: A, kind: null },
+    // A magnet link still gives its btih value only, not the hash in its name.
+    expect(read(`http://proxy.example/play?url=magnet%3A%3Fxt%3Durn%3Abtih%3A${A}%26dn%3D${B}`)).toEqual([
+      { line: 1, id: A, kind: "infohash" },
     ]);
+    // An escaped space or line end ends a piece, as the character would.
+    expect(read(`x%3A${A}%20${B}%0A${C}`)).toEqual([
+      { line: 1, id: A, kind: null },
+      { line: 1, id: B, kind: null },
+      { line: 1, id: C, kind: null },
+    ]);
+  });
+
+  it("takes a % for what it is where the text as written has an identifier", () => {
+    // `%6d` here is no escape: it is a percent sign and the start of the identifier.
+    expect(read(`Sports 100%${A}`)).toEqual([{ line: 1, id: A, kind: null }]);
+    expect(read(`${A}%${B}%${C}`)).toEqual([
+      { line: 1, id: A, kind: null },
+      { line: 1, id: B, kind: null },
+      { line: 1, id: C, kind: null },
+    ]);
+    expect(read("100% wrong %zz %4")).toEqual([{ line: 1, id: undefined, kind: undefined }]);
   });
 
   it("says which line an identifier repeats", () => {
@@ -203,6 +224,18 @@ describe("parseAceIdList", () => {
     ]);
   });
 
+  it("takes only a playlist's own lines for a playlist, not a heading that starts alike", () => {
+    for (const heading of ["#Extra sports", "#external links", "#EXT", "#EXTM3U8", "#extinfo", "# EXTINF:-1,x"]) {
+      expect(read(`${heading}\n#1 ${A}\n#${B}`), heading).toEqual([
+        { line: 2, id: A, kind: null },
+        { line: 3, id: B, kind: null },
+      ]);
+    }
+    for (const directive of ["#EXTM3U", '#EXTM3U url-tvg="http://x.example/epg.xml"', "#extm3u", "#EXTINF:-1,News"]) {
+      expect(read(`${directive}\n#1 ${A}\n${B}`), directive).toEqual([{ line: 3, id: B, kind: null }]);
+    }
+  });
+
   it("reads a very long line in linear time", () => {
     // Runs that patterns like /\/+$/ or /[,;]+$/ would take quadratic time on.
     const long = `${"/".repeat(50_000)}x ${";".repeat(50_000)}x ${"a".repeat(50_000)} ${A}`;
@@ -212,18 +245,49 @@ describe("parseAceIdList", () => {
   });
 });
 
-describe("parseAceIdText", () => {
+describe("parseOneAceId", () => {
   it("reads the one stream a text names, whatever is around it", () => {
-    expect(parseAceIdText(`acestream://${A}`)).toEqual({ id: A, kind: null });
-    expect(parseAceIdText(` "Sports 1" - magnet:?xt=urn:btih:${A}, `)).toEqual({ id: A, kind: "infohash" });
+    expect(parseOneAceId(`acestream://${A}`)).toEqual({ id: A, kind: null });
+    expect(parseOneAceId(` "Sports 1" - magnet:?xt=urn:btih:${A}, `)).toEqual({ id: A, kind: "infohash" });
+    expect(parseOneAceId(`Sports 1\n${A}\n`)).toEqual({ id: A, kind: null });
   });
 
-  it("gives nothing for no stream, or for more than one", () => {
-    expect(parseAceIdText("")).toBeUndefined();
-    expect(parseAceIdText("not a stream")).toBeUndefined();
-    expect(parseAceIdText(`${A} ${B}`)).toBeUndefined();
-    expect(parseAceIdText(`${A}\nnot a stream`)).toBeUndefined();
-    // The same stream twice is still one entry too many.
-    expect(parseAceIdText(`${A}\n${A}`)).toBeUndefined();
+  it("takes one stream that is written several times for one stream", () => {
+    expect(parseOneAceId(`${A} ${A.toUpperCase()}`)).toEqual({ id: A, kind: null });
+    expect(parseOneAceId(`acestream://${A}\nacestream://${A}`)).toEqual({ id: A, kind: null });
+    // With the kind any of them says.
+    expect(parseOneAceId(`Sports ${A} infohash=${A}`)).toEqual({ id: A, kind: "infohash" });
+  });
+
+  it("says whether a text names no stream, or several", () => {
+    expect(parseOneAceId("")).toBe("none");
+    expect(parseOneAceId("not a stream")).toBe("none");
+    expect(parseOneAceId(A.slice(1))).toBe("none");
+    expect(parseOneAceId(`${A} ${B}`)).toBe("several");
+    expect(parseOneAceId(`${A}, ${B}`)).toBe("several");
+    expect(parseOneAceId(`${A}\nacestream://${B}`)).toBe("several");
+  });
+
+  it("reads every text a single stream was read from before lists as it was read then", () => {
+    const base32 = "aaaqeayeaudaocajbifqydiob4ibceqt";
+    const texts = [
+      A,
+      ` ${A.toUpperCase()} `,
+      `acestream://${A}/`,
+      `magnet:?xt=urn:btih:${A}&dn=x`,
+      // A space in a magnet link's name, and a name that holds another hash.
+      `magnet:?dn=My Stream&xt=urn:btih:${base32}`,
+      `magnet:?xt=urn:btih:${A}&dn=copy of ${B}`,
+      `http://127.0.0.1:6878/ace/getstream?id=${A}&pid=1`,
+      // The same stream twice, and an engine URL after other text: the URL's parameter wins.
+      `acestream://${A} http://127.0.0.1:6878/ace/getstream?id=${A}`,
+      `${B} http://127.0.0.1:6878/ace/getstream?infohash=${A}`,
+      `Sports\nhttp://127.0.0.1:6878/ace/getstream?content_id=${A}`,
+    ];
+    for (const text of texts) {
+      const before = parseAceId(text);
+      expect(before, text).toBeDefined();
+      expect(parseOneAceId(text), text).toEqual(before);
+    }
   });
 });

@@ -41,21 +41,25 @@ function trimSet(text: string, set: ReadonlySet<string>): string {
 }
 
 /**
+ * A line that only an M3U playlist has: its header, or the directive before each of its entries.
+ * Not any `#EXT…`, which is also how a heading like `#Extra channels` starts.
+ */
+const PLAYLIST_LINE = /^#EXT(?:M3U\b|INF:)/i;
+/** A magnet link's start. Not the end of a longer word. */
+const MAGNET = /(^|[^0-9a-z])magnet:/i;
+
+/**
  * The 40 character hex values inside a piece of a line that isn't an identifier or a link by
  * itself, such as `Sports:acestream://<id>`, `<id>,<id>` or `infohash=<id>`.
  */
 function scanPiece(piece: string): ParsedAceId[] {
-  // A link that is the value of another link's parameter has its punctuation escaped, as in
-  // `?url=acestream%3A%2F%2F<id>`. An escape ends what is before it, as the character it stands for
-  // would; `%3D` is the `=` of a parameter.
-  const text = piece.replaceAll(/%[0-9a-f]{2}/gi, (escape) => (escape.toLowerCase() === "%3d" ? "=" : " "));
   const found: ParsedAceId[] = [];
-  for (const run of text.matchAll(/[0-9a-z]+/gi)) {
+  for (const run of piece.matchAll(/[0-9a-z]+/gi)) {
     if (!HEX_ID.test(run[0])) {
       continue;
     }
     // The parameter it is the value of says which kind it is, as in an engine's URL.
-    const before = text.slice(Math.max(0, run.index - 12), run.index).toLowerCase();
+    const before = piece.slice(Math.max(0, run.index - 12), run.index).toLowerCase();
     const parameter = /(?:^|[^0-9a-z_])(infohash|content_id|id)=$/.exec(before)?.[1];
     const kind = parameter === undefined ? null : parameter === "infohash" ? "infohash" : "content-id";
     found.push({ id: run[0].toLowerCase(), kind });
@@ -63,28 +67,50 @@ function scanPiece(piece: string): ParsedAceId[] {
   return found;
 }
 
+/** Every identifier in a piece of a line: what is between two spaces. */
+function readPiece(piece: string): ParsedAceId[] {
+  const core = trimSet(piece, WRAPPING);
+  // First as a single stream is read: an identifier, a link, a URL that says which kind it is.
+  const whole = parseAceId(core);
+  if (whole !== undefined) {
+    return [whole];
+  }
+  const magnet = MAGNET.exec(core);
+  if (magnet === null) {
+    return scanPiece(piece);
+  }
+  // A magnet link's stream is its `btih` value and nothing else in it (its name can hold a hash
+  // too), wherever in the piece the link starts: `[Sports](magnet:?…)`.
+  const start = magnet.index + (magnet[1] ?? "").length;
+  const link = parseAceId(core.slice(start));
+  return [...scanPiece(core.slice(0, start)), ...(link === undefined ? [] : [link])];
+}
+
+/**
+ * `%3A` and the like as the characters they stand for, for a link that is the value of another
+ * link's parameter: `?url=acestream%3A%2F%2F<id>`. Only what a link is written with: an escape
+ * of anything else, a space or a line end say, becomes a space.
+ */
+function unescapeLink(piece: string): string {
+  return piece.replaceAll(/%[0-9a-f]{2}/gi, (escape) => {
+    const code = Number.parseInt(escape.slice(1), 16);
+    return code > 0x20 && code < 0x7f ? String.fromCodePoint(code) : " ";
+  });
+}
+
 /** Every identifier in a line. */
 function findIds(line: string): ParsedAceId[] {
   const found: ParsedAceId[] = [];
   for (const [piece] of line.matchAll(/\S+/g)) {
-    const core = trimSet(piece, WRAPPING);
-    // First as a single stream is read: an identifier, a link, a URL that says which kind it is.
-    const whole = parseAceId(core);
-    if (whole !== undefined) {
-      found.push(whole);
+    const read = readPiece(piece);
+    // Escapes are only read where the piece as it is written has no identifier: in `100%<id>` the
+    // `%` and what follows it are no escape.
+    if (read.length > 0 || !piece.includes("%")) {
+      found.push(...read);
       continue;
     }
-    const magnet = core.search(/magnet:/i);
-    if (magnet === -1) {
-      found.push(...scanPiece(piece));
-      continue;
-    }
-    // A magnet link's stream is its `btih` value and nothing else in it (its name can hold a hash
-    // too), wherever in the piece the link starts: `[Sports](magnet:?…)`.
-    found.push(...scanPiece(core.slice(0, magnet)));
-    const link = parseAceId(core.slice(magnet));
-    if (link !== undefined) {
-      found.push(link);
+    for (const [part] of unescapeLink(piece).matchAll(/\S+/g)) {
+      found.push(...readPiece(part));
     }
   }
   return found;
@@ -96,17 +122,17 @@ function findIds(line: string): ParsedAceId[] {
  * any other text around it (`Sports 1 - acestream://…`). Only the identifier counts. Blank lines
  * are skipped.
  *
- * In an M3U playlist (a text with an `#EXT…` line) every line that starts with `#` is skipped: its
- * directives, whatever their attributes hold, and its comments, also a stream that was commented
- * out. In any other list such a line is read like the rest (`#1 <id>`), and skipped when it has no
- * identifier.
+ * In an M3U playlist (a text with an `#EXTM3U` or `#EXTINF:` line) every line that starts with `#`
+ * is skipped: its directives, whatever their attributes hold, and its comments, also a stream that
+ * was commented out. In any other list such a line is read like the rest (`#1 <id>`), and skipped
+ * when it has no identifier.
  *
  * Returns an entry for every identifier found, in order, and one without an identifier for every
  * other line that says something. A line with several identifiers gives an entry for each.
  */
 export function parseAceIdList(text: string): AceIdListEntry[] {
   const lines = text.split(/\r\n|\r|\n/).map((line) => line.trim());
-  const playlist = lines.some((line) => /^#EXT/i.test(line));
+  const playlist = lines.some((line) => PLAYLIST_LINE.test(line));
   const entries: AceIdListEntry[] = [];
   const firsts = new Map<string, AceIdListEntry>();
   for (const [index, line] of lines.entries()) {
@@ -135,10 +161,21 @@ export function parseAceIdList(text: string): AceIdListEntry[] {
 }
 
 /**
- * The one stream a text names, read as a line of a list is, or undefined when it names none or
- * several. For a single stream typed or pasted with something around it.
+ * What a text that is meant for one stream names: the stream, or `"none"` or `"several"`. For a
+ * single stream typed or pasted, by whoever takes one: the controller's route, and the dialog
+ * before it sends.
+ *
+ * First as one identifier or link (`parseAceId`), which is how a single stream was always read.
+ * Then as a list is, so that untidy text works too: quotes or a comma around the identifier, or
+ * other text beside it. One stream that is written several times is one stream.
  */
-export function parseAceIdText(text: string): ParsedAceId | undefined {
-  const [entry, ...others] = parseAceIdList(text);
-  return others.length === 0 ? entry?.ace : undefined;
+export function parseOneAceId(text: string): ParsedAceId | "none" | "several" {
+  const whole = parseAceId(text);
+  if (whole !== undefined) {
+    return whole;
+  }
+  // Each stream once, with the kind any of its mentions says.
+  const streams = parseAceIdList(text).filter((entry) => entry.ace !== undefined && entry.repeats === undefined);
+  const [only, ...others] = streams;
+  return others.length > 0 ? "several" : (only?.ace ?? "none");
 }
