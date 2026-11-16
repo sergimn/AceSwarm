@@ -16,7 +16,8 @@ jobs:
   retry:
     name: Re-run E2E after a failed NAT step
     if: github.event.workflow_run.conclusion != 'success'
-    runs-on: ubuntu-24.04
+    # The job only calls GitHub's API, and it should start as soon as a runner can be had.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       # To read the run's jobs and to re-run it.
@@ -30,8 +31,9 @@ jobs:
       # The name of the step in e2e.yml.
       STEP: Find this runner's public UDP address
       # Attempts per run, the first one included. A new commit starts a new run, which counts from
-      # one again. GitHub itself allows 50 re-runs of a run.
-      MAX_ATTEMPTS: 30
+      # one again. It can't go higher: GitHub allows 50 re-runs of a run, by people and by this
+      # workflow together, and this leaves the last one to a person.
+      MAX_ATTEMPTS: 50
     steps:
       - name: Re-run all jobs if a runner failed at its NAT
         shell: bash
@@ -52,7 +54,7 @@ jobs:
             exit 0
           fi
           if ((ATTEMPT >= MAX_ATTEMPTS)); then
-            echo "::warning::Run $RUN_ID failed at \"$STEP\" $ATTEMPT times in a row or more: giving up."
+            echo "::warning::Attempt $ATTEMPT of run $RUN_ID failed at \"$STEP\": giving up at $MAX_ATTEMPTS attempts."
             exit 0
           fi
           echo "::notice::\"$STEP\" failed in: $failed. Starting attempt $((ATTEMPT + 1)) of $MAX_ATTEMPTS."
