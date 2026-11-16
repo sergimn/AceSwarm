@@ -14,7 +14,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   3. move it to another network path.
 - **Only new video.** When a broadcast stops, its engine and its peers keep serving the minutes of it they already have. Ace Swarm follows each engine's live edge, the newest data of the broadcast it knows of, and only publishes video while that edge moves. A stream whose broadcast stopped shows "Waiting for source" instead of old video. It replaces that engine with a new one every so often and plays again once the broadcast is back.
 - **Hot standby.** With more than one network path, every playing stream also runs on each other path. When its engine or path fails, it fails over to a standby that already has the stream, within seconds instead of the minute or so a new engine needs to find peers.
-- **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine only restarts when the stream you are watching fails or several of its streams fail at once, and its streams keep their picture while it does.
+- **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine is only replaced when the stream you are watching fails, several of its streams fail at once, all of them fail, it stops answering, or you press **Restart**, and its streams keep their picture while it is replaced.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.
 - **WireGuard only.** One switch keeps every stream off the direct connection. If no VPN is up, streams wait instead of going direct.
 - **Updates without a gap.** Restarting or updating the controller doesn't interrupt the streams: the new one takes over the engines and video that kept running, and players play on from their buffer meanwhile.
@@ -108,6 +108,7 @@ Turn on **WireGuard only** under **Network** to stop using the direct connection
 - Streams on the direct path move to a WireGuard path right away. New streams only start on WireGuard.
 - If every WireGuard path is down, new streams wait and say so, and streams already on WireGuard keep recovering there. None fall back to the direct connection.
 - The gateway enforces it too: it refuses to route any engine through the direct connection.
+- While it is on, the top bar counts only the WireGuard paths, since streams may not use the direct one, and **Network** shows the direct path as Off.
 - Engines on a WireGuard path reach everything through the tunnel, including the networks in `ENGINE_ALLOWED_PRIVATE`, and a VPN provider can't reach your LAN. Keep `ENGINE_DNS` on public resolvers: with a LAN DNS server, engines can't resolve anything and no stream starts.
 - Turning it off allows the direct connection again. Streams stay on their current path until they have a reason to move.
 
@@ -144,7 +145,7 @@ With more than one network path (add a WireGuard profile), every stream that pla
 - **Only for streams that play.** A stream that hasn't had video for ten minutes (a broadcast that is off) keeps no standbys; they start again once it plays.
 - **It costs resources.** Each standby is one more engine (or one more session on a shared engine), downloading the stream all the time. Turn **Hot standby on other paths** off under **Streams**, or set `STANDBY_MAX_PATHS` to keep standbys only on each stream's best few other paths. With **One engine per path** on, standbys only add sessions to the engines that are running anyway, which costs much less memory.
 
-The stream's tile and the Streams list show its standbys and whether they are hot.
+The stream's tile and the player's overlay show its standbys and whether they are hot. **Network** counts the standbys that pull through each path next to its streams.
 
 ## Monitoring
 

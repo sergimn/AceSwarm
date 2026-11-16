@@ -86,11 +86,16 @@ function caretKeepsKey(field: HTMLInputElement | HTMLTextAreaElement, direction:
 export class Navigator {
   private readonly base: HTMLElement;
   private readonly layers: OpenLayer[] = [];
+  private readonly onTopChange: (root: HTMLElement | undefined) => void;
   private backPending = false;
   private lastRestored: HTMLElement | undefined;
 
-  constructor(base: HTMLElement) {
+  /**
+   * `onTopChange` hears of the screen on top (the page's own, or a layer's root) whenever it changes.
+   */
+  constructor(base: HTMLElement, onTopChange: (root: HTMLElement | undefined) => void = () => undefined) {
     this.base = base;
+    this.onTopChange = onTopChange;
     document.addEventListener("keydown", (event) => {
       this.onKey(event);
     });
@@ -109,6 +114,7 @@ export class Navigator {
   open(layer: Layer): void {
     this.layers.push({ ...layer, restoreFocus: document.activeElement });
     history.pushState({ aceswarmLayer: this.layers.length }, "");
+    this.onTopChange(layer.root);
   }
 
   /** Closes the top layer. */
@@ -139,6 +145,7 @@ export class Navigator {
     if (layer === undefined) {
       return;
     }
+    this.onTopChange(this.layers[this.layers.length - 1]?.root);
     layer.close();
     this.lastRestored = layer.restoreFocus instanceof HTMLElement ? layer.restoreFocus : undefined;
     this.recoverFocus(true);

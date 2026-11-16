@@ -3,6 +3,7 @@ import { api, ApiError } from "./api.ts";
 import { confirmButton, dialogShell, errorMessage, h, toast } from "./dom.ts";
 import { formatLoss, formatRtt } from "./format.ts";
 import type { Navigator } from "./navigation.ts";
+import { formatPathLoad, isPathOff, pathLoads, type PathLoad } from "./paths.ts";
 
 const STRATEGY_LABELS = {
   "sticky-best": "Sticky: streams stay on their path until it fails, then move to the best one",
@@ -128,11 +129,16 @@ export class NetworkDialog {
     );
   }
 
-  open(snapshot: Snapshot | undefined): void {
-    if (snapshot !== undefined) {
-      this.update(snapshot);
-    }
+  /**
+   * Opens the dialog, drawn from the latest snapshot: the page gives it every one (see `update`),
+   * open or not, and after the WireGuard only switch is turned its own is newer than the page's.
+   */
+  open(): void {
     this.errors.hidden = true;
+    // What the last open knew is old: the switch works it out again from the snapshot, and the
+    // profile list below says whether profiles changed since.
+    this.profileCount = undefined;
+    this.wireguardPaths = undefined;
     // Open the layer first: it remembers the focused element, and showModal() moves focus.
     this.navigator.open({
       root: this.dialog,
@@ -141,15 +147,23 @@ export class NetworkDialog {
       },
     });
     this.dialog.showModal();
+    // Only an open dialog is drawn, so it is drawn now, from the snapshot the page already has.
+    // Otherwise it would show what it showed when it was last open until the next one arrives.
+    if (this.snapshot !== undefined) {
+      this.render(this.snapshot);
+    }
     this.navigator.focusFirst(this.dialog);
     void this.loadProfiles();
   }
 
   update(snapshot: Snapshot): void {
     this.snapshot = snapshot;
-    if (!this.dialog.open) {
-      return;
+    if (this.dialog.open) {
+      this.render(snapshot);
     }
+  }
+
+  private render(snapshot: Snapshot): void {
     this.strategy.textContent = STRATEGY_LABELS[snapshot.pathStrategy];
     const wireguardPaths = snapshot.paths.filter((path) => path.kind === "wireguard").length;
     if (snapshot.paths.length > 0 && this.wireguardPaths !== undefined && wireguardPaths !== this.wireguardPaths) {
@@ -160,14 +174,9 @@ export class NetworkDialog {
       this.wireguardPaths = wireguardPaths;
     }
     this.renderWireguardOnly();
-    const load = new Map<string, number>();
-    for (const stream of snapshot.streams) {
-      if (stream.path !== null) {
-        load.set(stream.path, (load.get(stream.path) ?? 0) + 1);
-      }
-    }
+    const loads = pathLoads(snapshot.streams);
     this.paths.replaceChildren(
-      ...snapshot.paths.map((path) => this.pathRow(path, load.get(path.id) ?? 0, snapshot.wireguardOnly)),
+      ...snapshot.paths.map((path) => this.pathRow(path, loads.get(path.id), snapshot.wireguardOnly)),
     );
   }
 
@@ -216,14 +225,10 @@ export class NetworkDialog {
     }
   }
 
-  private pathRow(path: PathStatus, streams: number, wireguardOnly: boolean): HTMLElement {
+  private pathRow(path: PathStatus, load: PathLoad | undefined, wireguardOnly: boolean): HTMLElement {
     const score = Math.round(path.score * 100);
-    const details = [
-      `RTT ${formatRtt(path.rttMs)}`,
-      `loss ${formatLoss(path.loss)}`,
-      `${String(streams)} stream${streams === 1 ? "" : "s"}`,
-    ];
-    const off = wireguardOnly && path.kind === "direct";
+    const details = [`RTT ${formatRtt(path.rttMs)}`, `loss ${formatLoss(path.loss)}`, ...formatPathLoad(load)];
+    const off = isPathOff(path, wireguardOnly);
     if (off) {
       details.push("not used: WireGuard only is on");
     }

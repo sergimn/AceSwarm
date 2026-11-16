@@ -4,12 +4,13 @@ import type { Snapshot } from "@aceswarm/shared/api-types";
 import { AddStreamDialog } from "./add-stream-dialog.ts";
 import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { onTick, startClock } from "./clock.ts";
-import { errorMessage, setText, toast } from "./dom.ts";
+import { errorMessage, placeToasts, setText, toast } from "./dom.ts";
 import { Grid } from "./grid.ts";
 import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
+import { formatPathsUp } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
 import { WatchReporter } from "./watch.ts";
@@ -43,7 +44,7 @@ function savePreviewMode(mode: PreviewMode): void {
 
 /** Wires the grid, the player and the dialogs to the live snapshot. */
 class App {
-  private readonly navigator = new Navigator(element("#app"));
+  private readonly navigator = new Navigator(element("#app"), placeToasts);
   private readonly previews = new PreviewManager(loadPreviewMode(), MAX_PREVIEWS);
   private readonly watch = new WatchReporter();
   private readonly player = new Player(this.navigator, this.watch);
@@ -76,7 +77,7 @@ class App {
       this.streamList.open(this.snapshot);
     });
     element("[data-action=network]").addEventListener("click", () => {
-      this.network.open(this.snapshot);
+      this.network.open();
     });
   }
 
@@ -107,11 +108,10 @@ class App {
     this.streamList.update(snapshot);
     this.network.update(snapshot);
     const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
-    const pathsUp = snapshot.paths.filter((path) => path.up).length;
     this.summary.textContent = [
       `${String(snapshot.streams.length)} streams`,
       `${String(live)} live`,
-      `${String(pathsUp)}/${String(snapshot.paths.length)} network paths up`,
+      formatPathsUp(snapshot),
     ].join(" · ");
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {

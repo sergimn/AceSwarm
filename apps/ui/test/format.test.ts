@@ -131,22 +131,23 @@ describe("small formatters", () => {
   it("labels paths", () => {
     expect(pathLabel(null, [])).toBe("–");
     expect(pathLabel("direct", [])).toBe("Direct");
-    expect(pathLabel("wg:sweden", [])).toBe("VPN sweden");
+    // The gateway labels a tunnel with its profile's name, which is what a path it no longer reports gets.
+    expect(pathLabel("wg:sweden", [])).toBe("sweden");
   });
 });
 
 describe("formatStandbys", () => {
   it("names each standby's path and whether it is hot", () => {
-    const vpn = { id: "wg:a", label: "VPN A" } as PathStatus;
+    const vpn = { id: "wg:mullvad-de", label: "mullvad-de" } as PathStatus;
     expect(formatStandbys([], [vpn])).toBe("–");
     expect(
       formatStandbys(
         [
-          { path: "wg:a", state: "hot", engine: { name: "e1", shared: false } },
+          { path: "wg:mullvad-de", state: "hot", engine: { name: "e1", shared: false } },
           { path: "direct", state: "warming", engine: null },
         ],
         [vpn],
       ),
-    ).toBe("VPN A (hot), Direct (warming up)");
+    ).toBe("mullvad-de (hot), Direct (warming up)");
   });
 });

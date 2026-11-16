@@ -128,7 +128,8 @@ export function pathLabel(path: string | null, paths: readonly PathStatus[]): st
   if (known !== undefined) {
     return known.label;
   }
-  return path === "direct" ? "Direct" : path.replace(/^wg:/, "VPN ");
+  // The gateway labels a tunnel with its profile's name, so this is the label it would have sent.
+  return path === "direct" ? "Direct" : path.replace(/^wg:/, "");
 }
 
 const STANDBY_LABELS: Record<StandbyState, string> = {
@@ -138,7 +139,7 @@ const STANDBY_LABELS: Record<StandbyState, string> = {
   failed: "failed",
 };
 
-/** A stream's standbys on other paths, such as "VPN A (hot)"; "–" without any. */
+/** A stream's standbys on other paths, such as "mullvad-de (hot)"; "–" without any. */
 export function formatStandbys(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
   const labels = standbys.map((standby) => `${pathLabel(standby.path, paths)} (${STANDBY_LABELS[standby.state]})`);
   return labels.length === 0 ? "–" : labels.join(", ");

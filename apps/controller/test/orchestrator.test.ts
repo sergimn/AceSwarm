@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Registry } from "@prometheus-io/client";
@@ -48,6 +48,16 @@ const engine: EngineHandle = {
  * they start (or never, without `video`). `start()` gives a new one, as a controller restart does.
  */
 async function harness(video = true) {
+  // Every store write flushes its file to the disk, which takes as long as the disk does: seconds
+  // on a slow one, and these tests make a dozen writes and wait for them. They don't test the flush
+  // (json-file.test.ts does), so it is skipped here.
+  const probe = await open(import.meta.filename, "r");
+  const handles = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+  await probe.close();
+  const skipFlush = vi.spyOn(handles, "sync").mockImplementation(() => Promise.resolve());
+  onTestFinished(() => {
+    skipFlush.mockRestore();
+  });
   /** What the fakes were asked to do, in order. */
   const events: string[] = [];
   /** Promises the fakes wait for before they answer, set by a test to hold something up. */

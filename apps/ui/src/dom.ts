@@ -103,6 +103,20 @@ export function confirmButton(
   return button;
 }
 
+/**
+ * Draws toasts inside `host`, or on the page when there is none. A modal dialog and a full-screen
+ * element are drawn above the rest of the page whatever its z-index, and the browser keeps the rest
+ * inert: toasts beside them show dimmed under a dialog's backdrop, or not at all in full screen.
+ * So they go inside the screen that is on top.
+ */
+export function placeToasts(host: HTMLElement | undefined): void {
+  const container = document.querySelector<HTMLElement>("#toasts");
+  const target = host ?? document.body;
+  if (container !== null && container.parentElement !== target) {
+    target.append(container);
+  }
+}
+
 export function toast(message: string, kind: "info" | "error" = "info"): void {
   const toastRoot = document.querySelector<HTMLElement>("#toasts") ?? document.body;
   const element = h("div", {
