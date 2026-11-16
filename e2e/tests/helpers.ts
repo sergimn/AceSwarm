@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
+import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
 
@@ -19,6 +19,15 @@ export async function addStream(request: APIRequestContext, aceId: string, name?
   const response = await request.post("/api/streams", { data: { aceId, name } });
   expect(response.status(), await response.text()).toBe(201);
   return (await response.json()) as StreamView;
+}
+
+/** Adds a list of streams in one request, one per line, started right away: every line must be a new stream. */
+export async function addStreamList(request: APIRequestContext, lines: readonly string[]): Promise<StreamView[]> {
+  const response = await request.post("/api/streams/bulk", { data: { text: lines.join("\n") } });
+  expect(response.status(), await response.text()).toBe(200);
+  const { results } = (await response.json()) as BulkAddResponse;
+  expect(results.map((result) => result.status)).toEqual(lines.map(() => "added"));
+  return results.map((result) => result.stream!);
 }
 
 /** Waits until the stream is playing and returns its latest view. Real engines need a while. */

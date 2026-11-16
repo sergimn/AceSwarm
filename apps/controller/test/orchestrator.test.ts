@@ -421,6 +421,45 @@ test("shutting down waits a moment for a teardown in progress, not for ever", as
   stuck.resolve(undefined);
 });
 
+test("a list of streams is added together: the new ones start unless they are added disabled", async () => {
+  const { start, events } = await harness();
+  const { orchestrator } = await start();
+  const known = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
+  await vi.waitFor(() => {
+    expect(orchestrator.getStream(known.id)).toMatchObject({ state: "playing" });
+  });
+  events.length = 0;
+
+  const outcomes = await orchestrator.addStreams([
+    { aceId: "b".repeat(40) },
+    { aceId: ACE_ID, name: "Again" },
+    { aceId: "c".repeat(40), enabled: false },
+  ]);
+  expect(outcomes.map((outcome) => outcome.added)).toEqual([true, false, true]);
+  const [started, same, waiting] = outcomes.map((outcome) => outcome.stream);
+  // The stream that was there is answered as it is, and keeps playing.
+  expect(same).toMatchObject({ id: known.id, name: "One", state: "playing" });
+  expect(waiting).toMatchObject({ enabled: false, state: "stopped", path: null, engine: null });
+
+  await vi.waitFor(() => {
+    expect(orchestrator.getStream(started?.id ?? "")).toMatchObject({ state: "playing", path: "direct" });
+  });
+  // Only the enabled new stream got an engine: not the disabled one, and no second one for the first.
+  expect(events.filter((event) => event.startsWith("create engine"))).toEqual([`create engine ${started?.id ?? ""}`]);
+  expect(orchestrator.runningSince(waiting?.id ?? "")).toBeUndefined();
+  expect(orchestrator.snapshot().streams.map((stream) => stream.aceId)).toEqual([
+    ACE_ID,
+    "b".repeat(40),
+    "c".repeat(40),
+  ]);
+
+  // The disabled one starts once it is enabled, as any disabled stream does.
+  await orchestrator.updateStream(waiting?.id ?? "", { enabled: true });
+  await vi.waitFor(() => {
+    expect(orchestrator.getStream(waiting?.id ?? "")).toMatchObject({ state: "playing" });
+  });
+});
+
 test("a starting controller removes the engines of disabled streams as well as deleted ones", async () => {
   const setup = await harness();
   const { orchestrator } = await setup.start();

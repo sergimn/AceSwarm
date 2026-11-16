@@ -126,6 +126,131 @@ test("rejects text that is not a stream ID", async ({ page }) => {
   await expect(dialog.getByRole("alert")).toContainText("does not look like");
 });
 
+test("adds a pasted list with the remote: wrong lines stay to correct, known streams are skipped", async ({
+  page,
+  request,
+}) => {
+  // Two streams nobody broadcasts. They are added disabled, so no engine starts for them.
+  const fresh = ["1".repeat(40), "2".repeat(40)];
+  await page.goto("/");
+  const add = page.getByRole("button", { name: "Add", exact: true });
+  await add.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Add stream" });
+  const single = dialog.getByLabel("Acestream ID or infohash");
+  await expect(single).toBeFocused();
+
+  // Up from the field is the switch. It swaps the fields for one stream for a box for a list.
+  await page.keyboard.press("ArrowUp");
+  const several = dialog.getByRole("switch", { name: "Add several at once" });
+  await expect(several).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(several).toHaveAttribute("aria-checked", "true");
+  await expect(single).toBeHidden();
+  await expect(dialog.getByLabel("Name")).toBeHidden();
+  await page.keyboard.press("ArrowDown");
+  const list = dialog.getByLabel("Acestream IDs or infohashes");
+  await expect(list).toBeFocused();
+  await page.keyboard.insertText(
+    [
+      `"acestream://${fresh[0]!}",`,
+      // In the list since the first test, as "Test pattern".
+      `Known - ${bc[0]!.contentId.toUpperCase()}`,
+      "not a stream",
+      `magnet:?xt=urn:btih:${fresh[1]!}&dn=x`,
+      fresh[0]!,
+    ].join("\n"),
+  );
+  // The dialog says what the list holds before anything is sent.
+  await expect(dialog.locator("#add-list-summary")).toHaveText(
+    "3 streams found. No Acestream ID or infohash on line 3. 1 line repeats a stream above.",
+  );
+
+  // The caret is at the end of the box, so Down leaves it: to the start switch, then to Add.
+  await page.keyboard.press("ArrowDown");
+  const start = dialog.getByRole("switch", { name: "Start them right away" });
+  await expect(start).toBeFocused();
+  await expect(start).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Enter");
+  await expect(start).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("ArrowDown");
+  await expect(dialog.getByRole("button", { name: "Add 3 streams" })).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  // One line is no stream, so the dialog stays, says what became of each kind of line, and keeps
+  // only that line in the box. What it says has the focus: a remote scrolls by moving it.
+  const result = dialog.locator(".form-result");
+  await expect(result).toBeFocused();
+  await expect(result.locator("p")).toHaveText([
+    "Added 2 streams, disabled.",
+    "1 was already in the list: Test pattern.",
+    "1 line repeats a stream above.",
+    "1 line has no Acestream ID or infohash. It is still in the box, to correct or remove.",
+  ]);
+  await expect(list).toHaveValue("not a stream");
+  await expect(dialog.locator("#add-list-summary")).toHaveText(
+    "0 streams found. No Acestream ID or infohash on line 1.",
+  );
+
+  // The two new streams are there, disabled and without an engine; the known one is as it was.
+  const { streams } = await snapshot(request);
+  expect(streams).toHaveLength(5);
+  const added = streams.filter((stream) => fresh.includes(stream.aceId));
+  expect(added.map(({ aceId, aceIdKind, enabled, state }) => ({ aceId, aceIdKind, enabled, state }))).toEqual([
+    { aceId: fresh[0], aceIdKind: null, enabled: false, state: "stopped" },
+    { aceId: fresh[1], aceIdKind: "infohash", enabled: false, state: "stopped" },
+  ]);
+  for (const stream of added) {
+    expect(engineContainers(stream.id)).toEqual([]);
+  }
+  expect(streams.find((stream) => stream.aceId === bc[0]!.contentId)).toMatchObject({ name: "Test pattern" });
+
+  // Sent again, the line that is left adds nothing: the dialog says so and stays.
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await expect(dialog.getByRole("button", { name: "Add streams" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("alert")).toHaveText("No line of the list has an Acestream ID or infohash.");
+
+  // Back closes the dialog, and the new tiles are in the grid.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(add).toBeFocused();
+  await expect(page.locator(".tile")).toHaveCount(5);
+  for (const stream of added) {
+    await expect(page.locator(`.tile[data-stream="${stream.id}"] .badge`).first()).toHaveText("Disabled");
+  }
+
+  // A list pasted into the field for one stream is a list too: the dialog turns into the one for
+  // a list. The page pastes it, as the clipboard of a browser under test can't be relied on.
+  await add.click();
+  await expect(several).toHaveAttribute("aria-checked", "false");
+  const pasted = `${fresh[0]!}\n${fresh[1]!}\n`;
+  await page.evaluate(`(() => {
+    const data = new DataTransfer();
+    data.setData("text", ${JSON.stringify(pasted)});
+    const paste = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+    document.querySelector("dialog[open] input[name=aceId]").dispatchEvent(paste);
+  })()`);
+  await expect(several).toHaveAttribute("aria-checked", "true");
+  await expect(list).toBeFocused();
+  await expect(list).toHaveValue(pasted);
+  // Both are in the list by now: nothing is added, and nothing is left in the box to correct.
+  await dialog.getByRole("button", { name: "Add 2 streams" }).click();
+  await expect(result.locator("p")).toHaveText([
+    "No stream was added.",
+    `2 were already in the list: Stream ${fresh[0]!.slice(0, 6)} and Stream ${fresh[1]!.slice(0, 6)}.`,
+  ]);
+  await expect(list).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+
+  // The tests after this one find the three streams of the tests before it.
+  for (const stream of added) {
+    expect((await request.delete(`/api/streams/${stream.id}`)).status()).toBe(204);
+  }
+});
+
 test("keeps streams and their detected kind across a controller restart", async ({ request }) => {
   const before = (await snapshot(request)).streams.map(({ id, aceId, aceIdKind, name }) => ({
     id,
