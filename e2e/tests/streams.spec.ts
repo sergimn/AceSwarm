@@ -297,6 +297,37 @@ test("disables a stream, says how long ago it had video, and plays it again once
   expect(engineContainers(id)).toHaveLength(1);
 });
 
+test("enabling a stream right after disabling it starts it clean, once its old run is gone", async ({ request }) => {
+  const target = (await snapshot(request)).streams.find((stream) => stream.aceId === bc[1]!.infohash);
+  expect(target).toBeDefined();
+  const id = target!.id;
+  await waitForPlaying(request, id);
+  // Container ids: a new engine can get the name of the one that was removed.
+  const engineIds = () =>
+    docker("ps", "--filter", `label=aceswarm.stream=${id}`, "--format", "{{.ID}}")
+      .split("\n")
+      .filter((containerId) => containerId.length > 0);
+  const old = engineIds();
+  expect(old).toHaveLength(1);
+
+  // Back to back, as a user bouncing a stream does: the old run's teardown (its pipeline, session
+  // and engine) is still going when the stream is enabled again, and the new run waits for it
+  // rather than taking over the engine that teardown is about to remove.
+  const enabled = async (value: boolean) => {
+    const response = await request.patch(`/api/streams/${id}`, { data: { enabled: value } });
+    expect(response.ok(), await response.text()).toBe(true);
+  };
+  await enabled(false);
+  await enabled(true);
+
+  // It plays from an engine of its own, and needed no recovery on the way there.
+  await waitForPlaying(request, id);
+  const now = engineIds();
+  expect(now).toHaveLength(1);
+  expect(now).not.toContain(old[0]);
+  expect((await streamById(request, id))?.recoveries).toBe(0);
+});
+
 test("removes a stream from the manage dialog, and its engine", async ({ page, request }) => {
   const target = (await snapshot(request)).streams.find((stream) => stream.aceId === bc[2]!.infohash);
   expect(target).toBeDefined();
