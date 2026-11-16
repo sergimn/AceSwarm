@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PathStatus } from "@aceswarm/shared/api-types";
+import type { PathStatus, StandbyView } from "@aceswarm/shared/api-types";
 import {
   countryHint,
   formatDisabledCount,
@@ -13,6 +13,7 @@ import {
   pathLabel,
   peersHint,
   shownState,
+  standbyReasons,
   STATE_LABELS,
   topCountries,
 } from "../src/format.ts";
@@ -144,11 +145,41 @@ describe("formatStandbys", () => {
     expect(
       formatStandbys(
         [
-          { path: "wg:mullvad-de", state: "hot", engine: { name: "e1", shared: false } },
-          { path: "direct", state: "warming", engine: null },
+          { path: "wg:mullvad-de", state: "hot", engine: { name: "e1", shared: false }, reason: null },
+          { path: "direct", state: "warming", engine: null, reason: null },
         ],
         [vpn],
       ),
     ).toBe("mullvad-de (hot), Direct (warming up)");
+  });
+
+  it("says why a standby is not hot, and that a path was given up", () => {
+    const vpn = { id: "wg:mullvad-de", label: "mullvad-de" } as PathStatus;
+    expect(
+      formatStandbys(
+        [
+          { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
+          { path: "wg:mullvad-de", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+        ],
+        [vpn],
+      ),
+    ).toBe("Direct (warming up: ffmpeg decoded no video from it), mullvad-de (failed: gave up, no data for 90s)");
+  });
+
+  it("can leave the reasons out, and lists them apart", () => {
+    const paths = [
+      { id: "wg:mullvad-de", label: "mullvad-de" },
+      { id: "wg:mullvad-se", label: "mullvad-se" },
+    ] as PathStatus[];
+    const standbys: StandbyView[] = [
+      { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
+      { path: "wg:mullvad-de", state: "hot", engine: null, reason: null },
+      { path: "wg:mullvad-se", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+    ];
+    expect(formatStandbys(standbys, paths, false)).toBe("Direct (warming up), mullvad-de (hot), mullvad-se (failed)");
+    expect(standbyReasons(standbys, paths)).toBe(
+      "Direct: ffmpeg decoded no video from it\nmullvad-se: gave up, no data for 90s",
+    );
+    expect(standbyReasons([], paths)).toBe("");
   });
 });

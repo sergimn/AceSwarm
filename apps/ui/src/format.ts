@@ -138,10 +138,29 @@ const STANDBY_LABELS: Record<StandbyState, string> = {
   failed: "failed",
 };
 
-/** A stream's standbys on other paths, such as "mullvad-de (hot)"; "–" without any. */
-export function formatStandbys(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
-  const labels = standbys.map((standby) => `${pathLabel(standby.path, paths)} (${STANDBY_LABELS[standby.state]})`);
+/**
+ * A stream's standbys on other paths, such as "mullvad-de (hot)", with why one is not hot when the
+ * controller knows (and `withReasons`), such as "mullvad-de (warming up: ffmpeg decoded no video from
+ * it)"; "–" without any.
+ */
+export function formatStandbys(
+  standbys: readonly StandbyView[],
+  paths: readonly PathStatus[],
+  withReasons = true,
+): string {
+  const labels = standbys.map(({ path, state, reason }) => {
+    const detail = withReasons && reason !== null ? `${STANDBY_LABELS[state]}: ${reason}` : STANDBY_LABELS[state];
+    return `${pathLabel(path, paths)} (${detail})`;
+  });
   return labels.length === 0 ? "–" : labels.join(", ");
+}
+
+/** The reasons of the standbys that have one, a line each, such as "mullvad-de: ffmpeg decoded no video from it". */
+export function standbyReasons(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
+  return standbys
+    .filter(({ reason }) => reason !== null)
+    .map(({ path, reason }) => `${pathLabel(path, paths)}: ${String(reason)}`)
+    .join("\n");
 }
 
 function createRegionNames(): Intl.DisplayNames | undefined {
