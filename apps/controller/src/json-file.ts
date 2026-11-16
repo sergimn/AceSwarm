@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /** Reads a JSON file, returning `undefined` when it does not exist yet. */
@@ -13,11 +13,21 @@ export async function readJsonFile(path: string): Promise<unknown> {
   }
 }
 
-/** Writes JSON atomically (temp file + rename) so a crash never leaves a half-written file. */
+/**
+ * Writes JSON atomically, so that a crash or a power cut leaves the old file or the new one, never
+ * half of one: a temp file, flushed to the disk, then renamed over the old one. Without the flush
+ * some filesystems keep the new name and lose the data, which leaves an empty file.
+ */
 export async function writeJsonFile(path: string, data: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${String(process.pid)}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  const file = await open(temporary, "w", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(data, null, 2)}\n`);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
   await rename(temporary, path);
 }
 

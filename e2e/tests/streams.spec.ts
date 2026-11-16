@@ -152,6 +152,94 @@ test("keeps streams and their detected kind across a controller restart", async 
   }
 });
 
+test("disables a stream, says how long ago it had video, and plays it again once enabled", async ({
+  page,
+  request,
+}) => {
+  const target = (await snapshot(request)).streams.find((stream) => stream.aceId === bc[1]!.infohash);
+  expect(target).toBeDefined();
+  const id = target!.id;
+  const playing = await waitForPlaying(request, id);
+  expect(playing.lastFrameAt).not.toBeNull();
+  expect(playing.path).toBe("direct");
+
+  await page.goto("/");
+  const streams = page.getByRole("button", { name: "Streams", exact: true });
+  await streams.click();
+  const row = page.getByRole("dialog", { name: "Streams" }).locator(".row", { hasText: target!.aceId });
+  const restart = row.getByRole("button", { name: "Restart" });
+  const disable = row.getByRole("button", { name: "Disable" });
+  const enable = row.getByRole("button", { name: "Enable" });
+  await expect(restart).toBeVisible();
+  await expect(enable).toBeHidden();
+  // A double press: its second half lands on Enable, which takes Disable's place under the pointer
+  // once the controller answers, and must not undo the first. The page presses Enable the moment
+  // it is there, which a pointer driven from here could not time.
+  await page.evaluate(`(() => {
+    const row = [...document.querySelectorAll("dialog[open] .row")].find((item) => item.textContent.includes("${target!.aceId}"));
+    const second = [...row.querySelectorAll("button")].find((button) => button.textContent === "Enable");
+    new MutationObserver((records, observer) => {
+      if (!second.hidden) {
+        observer.disconnect();
+        second.click();
+        row.dataset.secondPress = "sent";
+      }
+    }).observe(row, { attributes: true, attributeFilter: ["hidden"], subtree: true });
+  })()`);
+  await disable.click();
+  await expect(row).toHaveAttribute("data-second-press", "sent");
+
+  // One Enable button takes the place of Restart and Disable (a disabled stream has nothing to
+  // restart), exactly as wide as the two, and the focus of the press goes to it.
+  await expect(row.locator(".badge")).toHaveText("Disabled");
+  await expect(enable).toBeFocused();
+  await expect(restart).toBeHidden();
+  await expect(disable).toBeHidden();
+  const width = async (selector: string) => (await row.locator(selector).boundingBox())?.width;
+  expect(await width(".row-pair > button")).toBe(await width(".row-pair-buttons"));
+
+  // It stopped: on no path, nothing to restart, its engine gone. It still knows its last video.
+  const stopped = await streamById(request, id);
+  expect(stopped).toMatchObject({ enabled: false, state: "stopped", path: null });
+  expect(Date.parse(stopped!.lastFrameAt!)).toBeGreaterThanOrEqual(Date.parse(playing.lastFrameAt!));
+  expect((await request.post(`/api/streams/${id}/restart`)).status()).toBe(404);
+  await expect.poll(() => engineContainers(id), { timeout: 30_000 }).toEqual([]);
+
+  // The tile says so: "Disabled", no path, the age of its last video (not "Never"), no peers.
+  await page.goBack();
+  const tile = page.locator(`.tile[data-stream="${id}"]`);
+  await expect(tile).toHaveAttribute("data-state", "stopped");
+  await expect(tile.locator(".badge").first()).toHaveText("Disabled");
+  await expect(tile.locator(".badge.path")).toBeHidden();
+  await tile.hover();
+  const stat = (label: string) => tile.locator(".tile-stats .stat", { hasText: label }).locator(".stat-value");
+  await expect(stat("Freshness")).toHaveText(/^\d+[sm] ago$/);
+  await expect(stat("Peers")).toHaveText("–");
+
+  // The player says why there is no picture, offers to enable it, and counts nobody as watching.
+  await tile.click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player.locator(".player-waiting")).toContainText("This stream is disabled");
+  await expect(player.locator(".player-details")).toContainText(/^Disabled\s+·\s+Last frame: \d+[sm] ago$/);
+  await expect(player.getByRole("button", { name: "Enable stream" })).toBeVisible();
+  expect((await streamById(request, id))?.viewers).toBe(0);
+  await page.keyboard.press("Escape");
+  await expect(player).toBeHidden();
+
+  // Enabled from the same row, Restart and Disable are back, and it plays again, with new video.
+  await streams.click();
+  await enable.click();
+  await expect(disable).toBeFocused();
+  await expect(restart).toBeVisible();
+  await expect(enable).toBeHidden();
+  await waitForPlaying(request, id);
+  await expect
+    .poll(async () => Date.parse((await streamById(request, id))?.lastFrameAt ?? ""), { timeout: 30_000 })
+    .toBeGreaterThan(Date.parse(stopped!.lastFrameAt!));
+  await expect(tile).toHaveAttribute("data-state", "playing");
+  expect(engineContainers(id)).toHaveLength(1);
+});
+
 test("removes a stream from the manage dialog, and its engine", async ({ page, request }) => {
   const target = (await snapshot(request)).streams.find((stream) => stream.aceId === bc[2]!.infohash);
   expect(target).toBeDefined();

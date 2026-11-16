@@ -67,6 +67,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
     viewers: () => orchestrator.viewers(),
     sharedEngines: () => sharedEngines.view(),
     engines: () => engineResources.running(),
+    runningSince: (stream) => orchestrator.runningSince(stream),
   },
 );
 const sharedEngines = new SharedEngines({

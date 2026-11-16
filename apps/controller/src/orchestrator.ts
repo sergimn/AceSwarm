@@ -66,6 +66,8 @@ export class Orchestrator {
   private readonly supervisors = new Map<string, StreamSupervisor>();
   private paths: PathStatus[] = [];
   private pathTimer: NodeJS.Timeout | undefined;
+  /** When each running stream was started: by enabling or adding it, or by this controller starting. */
+  private readonly startedAt = new Map<string, number>();
   /** Set once every stored stream has a supervisor; until then the list of engine paths is incomplete. */
   private launched = false;
   /** Serializes policy and profile changes, so "WireGuard only needs a profile" always holds. */
@@ -142,6 +144,15 @@ export class Orchestrator {
     const waitMs = this.deps.stopWaitMs ?? 2000;
     await Promise.all(this.supervisors.values().map((supervisor) => supervisor.stop(false, waitMs)));
     this.supervisors.clear();
+    this.startedAt.clear();
+  }
+
+  /**
+   * When the stream was last started: enabled, added, or taken up by this controller as it
+   * started. Undefined while it is disabled. Video from before then is from an earlier run.
+   */
+  runningSince(id: string): number | undefined {
+    return this.startedAt.get(id);
   }
 
   snapshot(): Snapshot {
@@ -242,7 +253,13 @@ export class Orchestrator {
   }
 
   async updateStream(id: string, patch: Pick<StreamPatch, "name" | "enabled">): Promise<StreamView | undefined> {
-    const updated = await this.deps.store.update(id, patch);
+    // A stream being disabled loses its supervisor, which knows when it last had video: that is
+    // saved with the change, so the stream shows it from the first moment it is off.
+    const stopping = patch.enabled === false ? this.supervisors.get(id) : undefined;
+    const updated = await this.deps.store.update(
+      id,
+      stopping === undefined ? patch : { ...patch, lastFrameAt: stopping.view().lastFrameAt },
+    );
     if (updated === undefined) {
       return undefined;
     }
@@ -253,6 +270,7 @@ export class Orchestrator {
       supervisor?.updateConfig(updated);
     } else {
       this.supervisors.delete(id);
+      this.startedAt.delete(id);
       void supervisor.stop(true);
     }
     return this.view(updated);
@@ -263,6 +281,7 @@ export class Orchestrator {
     this.deps.viewers.forgetStream(id);
     const supervisor = this.supervisors.get(id);
     this.supervisors.delete(id);
+    this.startedAt.delete(id);
     if (supervisor !== undefined) {
       void supervisor.stop(true);
     } else if (removed) {
@@ -419,6 +438,7 @@ export class Orchestrator {
       viewers: () => this.deps.viewers.count(stream.id),
     });
     this.supervisors.set(stream.id, supervisor);
+    this.startedAt.set(stream.id, Date.now());
     supervisor.start();
   }
 

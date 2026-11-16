@@ -43,7 +43,7 @@ flowchart TB
 
 ## Streams
 
-The controller stores the stream list in `/data/streams.json`, written atomically. Additions and removals survive restarts. Each enabled stream gets a supervisor, which goes through these steps:
+The controller stores the stream list in `/data/streams.json`, written atomically: a new file is flushed to the disk and then takes the old one's place, so a crash or a power cut leaves one or the other. Additions and removals survive restarts. Each enabled stream gets a supervisor, which goes through these steps:
 
 1. **Start or adopt the engine.** It adopts an engine left from a previous run, or creates `<stack>-engine-<stream>-<generation>`. `streams.json` remembers which of its engines the stream played from, so after a restart the controller adopts that one, not an engine a failed move kept (see [kept engines](#kept-engines)). Without that record, it adopts the newest.
 2. **Pick a network path** and tell the gateway.
@@ -51,6 +51,10 @@ The controller stores the stream list in `/data/streams.json`, written atomicall
 4. **Open a session.** It calls `/ace/getstream`. A pasted value is a content ID or an infohash, and both are 40 hex characters. If the input doesn't say which (a magnet link does), the controller tries one kind, then the other, and saves the kind that worked.
 5. **Start the transcoder** on the session's playback URL. ffmpeg follows the URL's redirect.
 6. **Check health every tick.** A stream is healthy only while new video frames arrive, and only frames from a source whose live edge moves count (see [stale sources](#stale-sources)).
+
+The controller keeps the time of each stream's last video: the newest frame any of its ffmpeg runs published. A new run starts without one, so this is what the UI's "Freshness" shows while a stream recovers or starts over. `streams.json` keeps it too, saved with the first video, then at most once a minute, and when the stream or the controller stops. The metric `aceswarm_stream_last_frame_age_seconds` is the age of that time while the stream is enabled and has had video since it was started. The time a stream spent disabled, or the stack spent down, is no outage, so the metric has no value from the start until the first new frame.
+
+A disabled stream has no supervisor, so no engine and no network path. The UI shows it as "Disabled", with the time of its last video, and offers to enable it instead of restarting it.
 
 ### Controller restarts
 

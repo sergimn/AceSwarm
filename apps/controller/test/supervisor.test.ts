@@ -85,6 +85,7 @@ const stream: StreamConfig = {
   path: null,
   ownEngine: null,
   session: null,
+  lastFrameAt: null,
 };
 
 interface Fakes {
@@ -144,6 +145,8 @@ interface Fakes {
   standbyData?: Set<string>;
   /** While on, the transcoder can't be reached. */
   transcoderDown?: { on: boolean };
+  /** When the stream last had video in an earlier run. */
+  lastFrameAt?: string;
   /** The live edge the transcoder reports for the source it reads (none by default). */
   liveEdge?: { value: LiveEdgeView | null };
 }
@@ -343,6 +346,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     ...stream,
     ...(fakes.ownEngine !== undefined && { ownEngine: fakes.ownEngine }),
     ...(fakes.savedSession !== undefined && { session: fakes.savedSession }),
+    ...(fakes.lastFrameAt !== undefined && { lastFrameAt: fakes.lastFrameAt }),
   };
   const store = {
     get: () => saved,
@@ -471,6 +475,107 @@ test("stops sending the address of an engine that was replaced", async () => {
   expect(assigned.at(-1)).toEqual({ ip: replacement.ip, path: "direct" });
   expect(unassigned).toEqual([engine.ip]);
   expect(instance.assignments()).toEqual([{ ip: replacement.ip, path: "direct" }]);
+});
+
+const iso = (ms: number): string => new Date(ms).toISOString();
+
+/** The last frame times a supervisor saved to the store, in order. */
+const frameSaves = (updates: Record<string, unknown>[]): unknown[] =>
+  updates.filter((update) => "lastFrameAt" in update).map((update) => update["lastFrameAt"]);
+
+describe("the time of a stream's last video", () => {
+  test("stays while recovery starts the pipeline over, until new video comes", async () => {
+    const sources = new Set([session.playbackUrl]);
+    const { instance, clock, real, transcoderStarts } = supervisor([direct], { sources });
+    await instance.tick();
+    await instance.tick();
+    const played = iso(clock.now);
+    expect(instance.view()).toMatchObject({ state: "playing", lastFrameAt: played });
+
+    // The video stops, and recovery starts the pipeline over. The new pipeline has no frame yet,
+    // which used to show as a stream that never played.
+    sources.clear();
+    clock.now += settings.stallAfterMs + 1000;
+    await instance.tick();
+    expect(transcoderStarts).toHaveLength(2);
+    expect(real.lastFrameAt).toBeNull();
+    expect(instance.view()).toMatchObject({ state: "recovering", lastFrameAt: played });
+
+    sources.add(session.playbackUrl);
+    clock.now += 5000;
+    await instance.tick();
+    expect(instance.view()).toMatchObject({ state: "playing", lastFrameAt: iso(clock.now) });
+  });
+
+  test("is saved once a minute while the stream plays, and when it stops", async () => {
+    const { instance, clock, updates, saved } = supervisor([direct], { video: { on: true } });
+    await instance.tick();
+    expect(frameSaves(updates)).toEqual([]);
+    // The first video is saved at once: a stream that played is never one that never did.
+    await instance.tick();
+    const first = iso(clock.now);
+    expect(frameSaves(updates)).toEqual([first]);
+
+    for (let second = 1; second < 60; second += 1) {
+      clock.now += 1000;
+      await instance.tick();
+    }
+    expect(frameSaves(updates)).toEqual([first]);
+    clock.now += 1000;
+    await instance.tick();
+    expect(frameSaves(updates)).toEqual([first, iso(clock.now)]);
+
+    // Stopping doesn't wait for the minute to pass. A stopping controller saves what the last
+    // check saw, without asking the transcoder again: the stream plays on without it.
+    clock.now += 5000;
+    await instance.tick();
+    const checked = iso(clock.now);
+    clock.now += 1500;
+    await instance.stop(false);
+    expect(frameSaves(updates)).toEqual([first, iso(clock.now - 6500), checked]);
+    expect(saved().lastFrameAt).toBe(checked);
+  });
+
+  test("is not saved again while no new video comes", async () => {
+    const video = { on: true };
+    const { instance, clock, updates } = supervisor([direct], { video });
+    await instance.tick();
+    await instance.tick();
+    video.on = false;
+    for (let minute = 0; minute < 3; minute += 1) {
+      clock.now += 61_000;
+      await instance.tick();
+    }
+    await instance.stop(false);
+    expect(frameSaves(updates)).toHaveLength(1);
+  });
+
+  test("counts the frames that came after the last check, when the stream is removed or disabled", async () => {
+    const { instance, clock, saved } = supervisor([direct], { video: { on: true } });
+    await instance.tick();
+    await instance.tick();
+    // The pipeline went on for a while after the last check.
+    clock.now += 30_000;
+    await instance.stop(true);
+    expect(saved().lastFrameAt).toBe(iso(clock.now));
+    expect(instance.view()).toMatchObject({ state: "stopped", lastFrameAt: iso(clock.now) });
+  });
+
+  test("starts from the saved one, and a change of the config keeps the newer of the two", async () => {
+    const before = iso(500);
+    const { instance, clock, saved } = supervisor([direct], { video: { on: true }, lastFrameAt: before });
+    // The stream played in an earlier run and has no video yet in this one.
+    await instance.tick();
+    expect(instance.view().lastFrameAt).toBe(before);
+    await instance.tick();
+    const played = iso(clock.now);
+    expect(instance.view().lastFrameAt).toBe(played);
+
+    clock.now += 1000;
+    // A rename comes with the stored config, whose frame time is the one last saved.
+    instance.updateConfig({ ...saved(), name: "Renamed", lastFrameAt: before });
+    expect(instance.view()).toMatchObject({ name: "Renamed", lastFrameAt: played });
+  });
 });
 
 describe("taking over engines after a controller restart", () => {
