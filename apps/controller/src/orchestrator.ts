@@ -15,6 +15,7 @@ import type { EngineManager } from "./engines.ts";
 import { Mutex } from "./json-file.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import type { NetworkPolicyStore } from "./network-policy-store.ts";
+import { waitAtMost } from "./playback.ts";
 import type { SettingsStore } from "./settings-store.ts";
 import type { SharedEngines } from "./shared-engines.ts";
 import { DEFAULT_STANDBY_SETTINGS, type StandbySettings } from "./standby.ts";
@@ -64,6 +65,12 @@ export class Orchestrator {
   private readonly deps: OrchestratorDeps;
   private readonly logger: Logger;
   private readonly supervisors = new Map<string, StreamSupervisor>();
+  /**
+   * The supervisors being torn down (a stream disabled or removed), by stream id. Tearing down
+   * removes every engine, session and pipeline of the stream by its id, so a stream enabled again
+   * starts only once its previous run is gone (see `stopRun`).
+   */
+  private readonly teardowns = new Map<string, Promise<void>>();
   /** The gateway's paths from its last answer; empty while it doesn't answer: the streams treat them as unknown. */
   private paths: PathStatus[] = [];
   /** What the last answer said, kept for the UI while the gateway doesn't answer: health is then unknown. */
@@ -120,10 +127,17 @@ export class Orchestrator {
 
     try {
       await this.deps.engines.ensureImage();
-      const known = new Set(this.deps.store.list().map((stream) => stream.id));
-      const removed = await this.deps.engines.removeOrphans(known);
+      // A disabled stream has no engine: one left by a teardown that failed, or that the last
+      // controller was stopped in the middle of, would run for as long as the stream stays disabled.
+      const wanted = new Set(
+        this.deps.store
+          .list()
+          .filter((stream) => stream.enabled)
+          .map((stream) => stream.id),
+      );
+      const removed = await this.deps.engines.removeOrphans(wanted);
       if (removed > 0) {
-        this.logger.info({ removed }, "removed engines of deleted streams");
+        this.logger.info({ removed }, "removed engines of deleted and disabled streams");
       }
     } catch (error) {
       this.logger.error({ err: error }, "docker is not reachable yet; streams will retry");
@@ -140,14 +154,19 @@ export class Orchestrator {
   /**
    * Stops supervision but leaves engines, sessions and pipelines running, so that a restarted
    * controller takes them over and players see no gap. It waits at most `stopWaitMs` for steps in
-   * progress: Docker and Podman kill a container that hasn't stopped after 10 seconds.
+   * progress, and for the streams being torn down to be gone: Docker and Podman kill a container
+   * that hasn't stopped after 10 seconds. What a teardown leaves, the next start removes.
    */
   async stop(): Promise<void> {
     if (this.pathTimer !== undefined) {
       clearInterval(this.pathTimer);
     }
     const waitMs = this.deps.stopWaitMs ?? 2000;
-    await Promise.all(this.supervisors.values().map((supervisor) => supervisor.stop(false, waitMs)));
+    const tornDown = Promise.all(this.teardowns.values()).then(() => undefined);
+    await Promise.all([
+      ...this.supervisors.values().map((supervisor) => supervisor.stop(false, waitMs)),
+      waitAtMost(tornDown, waitMs),
+    ]);
     this.supervisors.clear();
     this.startedAt.clear();
   }
@@ -277,7 +296,7 @@ export class Orchestrator {
     } else {
       this.supervisors.delete(id);
       this.startedAt.delete(id);
-      void supervisor.stop(true);
+      this.stopRun(id, supervisor);
     }
     return this.view(updated);
   }
@@ -289,9 +308,11 @@ export class Orchestrator {
     this.supervisors.delete(id);
     this.startedAt.delete(id);
     if (supervisor !== undefined) {
-      void supervisor.stop(true);
+      this.stopRun(id, supervisor);
     } else if (removed) {
-      void this.deps.engines.removeAllFor(id).catch(() => undefined);
+      // Behind a teardown still going, which removes the same engines.
+      const previous = this.teardowns.get(id) ?? Promise.resolve();
+      void previous.then(async () => this.deps.engines.removeAllFor(id)).catch(() => undefined);
     }
     if (removed) {
       this.logger.info({ stream: id }, "stream removed");
@@ -448,7 +469,26 @@ export class Orchestrator {
     });
     this.supervisors.set(stream.id, supervisor);
     this.startedAt.set(stream.id, Date.now());
-    supervisor.start();
+    // A stream enabled again while its previous run is still being torn down starts behind it.
+    supervisor.start(this.teardowns.get(stream.id));
+  }
+
+  /**
+   * Stops a stream's supervisor for good in the background, removing its engines, session and
+   * pipeline once the step in progress is done. The stream's id stays in `teardowns` until then.
+   */
+  private stopRun(id: string, supervisor: StreamSupervisor): void {
+    const done: Promise<void> = supervisor
+      .stop(true)
+      .catch((error: unknown) => {
+        this.logger.warn({ err: error, stream: id }, "could not stop the stream's previous run");
+      })
+      .finally(() => {
+        if (this.teardowns.get(id) === done) {
+          this.teardowns.delete(id);
+        }
+      });
+    this.teardowns.set(id, done);
   }
 
   private view(stream: StreamConfig): StreamView {
