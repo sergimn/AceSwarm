@@ -71,7 +71,12 @@ export class Orchestrator {
    * starts only once its previous run is gone (see `stopRun`).
    */
   private readonly teardowns = new Map<string, Promise<void>>();
+  /** The gateway's paths from its last answer; empty while it doesn't answer: the streams treat them as unknown. */
   private paths: PathStatus[] = [];
+  /** What the last answer said, kept for the UI while the gateway doesn't answer: health is then unknown. */
+  private lastKnownPaths: PathStatus[] = [];
+  /** Whether the gateway answered the last time it was asked for its paths. */
+  private gatewayReachable = false;
   private pathTimer: NodeJS.Timeout | undefined;
   /** When each running stream was started: by enabling or adding it, or by this controller starting. */
   private readonly startedAt = new Map<string, number>();
@@ -178,7 +183,8 @@ export class Orchestrator {
     return {
       generatedAt: new Date().toISOString(),
       streams: this.deps.store.list().map((stream) => this.view(stream)),
-      paths: this.paths,
+      paths: this.lastKnownPaths,
+      gatewayReachable: this.gatewayReachable,
       pathStrategy: this.deps.settings.pathStrategy,
       wireguardOnly: this.deps.policy.get().wireguardOnly,
       sharedEngines: {
@@ -373,9 +379,12 @@ export class Orchestrator {
   private async refreshPaths(): Promise<void> {
     try {
       this.paths = await this.deps.netgw.paths();
+      this.lastKnownPaths = this.paths;
+      this.gatewayReachable = true;
     } catch (error) {
       this.logger.debug({ err: describeError(error) }, "network gateway unreachable");
       this.paths = [];
+      this.gatewayReachable = false;
       return;
     }
     await this.syncAssignments();

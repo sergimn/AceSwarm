@@ -139,7 +139,17 @@ export interface WireguardProfileView {
 export interface Snapshot {
   generatedAt: string;
   streams: StreamView[];
+  /**
+   * The network gateway's paths and their health. While it doesn't answer (it restarts, or a poll
+   * timed out) these are the paths of its last answer, none before it first answered: see
+   * `gatewayReachable`. A profile removed meanwhile stays among them until it answers.
+   */
   paths: PathStatus[];
+  /**
+   * Whether the gateway answered the controller's last poll (every 5 seconds). When it didn't, the
+   * health in `paths` is unknown, not zero: the controller doesn't move or restart a stream because of it.
+   */
+  gatewayReachable: boolean;
   pathStrategy: PathStrategyName;
   /** Streams only use WireGuard paths; the direct path is off. */
   wireguardOnly: boolean;
