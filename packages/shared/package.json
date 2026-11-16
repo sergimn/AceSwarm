@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./ace-id": "./src/ace-id.ts",
+    "./ace-id-list": "./src/ace-id-list.ts",
     "./api-types": "./src/api-types.ts",
     "./env": "./src/env.ts",
     "./http": "./src/http.ts",

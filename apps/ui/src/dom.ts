@@ -96,6 +96,51 @@ export function confirmButton(
   return button;
 }
 
+export interface SwitchSetting {
+  /** The whole row: the label and its hint, and the switch. */
+  element: HTMLElement;
+  button: HTMLButtonElement;
+  hint: HTMLElement;
+  /** Shows the switch as on or off. */
+  show: (on: boolean) => void;
+}
+
+/**
+ * A setting with an on/off switch (`role="switch"`): its label and a hint under it on the left,
+ * the switch on the right. The switch is a button that never gets disabled: a disabled control
+ * can't take focus, and a remote would never reach it to read why it is unavailable.
+ */
+export function switchSetting(id: string, label: string, hint = ""): SwitchSetting {
+  const state = h("span", { className: "switch-state", attrs: { "aria-hidden": "true" } });
+  const button = h(
+    "button",
+    {
+      className: "switch",
+      attrs: {
+        type: "button",
+        role: "switch",
+        "aria-checked": "false",
+        "aria-labelledby": `${id}-label`,
+        "aria-describedby": `${id}-hint`,
+      },
+    },
+    [h("span", { className: "switch-track", attrs: { "aria-hidden": "true" } }), state],
+  );
+  const hintElement = h("p", { className: "muted small", text: hint, attrs: { id: `${id}-hint` } });
+  const element = h("div", { className: "setting" }, [
+    h("div", { className: "setting-text" }, [
+      h("span", { className: "row-title", text: label, attrs: { id: `${id}-label` } }),
+      hintElement,
+    ]),
+    button,
+  ]);
+  const show = (on: boolean): void => {
+    button.setAttribute("aria-checked", String(on));
+    state.textContent = on ? "On" : "Off";
+  };
+  return { element, button, hint: hintElement, show };
+}
+
 /**
  * Draws toasts inside `host`, or on the page when there is none. A modal dialog and a full-screen
  * element are drawn above the rest of the page whatever its z-index, and the browser keeps the rest

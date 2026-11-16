@@ -91,6 +91,37 @@ export interface StreamView {
   };
 }
 
+/** What became of one entry of a list sent to `POST /api/streams/bulk`. */
+export type BulkAddStatus = "added" | "duplicate" | "invalid";
+
+export interface BulkAddResult {
+  /** The line of the list the entry is on, counted from 1. A line with several identifiers has an entry for each. */
+  line: number;
+  /** That line without the space around it, cut at 200 characters. */
+  text: string;
+  /**
+   * - added: the stream is new and is in the list now.
+   * - duplicate: a stream with the identifier was in the list already, or an earlier line of this
+   *   list has it (see `repeatsLine`).
+   * - invalid: the line has no identifier.
+   */
+  status: BulkAddStatus;
+  /** The identifier found on the line (40 hex characters); null when it has none. */
+  aceId: string | null;
+  /** The stream that was added, or the one that has the identifier; null when the line has none. */
+  stream: StreamView | null;
+  /** The earlier line of this list with the same identifier, when the entry repeats one; else null. */
+  repeatsLine: number | null;
+}
+
+/** The answer to `POST /api/streams/bulk`: a result for every entry of the list, in its order. */
+export interface BulkAddResponse {
+  results: BulkAddResult[];
+  added: number;
+  duplicates: number;
+  invalid: number;
+}
+
 /**
  * How far a standby is: its engine or session is starting, it is opening its session and waiting
  * for data, data arrives (it can take over at once), or it failed and tries again later.

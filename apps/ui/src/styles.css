@@ -453,7 +453,8 @@ a {
   color: #fff;
 }
 
-.button:disabled {
+.button:disabled,
+.button[aria-busy="true"] {
   opacity: 0.6;
   cursor: progress;
 }
@@ -594,6 +595,20 @@ textarea.input {
 
 p.form-error {
   padding-left: 12px;
+}
+
+/* What became of a list of streams that was sent, a sentence for each kind of result. */
+.form-result {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.form-result p {
+  margin: 0;
 }
 
 /* Dialogs ----------------------------------------------------------------------------------- */
