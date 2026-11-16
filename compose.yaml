@@ -189,6 +189,9 @@ services:
       - /dev/net/tun:/dev/net/tun
     sysctls:
       net.ipv4.ip_forward: 1
+      # Loose reverse-path filtering (2) must stay: a probe leaves through its tunnel's interface,
+      # but the filter looks its reply's sender up in the main table, which routes it out of the
+      # egress interface. Strict mode (1) would drop every reply and keep every tunnel Down.
       net.ipv4.conf.all.rp_filter: 2
       net.ipv4.conf.default.rp_filter: 2
       net.ipv4.conf.all.src_valid_mark: 1

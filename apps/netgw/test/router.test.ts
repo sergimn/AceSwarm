@@ -45,7 +45,6 @@ function tunnel(iface: string, table: number): Tunnel {
     pathId: `wg:${iface}`,
     iface,
     table,
-    address: "10.13.13.2",
     config: undefined,
     text: "",
     error: null,
