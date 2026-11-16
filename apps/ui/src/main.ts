@@ -9,7 +9,7 @@ import { Grid } from "./grid.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
-import { formatPathsUp } from "./paths.ts";
+import { formatSummary } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
 import { WatchReporter } from "./watch.ts";
@@ -103,12 +103,7 @@ class App {
     this.player.update(snapshot);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
-    const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
-    this.summary.textContent = [
-      `${String(snapshot.streams.length)} streams`,
-      `${String(live)} live`,
-      formatPathsUp(snapshot),
-    ].join(" · ");
+    this.summary.textContent = formatSummary(snapshot);
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
       return;

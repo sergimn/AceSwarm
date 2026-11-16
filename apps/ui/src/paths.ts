@@ -19,6 +19,12 @@ export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly"
   return `${String(usable.filter((path) => path.up).length)}/${String(usable.length)} network paths up`;
 }
 
+/** The top bar: how many streams there are and how many play, and the paths that are up. */
+export function formatSummary(snapshot: Pick<Snapshot, "streams" | "paths" | "wireguardOnly">): string {
+  const live = snapshot.streams.filter((stream) => stream.state === "playing").length;
+  return [count(snapshot.streams.length, "stream"), `${String(live)} live`, formatPathsUp(snapshot)].join(" · ");
+}
+
 /** What runs through one path right now. */
 export interface PathLoad {
   /** Streams that have an engine on the path, whatever state they are in. */

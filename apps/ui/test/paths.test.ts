@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus, StandbyView, StreamView } from "@aceswarm/shared/api-types";
-import { formatPathLoad, formatPathsUp, isPathOff, pathLoads, usablePaths } from "../src/paths.ts";
+import { formatPathLoad, formatPathsUp, formatSummary, isPathOff, pathLoads, usablePaths } from "../src/paths.ts";
 
 function path(id: string, up: boolean): PathStatus {
   return {
@@ -28,6 +28,24 @@ function stream(overrides: Partial<StreamView>): StreamView {
 }
 
 const standby = (pathId: string, state: StandbyView["state"]): StandbyView => ({ path: pathId, state, engine: null });
+
+describe("the top bar", () => {
+  const paths = [path("direct", true)];
+  const playing = stream({ state: "playing" });
+  const stalled = stream({ state: "stalled" });
+
+  it("counts streams and says so in the singular for one", () => {
+    expect(formatSummary({ streams: [], paths, wireguardOnly: false })).toBe(
+      "0 streams · 0 live · 1/1 network paths up",
+    );
+    expect(formatSummary({ streams: [playing], paths, wireguardOnly: false })).toBe(
+      "1 stream · 1 live · 1/1 network paths up",
+    );
+    expect(formatSummary({ streams: [playing, stalled], paths, wireguardOnly: false })).toBe(
+      "2 streams · 1 live · 1/1 network paths up",
+    );
+  });
+});
 
 describe("the top bar's paths up", () => {
   const paths = [path("direct", true), path("wg:a", false)];
