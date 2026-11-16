@@ -132,6 +132,8 @@ function sharedEnginesHint(view: SharedEnginesView | undefined): string {
     "On: streams on the same network path share one engine, which needs much less memory.",
     `It restarts only when a stream someone is watching fails, or more than ${String(view.maxFailures)}`,
     `of its streams fail within ${String(view.failureWindowSeconds)} s.`,
+    "A stream's connected peers are its own, but the peers sending data and their countries are the engine's:",
+    "every stream on it shows the same.",
   ].join(" ");
 }
 

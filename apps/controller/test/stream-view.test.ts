@@ -1,4 +1,4 @@
-import type { PeerStats, PipelineStatus } from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus, StreamView } from "@aceswarm/shared/api-types";
 import { describe, expect, it } from "vitest";
 import type { EngineStats } from "../src/acestream.ts";
 import type { StreamConfig } from "../src/stream-store.ts";
@@ -67,6 +67,22 @@ describe("streamView", () => {
     // Without engine stats, the gateway's count stands; without accounting, it stays unknown.
     expect(streamView(stream, 0, live(undefined, 1)).peers.uploading).toBe(1);
     expect(streamView(stream, 0, live(0, null)).peers.uploading).toBeNull();
+  });
+
+  it("counts connected peers as the engine does, and none while the engine hasn't answered", () => {
+    // The gateway's own count of connections (85) is another measure, however large.
+    const gateway = { ...peers, connected: 85 };
+    const view = (stats: boolean): StreamView["peers"] =>
+      streamView(stream, 0, { ...live(stats ? 12 : undefined, 1), peers: gateway }).peers;
+    expect(view(true)).toMatchObject({ connected: 2, active: 2, uploading: 1 });
+    expect(view(false)).toMatchObject({ connected: null, active: 2, uploading: 1 });
+  });
+
+  it("gives the countries of the engine's sending peers as the gateway counted them", () => {
+    const countries = ["ES", "FR", "DE", "NL", "IT"].map((code, index) => ({ code, count: 5 - index }));
+    const view = streamView(stream, 0, { ...live(12, 1), peers: { ...peers, countries } });
+    expect(view.peers.countries).toEqual(countries);
+    expect(streamView(stream, 0, { ...live(12, 1), peers: undefined }).peers.countries).toEqual([]);
   });
 
   it("says when a stopped stream last had video, and that it is on no path", () => {

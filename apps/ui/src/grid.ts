@@ -1,13 +1,14 @@
 import type { Snapshot, StreamState, StreamView } from "@aceswarm/shared/api-types";
 import { h } from "./dom.ts";
 import {
-  countryName,
+  countryHint,
   formatFreshness,
   formatPeers,
   formatSpeed,
   formatStandbys,
   isFresh,
   pathLabel,
+  peersHint,
   shownState,
   STATE_LABELS,
   topCountries,
@@ -97,7 +98,9 @@ class Tile {
     const playing = state === "playing";
     this.freshness.textContent = formatFreshness(stream.lastFrameAt, now, playing);
     this.freshness.classList.toggle("fresh", isFresh(stream.lastFrameAt, now, playing));
-    this.peers.textContent = formatPeers(stream.peers, state);
+    const shared = stream.engine?.shared === true;
+    this.peers.textContent = formatPeers(stream.peers, state, shared);
+    this.peers.title = state === "stopped" ? "" : peersHint(shared);
     this.speed.textContent = formatSpeed(stream.downloadKBps);
     this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths);
     this.message.textContent = stream.message ?? "";
@@ -127,8 +130,9 @@ class Tile {
   }
 
   private renderCountries(stream: StreamView): void {
+    const shared = stream.engine?.shared === true;
     const top = topCountries(stream.peers.countries);
-    const key = top.map((country) => `${country.code}:${String(country.count)}`).join(",");
+    const key = `${String(shared)}|${top.map((country) => `${country.code}:${String(country.count)}`).join(",")}`;
     if (key === this.countryKey) {
       return;
     }
@@ -139,14 +143,10 @@ class Tile {
     }
     this.countries.replaceChildren(
       ...top.map((country) =>
-        h(
-          "span",
-          { className: "country", attrs: { title: `${countryName(country.code)}: ${String(country.count)}` } },
-          [
-            h("span", { className: `fi fi-${country.code.toLowerCase()}`, attrs: { "aria-hidden": "true" } }),
-            h("span", { className: "country-code", text: country.code }),
-          ],
-        ),
+        h("span", { className: "country", attrs: { title: countryHint(country.code, country.count, shared) } }, [
+          h("span", { className: `fi fi-${country.code.toLowerCase()}`, attrs: { "aria-hidden": "true" } }),
+          h("span", { className: "country-code", text: country.code }),
+        ]),
       ),
     );
   }

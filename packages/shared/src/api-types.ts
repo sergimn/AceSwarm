@@ -31,16 +31,19 @@ export interface CountryCount {
 }
 
 export interface PeerSummary {
-  /** Peers the engine reports as connected. */
+  /** Peers the engine reports as connected for the stream's session; null while it hasn't answered. */
   connected: number | null;
-  /** Peers that sent us data during the last measurement window (from connection tracking). */
+  /**
+   * Peers that sent stream data during the last measurement window (from connection tracking). They
+   * are the engine's, so every stream on a shared engine has the same ones.
+   */
   active: number | null;
   /**
    * Peers we sent stream data to during the last measurement window (from connection tracking); 0
    * while the engine reports no upload.
    */
   uploading: number | null;
-  /** Top countries of the peers, most common first. */
+  /** Top countries of the `active` peers, most common first (up to five): the engine's, like them. */
   countries: CountryCount[];
 }
 
@@ -257,10 +260,14 @@ export interface StandbySource {
 export interface PeerStats {
   ip: string;
   connected: number;
-  /** Peers whose traffic grew since the previous sample; null without conntrack accounting. */
+  /**
+   * Peers that sent the engine at least a block of stream data since the previous sample; null
+   * without conntrack accounting.
+   */
   active: number | null;
   /** Peers the engine sent stream data to since the previous sample; null without accounting. */
   uploading: number | null;
+  /** Top countries of the `active` peers, or of the connected ones without conntrack accounting. */
   countries: CountryCount[];
   updatedAt: string;
 }

@@ -20,20 +20,25 @@ export interface Flow {
 }
 
 /**
- * Stream data an engine must send a peer between two samples (PEERS_INTERVAL_SECONDS) to count as
- * uploading to it: one 16 KiB block.
+ * Stream data that must move between two samples (PEERS_INTERVAL_SECONDS) for a peer to count as
+ * sending to the engine, or as getting data from it: one 16 KiB block.
  */
-export const UPLOAD_MIN_BYTES = 16_384;
+export const DATA_MIN_BYTES = 16_384;
 
 /**
- * Share of what a peer sent the engine that the engine may send back without it counting as an
- * upload. Every download sends traffic back: acknowledgements (a packet of about 52 bytes for every
+ * Share of the traffic one way that the traffic the other way may make up without being stream
+ * data. Every transfer sends traffic back: acknowledgements (a packet of about 52 bytes for every
  * one or two received, under 4% of what was received) and requests for the next blocks. On a fast
- * download they add up to more than a block between two samples, but they carry no stream data. A
- * peer the engine both downloads from and uploads to counts only once it gets more than this share
- * back, so the count leans low rather than high.
+ * transfer they add up to more than a block between two samples, but they carry no stream data. A
+ * peer the engine both downloads from and uploads to counts in a direction only once more than this
+ * share is left over, so the counts lean low rather than high.
  */
 export const REPLY_SHARE = 1 / 8;
+
+/** The stream data in one direction: what moved that way, less the share of what moved back. */
+function streamData(moved: number, back: number): number {
+  return moved - Math.max(0, back) * REPLY_SHARE;
+}
 
 /** Parses `conntrack -L` output (default format, with or without accounting counters). */
 export function parseConntrack(output: string): Flow[] {
@@ -100,9 +105,11 @@ function topCountries(ips: Iterable<string>, geo: GeoLookup, limit: number): Cou
 /**
  * Derives peer statistics per engine from the gateway's connection tracking table: the gateway
  * routes every engine, so it sees each engine's peers, which the engine API does not expose.
- * "Active" peers are those whose received byte counter grew since the previous sample, and
- * "uploading" peers those the engine sent at least UPLOAD_MIN_BYTES more than REPLY_SHARE of what
- * they sent it since then.
+ * "Active" peers are connected ones that sent the engine at least DATA_MIN_BYTES more than
+ * REPLY_SHARE of what it sent them since the previous sample, and "uploading" peers those the engine
+ * sent at least DATA_MIN_BYTES more than REPLY_SHARE of what they sent it since then. So neither
+ * counts the traffic every connection carries: acknowledgements, handshakes, resets and the short
+ * answers of trackers and DHT nodes.
  */
 export class PeerTracker {
   private readonly runner: CommandRunner;
@@ -175,15 +182,16 @@ export class PeerTracker {
       entry.accounted = true;
       bytes.set(flow.key, flow.receivedBytes);
       const received = flow.receivedBytes - (this.previousBytes.get(flow.key) ?? 0);
-      if (received > 0) {
-        entry.active.add(flow.remote);
-      }
+      let sentNow = 0;
       if (flow.sentBytes !== undefined) {
         sent.set(flow.key, flow.sentBytes);
-        const data = flow.sentBytes - (this.previousSent.get(flow.key) ?? 0) - Math.max(0, received) * REPLY_SHARE;
-        if (data >= UPLOAD_MIN_BYTES) {
+        sentNow = flow.sentBytes - (this.previousSent.get(flow.key) ?? 0);
+        if (streamData(sentNow, received) >= DATA_MIN_BYTES) {
           entry.uploading.add(flow.remote);
         }
+      }
+      if (flow.replied && streamData(received, sentNow) >= DATA_MIN_BYTES) {
+        entry.active.add(flow.remote);
       }
     }
     this.previousBytes = bytes;
@@ -191,7 +199,10 @@ export class PeerTracker {
     const updatedAt = new Date(this.now()).toISOString();
     const stats = new Map<string, PeerStats>();
     for (const [ip, entry] of perEngine) {
-      const ranked = entry.accounted && entry.active.size > 0 ? entry.active : entry.connected;
+      // One set, whatever the sample: the peers sending data, or every connected one when there is
+      // no accounting to tell them apart. Switching between them whenever nobody sends would make
+      // the countries jump without the swarm changing.
+      const ranked = entry.accounted ? entry.active : entry.connected;
       stats.set(ip, {
         ip,
         connected: entry.connected.size,

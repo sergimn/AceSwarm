@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/exec.ts";
 import { StaticGeoLookup, type GeoLookup } from "../src/geoip.ts";
-import { parseConntrack, PeerTracker, REPLY_SHARE, UPLOAD_MIN_BYTES } from "../src/peers.ts";
+import { DATA_MIN_BYTES, parseConntrack, PeerTracker, REPLY_SHARE } from "../src/peers.ts";
 
 const ENGINE = "172.31.250.130";
 
 function udp(remote: string, bytes: number, port = 8621, sent = 900): string {
   return `udp      17 29 src=${ENGINE} dst=${remote} sport=8621 dport=${String(port)} packets=10 bytes=${String(sent)} src=${remote} dst=198.51.100.2 sport=${String(port)} dport=8621 packets=12 bytes=${String(bytes)} mark=0 use=1`;
+}
+
+/** A TCP flow in the given state: the peer sent 5 MB, the engine 400 bytes of requests. */
+function tcp(remote: string, state: string): string {
+  return `ipv4     2 tcp      6 431999 ${state} src=${ENGINE} dst=${remote} sport=40000 dport=7764 packets=5 bytes=400 src=${remote} dst=198.51.100.2 sport=7764 dport=40000 packets=6 bytes=5000000 [ASSURED] mark=0 use=1`;
 }
 
 /** Flows to three peers, with the bytes the engine sent each and received from each. */
@@ -53,14 +58,95 @@ describe("parseConntrack", () => {
 });
 
 describe("PeerTracker", () => {
-  it("counts connected peers and only the ones still sending as active", () => {
+  it("counts connected peers and, as sending, only those that sent a block of data since the previous sample", () => {
     const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [53], () => 0);
-    tracker.update(parseConntrack([udp("1.1.1.1", 1000), udp("8.8.8.8", 1000), udp("9.9.9.9", 1000)].join("\n")));
-    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 3 });
+    // A flow seen for the first time counts everything it moved so far: 1.1.1.1 sent a block, the
+    // others a few bytes.
+    tracker.update(
+      parseConntrack(
+        flows([
+          [0, DATA_MIN_BYTES],
+          [0, 1000],
+          [0, 1000],
+        ]),
+      ),
+    );
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 1, countries: [{ code: "AU", count: 1 }] });
 
-    // Only 8.8.8.8 sent more data since the previous sample.
-    tracker.update(parseConntrack([udp("1.1.1.1", 1000), udp("8.8.8.8", 4000), udp("9.9.9.9", 1000)].join("\n")));
+    // 8.8.8.8 sent a block since then, 9.9.9.9 one byte short of it, and 1.1.1.1 nothing.
+    tracker.update(
+      parseConntrack(
+        flows([
+          [0, DATA_MIN_BYTES],
+          [0, 1000 + DATA_MIN_BYTES],
+          [0, 1000 + DATA_MIN_BYTES - 1],
+        ]),
+      ),
+    );
     expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 1, countries: [{ code: "US", count: 1 }] });
+  });
+
+  it("doesn't count what every connection carries as sending: acknowledgements, short answers, closing flows", () => {
+    const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [53], () => 0);
+    const traffic = [
+      // The engine uploads 2 MB to 1.1.1.1, which answers with acknowledgements: more than a block,
+      // but no stream data.
+      udp("1.1.1.1", 70_000, 8621, 2_000_000),
+      // A UDP tracker's answer and a DHT node's: a few hundred bytes, on ports no filter knows.
+      udp("8.8.8.8", 600, 6969, 100),
+      udp("9.9.9.9", 300, 51_413, 100),
+      // A peer that sent 5 MB and is closing, one that reset the connection, and one that sent as
+      // much on an established connection.
+      tcp("93.184.216.34", "FIN_WAIT"),
+      tcp("93.184.216.35", "CLOSE"),
+      tcp("93.184.216.36", "ESTABLISHED"),
+    ].join("\n");
+    tracker.update(parseConntrack(traffic));
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 4, active: 1, uploading: 1 });
+    // The same counters again: nothing moved since the previous sample.
+    tracker.update(parseConntrack(traffic));
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 4, active: 0, uploading: 0 });
+  });
+
+  it("counts a peer as sending once it sent a block on top of the share of what the engine sent it", () => {
+    const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [], () => 0);
+    tracker.update(
+      parseConntrack(
+        flows([
+          [0, 0],
+          [0, 0],
+          [0, 0],
+        ]),
+      ),
+    );
+    // 1.1.1.1 sent 4 MB and got requests and acknowledgements back, 3% of that. 8.8.8.8 and 9.9.9.9
+    // were each sent 2 MB. 8.8.8.8 sent 2 MB too, and 9.9.9.9 a block less one byte on top of the
+    // share of it that replies may make up.
+    const download = 4_000_000;
+    const both = 2_000_000;
+    const share = both * REPLY_SHARE;
+    tracker.update(
+      parseConntrack(
+        flows([
+          [120_000, download],
+          [both, both],
+          [both, share + DATA_MIN_BYTES - 1],
+        ]),
+      ),
+    );
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 2, uploading: 2 });
+
+    // 9.9.9.9 sends the block it was short of, and the others nothing more.
+    tracker.update(
+      parseConntrack(
+        flows([
+          [120_000, download],
+          [both, both],
+          [both * 2, share * 2 + DATA_MIN_BYTES * 2 - 1],
+        ]),
+      ),
+    );
+    expect(tracker.get(ENGINE)).toMatchObject({ active: 1, uploading: 1 });
   });
 
   it("counts the peers the engine sent at least one block more than its replies to them since the previous sample", () => {
@@ -86,8 +172,8 @@ describe("PeerTracker", () => {
       parseConntrack(
         flows([
           [100 + replies, 1000 + download],
-          [100 + UPLOAD_MIN_BYTES, 1000],
-          [50_000 + both * REPLY_SHARE + UPLOAD_MIN_BYTES, 1000 + both],
+          [100 + DATA_MIN_BYTES, 1000],
+          [50_000 + both * REPLY_SHARE + DATA_MIN_BYTES, 1000 + both],
         ]),
       ),
     );
@@ -98,12 +184,29 @@ describe("PeerTracker", () => {
       parseConntrack(
         flows([
           [100 + replies, 1000 + download],
-          [100 + 2 * UPLOAD_MIN_BYTES - 1, 1000],
-          [50_000 + both * REPLY_SHARE * 2 + UPLOAD_MIN_BYTES * 2 - 1, 1000 + both * 2],
+          [100 + 2 * DATA_MIN_BYTES - 1, 1000],
+          [50_000 + both * REPLY_SHARE * 2 + DATA_MIN_BYTES * 2 - 1, 1000 + both * 2],
         ]),
       ),
     );
     expect(tracker.get(ENGINE)).toMatchObject({ uploading: 0 });
+  });
+
+  it("ranks the countries of the peers that sent data, and none when nobody did, not those of every connection", () => {
+    const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", [], () => 0);
+    const traffic = flows([
+      [0, 1000],
+      [0, DATA_MIN_BYTES],
+      [0, 1000],
+    ]);
+    // 8.8.8.8 (US) sends, the others (AU, CH) only answer.
+    tracker.update(parseConntrack(traffic));
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 1, countries: [{ code: "US", count: 1 }] });
+
+    // Nobody sends: no countries, and the peers are still connected. The list doesn't switch to the
+    // countries of every connection.
+    tracker.update(parseConntrack(traffic));
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 3, active: 0, countries: [] });
   });
 
   it("ignores private remotes, other subnets and ignored ports", () => {
