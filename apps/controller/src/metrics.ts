@@ -157,8 +157,10 @@ export class ControllerMetrics {
             state.set({ ...labels, state: candidate }, candidate === stream.state ? 1 : 0);
           }
           // A disabled stream is not expected to deliver: it has no value, so neither the alert,
-          // the dashboard's outages nor its availability count the time it was off.
-          if (stream.state !== "stopped") {
+          // the dashboard's outages nor its availability count the time it was off. One that is
+          // enabled counts from the start, even before its run exists (the controller listens
+          // while it is still starting up), as an outage.
+          if (stream.enabled) {
             up.set(labels, stream.state === "playing" ? 1 : 0);
           }
           setFrameAge(frameAge, stream, now, sources.runningSince?.(stream.id));

@@ -223,4 +223,10 @@ test("a disabled stream has no up value, so it is neither an outage nor in the a
   // Enabled again: it counts as soon as it has a state of its own.
   current = { ...stream, state: "starting" };
   expect(await up()).toBe("0");
+  // Enabled but with no run yet (the controller listens while it starts up): an outage, not "disabled".
+  current = { ...stream, state: "stopped", path: null };
+  expect(await up()).toBe("0");
+  // Just disabled, in a snapshot whose state is a moment old: already off.
+  current = { ...stream, enabled: false };
+  expect(await up()).toBeUndefined();
 });
