@@ -111,13 +111,6 @@ test("moves a playing stream off the direct path as soon as it is turned on", as
   await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off");
   expect(await wireguardOnly(request)).toBe(true);
 
-  // Opened again, the dialog shows the policy at once, not what it showed when it was closed.
-  await dialog.getByRole("button", { name: "Close" }).click();
-  await expect(dialog).toBeHidden();
-  await page.getByRole("button", { name: "Network", exact: true }).click();
-  await expect(toggle).toHaveAttribute("aria-checked", "true", { timeout: 1000 });
-  await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off", { timeout: 1000 });
-
   // The gateway cuts the engine off the direct path at once, and the stream moves without first
   // waiting to stall. The move is not counted as a recovery.
   await expect
@@ -158,8 +151,18 @@ test("streams wait instead of going direct while no WireGuard path is up", async
   // the path goes down, while the direct path stays up.
   setVpnServerUnreachable(true);
   try {
-    const { section } = await openNetwork(page);
-    await expect(section("Paths").locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 60_000 });
+    // The page loads and the Network dialog stays closed while the tunnel goes down. WireGuard
+    // only is on, so the top bar counts the tunnel alone: no path a stream may use is up, although
+    // the direct one is. Once it says so the page has the snapshot, and the dialog must draw it as
+    // it opens, at once: not an empty list, and not what it showed when it was last open.
+    await page.goto("/");
+    await expect(page.locator("#summary")).toContainText("0/1 network paths up", { timeout: 60_000 });
+    await page.getByRole("button", { name: "Network", exact: true }).click();
+    const paths = page
+      .getByRole("dialog", { name: "Network" })
+      .locator(".section", { has: page.getByRole("heading", { name: "Paths" }) });
+    await expect(paths.locator(".row", { hasText: PROFILE })).toContainText("Down", { timeout: 200 });
+    await expect(paths.locator(".row", { hasText: "Direct" })).toContainText("Off", { timeout: 200 });
 
     // The stream stalls once the engine's buffer runs out, and tries to recover where it is. With
     // WireGuard only off, its first recovery would move it to the direct path, which is up and
