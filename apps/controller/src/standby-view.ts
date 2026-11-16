@@ -9,12 +9,25 @@ function brief(reason: string | null): string | null {
 }
 
 /**
+ * A reader's error without where the request was going. Node's errors for a connection that failed
+ * end with the engine's address ("fetch failed (connect ECONNREFUSED 172.17.0.5:6878)"), which says
+ * nothing to the person looking at the tile.
+ */
+function withoutAddresses(error: string): string {
+  const cut = error
+    .replace(/\s*\([^)]*\)\s*$/, "")
+    .replaceAll(/\bhttps?:\/\/\S+/g, "the engine")
+    .replaceAll(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "the engine");
+  return cut.length > 0 ? cut : "its reader failed";
+}
+
+/**
  * What a standby's reader says is wrong with its session: its error, or that the broadcast is stale.
  * The last answer's: it stays while the transcoder can't be reached.
  */
 export function readerNote(reader: StandbyReaderStatus): string | undefined {
   if (reader.error !== null) {
-    return reader.error;
+    return withoutAddresses(reader.error);
   }
   return reader.liveEdge?.state === "stale" ? "its broadcast sends no new data" : undefined;
 }

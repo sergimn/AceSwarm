@@ -141,12 +141,12 @@ describe("formatStandbys", () => {
   });
 
   it("says why a standby is not hot, and that a path was given up", () => {
-    const vpn = { id: "wg:a", label: "mullvad-de" } as PathStatus;
+    const vpn = { id: "wg:mullvad-de", label: "mullvad-de" } as PathStatus;
     expect(
       formatStandbys(
         [
           { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
-          { path: "wg:a", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+          { path: "wg:mullvad-de", state: "failed", engine: null, reason: "gave up, no data for 90s" },
         ],
         [vpn],
       ),
@@ -155,13 +155,13 @@ describe("formatStandbys", () => {
 
   it("can leave the reasons out, and lists them apart", () => {
     const paths = [
-      { id: "wg:a", label: "mullvad-de" },
-      { id: "wg:b", label: "mullvad-se" },
+      { id: "wg:mullvad-de", label: "mullvad-de" },
+      { id: "wg:mullvad-se", label: "mullvad-se" },
     ] as PathStatus[];
     const standbys: StandbyView[] = [
       { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
-      { path: "wg:a", state: "hot", engine: null, reason: null },
-      { path: "wg:b", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+      { path: "wg:mullvad-de", state: "hot", engine: null, reason: null },
+      { path: "wg:mullvad-se", state: "failed", engine: null, reason: "gave up, no data for 90s" },
     ];
     expect(formatStandbys(standbys, paths, false)).toBe("Direct (warming up), mullvad-de (hot), mullvad-se (failed)");
     expect(standbyReasons(standbys, paths)).toBe(

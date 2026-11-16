@@ -119,4 +119,13 @@ describe("what a reader says is wrong", () => {
     expect(readerNote(reader({ error: "the engine answered 500", liveEdge: stale }))).toBe("the engine answered 500");
     expect(readerNote(reader({ liveEdge: { ...stale, state: "live" } }))).toBeUndefined();
   });
+
+  test("leaves out the address of the engine that its error names", () => {
+    expect(readerNote(reader({ error: "fetch failed (connect ECONNREFUSED 172.17.0.5:6878)" }))).toBe("fetch failed");
+    expect(readerNote(reader({ error: "connect ETIMEDOUT 172.17.0.5:6878" }))).toBe("connect ETIMEDOUT the engine");
+    expect(readerNote(reader({ error: "bad redirect to http://172.17.0.5:6878/ace/r/abc/def" }))).toBe(
+      "bad redirect to the engine",
+    );
+    expect(readerNote(reader({ error: "(connect ECONNREFUSED 172.17.0.5:6878)" }))).toBe("its reader failed");
+  });
 });
