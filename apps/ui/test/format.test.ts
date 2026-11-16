@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PathStatus } from "@aceswarm/shared/api-types";
+import type { PathStatus, StandbyView } from "@aceswarm/shared/api-types";
 import {
   countryHint,
   formatFreshness,
@@ -12,6 +12,7 @@ import {
   pathLabel,
   peersHint,
   shownState,
+  standbyReasons,
   STATE_LABELS,
   topCountries,
 } from "../src/format.ts";
@@ -149,5 +150,22 @@ describe("formatStandbys", () => {
         [vpn],
       ),
     ).toBe("Direct (warming up: ffmpeg decoded no video from it), VPN A (failed: gave up, no data for 90s)");
+  });
+
+  it("can leave the reasons out, and lists them apart", () => {
+    const paths = [
+      { id: "wg:a", label: "VPN A" },
+      { id: "wg:b", label: "VPN B" },
+    ] as PathStatus[];
+    const standbys: StandbyView[] = [
+      { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
+      { path: "wg:a", state: "hot", engine: null, reason: null },
+      { path: "wg:b", state: "failed", engine: null, reason: "gave up, no data for 90s" },
+    ];
+    expect(formatStandbys(standbys, paths, false)).toBe("Direct (warming up), VPN A (hot), VPN B (failed)");
+    expect(standbyReasons(standbys, paths)).toBe(
+      "Direct: ffmpeg decoded no video from it\nVPN B: gave up, no data for 90s",
+    );
+    expect(standbyReasons([], paths)).toBe("");
   });
 });

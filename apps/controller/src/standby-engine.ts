@@ -45,7 +45,7 @@ export class StandbyEngine {
   busy = false;
   /** Failed tries since it was last hot. */
   failures = 0;
-  /** Why the last try failed, until it is hot. */
+  /** Why the last try failed, as the stream's view says it (see `StandbyView.reason`). */
   failure: string | undefined;
   /** What the transcoder's reader of its session says is wrong with it, from the last answer. */
   readerNote: string | undefined;
@@ -96,9 +96,8 @@ export class StandbyEngine {
     return this.session === undefined ? "starting" : "warming";
   }
 
-  /** Why it is not hot, as far as is known (see `StandbyView.reason`). */
-  reason(hotWithinMs: number): string | null {
-    const state = this.state(hotWithinMs);
+  /** Why it is not hot, as far as is known (see `StandbyView.reason`), given its `state()`. */
+  reason(state: StandbyState): string | null {
     if (state === "failed") {
       return this.failure ?? null;
     }

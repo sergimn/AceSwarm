@@ -2352,22 +2352,90 @@ describe("hot standby on the other paths", () => {
     const hotStandby = { on: true };
     const standbyError = { value: "the engine answered 500" as string | null };
     const fake = await withStandby({ standbyData: new Set(), standbyError, hotStandby });
+    // After its first failed try it still exists, and gives that reason too.
+    for (let tick = 0; tick < 200 && fake.restarted.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.instance.view().standbys).toMatchObject([
+      { path: "wg:a", state: "failed", engine: { name: standbyEngine.name }, reason: "the engine answered 500" },
+    ]);
     for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
       fake.clock.now += 5000;
       await fake.instance.tick();
       await settle();
     }
     expect(fake.instance.view().standbys).toMatchObject([
-      {
-        path: "wg:a",
-        state: "failed",
-        engine: null,
-        reason: expect.stringMatching(/^the engine answered 500$/) as string,
-      },
+      { path: "wg:a", state: "failed", engine: null, reason: "the engine answered 500" },
     ]);
     hotStandby.on = false;
     await fake.instance.tick();
     expect(fake.instance.view().standbys).toEqual([]);
+  });
+
+  test("gives a short phrase when a standby can't start, not the error with its address", async () => {
+    const hotStandby = { on: false };
+    const failEngineStarts = { on: false };
+    const fake = await withStandby({ hotStandby, failEngineStarts, standbyData: new Set() });
+    failEngineStarts.on = true;
+    hotStandby.on = true;
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.view().standbys).toMatchObject([
+      { path: "wg:a", state: "failed", engine: null, reason: "could not start its engine or session" },
+    ]);
+  });
+
+  test("lists no path that failed standbys once the stream may no longer use the path", async () => {
+    const allowed = { vpn: true };
+    const pathAllowed = (path: string): boolean => path !== "wg:a" || allowed.vpn;
+    const fake = await withStandby({ standbyData: new Set(), pathAllowed });
+    for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "failed" }]);
+    allowed.vpn = false;
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toEqual([]);
+  });
+
+  test("lists a path that waits for a standby only within the number of standbys it keeps", async () => {
+    const fake = await withStandby({ standbyData: new Set(), standby: { maxPaths: 1 } }, [direct, vpn, vpnB]);
+    for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    // The only slot went to the other path, which gets the standby now; the first waits behind it.
+    await fake.instance.tick();
+    await settle();
+    expect(fake.instance.view().standbys.map(({ path }) => path)).toEqual(["wg:b"]);
+  });
+
+  test("forgets the failed rounds of a path the stream moves to", async () => {
+    const fake = await withStandby({ standbyData: new Set() });
+    for (let tick = 0; tick < 200 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    // The path gets a new standby after its wait, and the stream moves to that one.
+    for (let tick = 0; tick < 200 && fake.creates() < 3; tick += 1) {
+      fake.clock.now += 5000;
+      await fake.instance.tick();
+      await settle();
+    }
+    expect(fake.creates()).toBe(3);
+    fake.sources.add(play(own(3)));
+    fake.sources.delete(play(main));
+    fake.paths[0] = { ...direct, up: false };
+    fake.clock.now += settings.stallAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().standbys.map(({ path }) => path)).not.toContain("wg:a");
   });
 
   test("removes its standbys once the stream hasn't played for a while, and starts none", async () => {

@@ -10,6 +10,7 @@ import {
   pathLabel,
   peersHint,
   shownState,
+  standbyReasons,
   STATE_LABELS,
   topCountries,
 } from "./format.ts";
@@ -102,7 +103,11 @@ class Tile {
     this.peers.textContent = formatPeers(stream.peers, state, shared);
     this.peers.title = state === "stopped" ? "" : peersHint(shared);
     this.speed.textContent = formatSpeed(stream.downloadKBps);
-    this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths);
+    // The tile has room for one reason: with several standbys, the reasons are in the tooltip (and
+    // in full in the player's overlay).
+    const several = stream.standbys.length > 1;
+    this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths, !several);
+    this.standbys.title = several ? standbyReasons(stream.standbys, snapshot.paths) : "";
     this.message.textContent = stream.message ?? "";
     this.message.hidden = stream.message === null;
     this.renderCountries(stream);

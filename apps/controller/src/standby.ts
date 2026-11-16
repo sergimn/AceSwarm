@@ -9,7 +9,7 @@ import type { ControllerMetrics } from "./metrics.ts";
 import { nextRecovery, type RecoveryPolicy } from "./recovery.ts";
 import type { SharedEngines } from "./shared-engines.ts";
 import { StandbyEngine, type OpenSession, type StandbyEngineDeps } from "./standby-engine.ts";
-import { readerNote, standbyView, waitingView } from "./standby-view.ts";
+import { readerNote, standbyView, waitingViews } from "./standby-view.ts";
 import type { MoveSlots } from "./stream-paths.ts";
 
 export interface StandbySettings {
@@ -173,7 +173,6 @@ export class StreamStandbys {
     for (const standby of this.standbys.values()) {
       if (this.isHot(standby)) {
         standby.failures = 0;
-        standby.failure = undefined;
         this.pathRetries.delete(standby.path);
       }
       this.advance(standby, context);
@@ -304,11 +303,10 @@ export class StreamStandbys {
   view(): StandbyView[] {
     const { hotWithinMs } = this.deps.settings;
     const own = this.standbys.values().map((standby) => standbyView(standby, hotWithinMs));
+    // Within `STANDBY_MAX_PATHS`: a path beyond it isn't waiting for anything.
+    const room = this.limit() - this.standbys.size;
     const waiting = this.wanted
-      ? this.pathRetries
-          .entries()
-          .filter(([path]) => !this.standbys.has(path) && this.ranking.includes(path))
-          .map(([path, retry]) => waitingView(path, retry))
+      ? waitingViews(this.pathRetries, this.ranking, (path) => this.standbys.has(path), room)
       : [];
     return [...own, ...waiting].toSorted((a, b) => a.path.localeCompare(b.path, "en"));
   }
@@ -399,7 +397,7 @@ export class StreamStandbys {
       return;
     }
     if (standby.session === undefined && standby.engine !== undefined) {
-      this.run(standby, () => standby.open(context.openSession));
+      this.run(standby, "could not open a session", () => standby.open(context.openSession));
       return;
     }
     const quietMs = now - (standby.lastDataAt ?? standby.openedAt ?? now);
@@ -413,7 +411,7 @@ export class StreamStandbys {
       return;
     }
     if (standby.engine === undefined) {
-      this.run(standby, () => standby.start(context.openSession), slot);
+      this.run(standby, "could not start its engine or session", () => standby.start(context.openSession), slot);
       return;
     }
     // Without data for too long, it starts again, unless that was its last try.
@@ -424,7 +422,7 @@ export class StreamStandbys {
       slot?.();
       return;
     }
-    this.run(standby, () => standby.startAgain(context.openSession), slot);
+    this.run(standby, "could not start again", () => standby.startAgain(context.openSession), slot);
   }
 
   /**
@@ -456,7 +454,7 @@ export class StreamStandbys {
     const standby = new StandbyEngine(path, context.sharing, this.engineDeps);
     this.standbys.set(path, standby);
     this.logger.info({ path, shared: standby.shared }, "starting a standby");
-    this.run(standby, () => standby.start(context.openSession), slot);
+    this.run(standby, "could not start its engine or session", () => standby.start(context.openSession), slot);
   }
 
   /** A start slot (see `startSlots`): its release, undefined without a limit, false while all are taken. */
@@ -492,14 +490,18 @@ export class StreamStandbys {
 
   // ---- background work ------------------------------------------------------------------------
 
-  private run(standby: StandbyEngine, work: () => Promise<void>, done?: () => void): void {
+  /**
+   * Runs `work` in the background. When it throws, the error is logged, and the stream's view gives
+   * `couldNot` instead: an error starts with the address of a request, which says nothing to the UI.
+   */
+  private run(standby: StandbyEngine, couldNot: string, work: () => Promise<void>, done?: () => void): void {
     standby.busy = true;
     const task = (async () => {
       try {
         await work();
       } catch (error) {
         if (!standby.dropped) {
-          this.fail(standby, describeError(error));
+          this.fail(standby, describeError(error), couldNot);
         }
       } finally {
         standby.busy = false;
@@ -699,6 +701,8 @@ export class StreamStandbys {
       return undefined;
     }
     this.standbys.delete(standby.path);
+    // The stream moves to its path: a failed round there no longer says anything.
+    this.pathRetries.delete(standby.path);
     return { path: standby.path, engine: standby.engine, session: standby.session, hot: this.isHot(standby), standby };
   }
 }
