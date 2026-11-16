@@ -2288,11 +2288,14 @@ describe("the figures of a stream during a long step", () => {
     expect(fake.instance.path).toBe("wg:a");
   });
 
-  test("shows the new engine's peers as soon as the stream moved to it", async () => {
+  test("shows no peers once the stream moved, until the new engine's are polled", async () => {
     const fake = await playing();
     const moving = await fake.move();
     moving.open();
     await moving.step;
+    // The old engine's are gone, and the commit doesn't wait to poll the new one.
+    expect(fake.instance.view().peers.connected).toBeNull();
+    await fake.instance.observe();
     expect(fake.instance.view().peers.connected).toBe(2);
   });
 
@@ -2309,9 +2312,12 @@ describe("the figures of a stream during a long step", () => {
 
     moving.open();
     await moving.step;
-    expect(fake.instance.view().peers.connected).toBe(2);
+    expect(fake.instance.view().peers.connected).toBeNull();
     answer.open();
     await observing;
+    // What it polled from the old engine does not come back.
+    expect(fake.instance.view().peers.connected).toBeNull();
+    await fake.instance.observe();
     expect(fake.instance.view().peers.connected).toBe(2);
   });
 
@@ -2395,5 +2401,49 @@ describe("the timer that observes a long step", () => {
 
     vi.useRealTimers();
     await fake.instance.stop(false, 0);
+  });
+
+  test("stops observing when the stream stops, whatever step is still running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const { state, pathAllowed } = policy(false);
+    const hold: Hold = {};
+    const polls = { count: 0 };
+    const peersOf = () => {
+      polls.count += 1;
+      return 2;
+    };
+    const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+    const next: EngineHandle = { ...engine, containerId: "c2", generation: 2, ip: "172.31.250.11" };
+    const fake = supervisor([direct, vpn], {
+      created: [engine, next],
+      video: { on: true },
+      pathAllowed,
+      hold,
+      peersOf,
+    });
+    fake.instance.start();
+    for (let tick = 0; tick < 3; tick += 1) {
+      await vi.advanceTimersByTimeAsync(tick === 0 ? 0 : settings.tickMs);
+      fake.clock.now += settings.tickMs;
+    }
+    const session = latch();
+    hold.session = session.promise;
+    state.on = true;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    fake.clock.now += 30_000;
+    const before = polls.count;
+    await vi.advanceTimersByTimeAsync(settings.tickMs);
+    const observed = polls.count;
+    expect(observed).toBeGreaterThan(before);
+
+    // The step goes on, but nobody follows the stream any more: the timer is gone.
+    const stopping = fake.instance.stop(false, 0);
+    fake.clock.now += 30_000;
+    await vi.advanceTimersByTimeAsync(10 * settings.tickMs);
+    expect(polls.count).toBe(observed);
+
+    session.open();
+    vi.useRealTimers();
+    await stopping;
   });
 });

@@ -76,7 +76,12 @@ export class StreamFailover {
    * the stream plays from is not settled.
    */
   async keepStandbys(): Promise<void> {
-    await this.check(false);
+    try {
+      await this.check(false);
+    } catch (error) {
+      // It runs before the start, which it must not hold up.
+      this.host.logger.warn({ err: error }, "could not keep the standbys of a stream that has no session");
+    }
   }
 
   private async check(known: boolean): Promise<void> {

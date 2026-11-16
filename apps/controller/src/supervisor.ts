@@ -469,6 +469,10 @@ export class StreamSupervisor {
     this.engine = moved.engine;
     this.session = moved.session;
     this.pipeline = moved.pipeline;
+    // The peers and speed it showed were the old engine's; the next check polls the new one's. Not
+    // here: the old engine goes once the commit is done, and a poll would hold that up.
+    this.stats = undefined;
+    this.peers = undefined;
     await this.record.playback.save(moved.session);
     this.attemptStartedAt = this.now();
     await this.record.persistPath(target);
@@ -477,8 +481,6 @@ export class StreamSupervisor {
       this.deps.metrics.pathSwitches.inc({ stream: this.stream.id, from, to: target });
     }
     this.logger.info({ from, to: target, engine: moved.engine.name }, "stream moved to another engine");
-    // The peers and speed it showed were the old engine's.
-    await this.poll();
   }
 
   private async runAction(action: RecoveryAction, reason: string): Promise<void> {
