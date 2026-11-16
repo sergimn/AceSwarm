@@ -46,7 +46,7 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   // The broadcast runner is the peer, placed in Spain (GEOIP_STATIC in e2e/compose.e2e.yaml).
   await expect(stats.locator(".country-code")).toHaveText(["ES"]);
   await expect(stats.locator(".fi.fi-es")).toBeAttached();
-  await expect(stats.locator(".stat", { hasText: "Download" })).toContainText(/KB\/s|MB\/s/);
+  await expect(stats.locator(".stat", { hasText: "Download" })).toContainText(/KiB\/s|MiB\/s/);
 
   // A bare value (acestream:// links carry one) is tried as a content ID first, which works here.
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === contentId);
