@@ -180,3 +180,47 @@ test("exports the age of a stream's last frame while it runs, not once it is sto
   expect(await age()).toBeGreaterThanOrEqual(30);
   expect(await age()).toBeLessThan(40);
 });
+
+test("a disabled stream has no up value, so it is neither an outage nor in the availability", async () => {
+  const registry = new Registry();
+  const stream: StreamView = {
+    id: "s1",
+    aceId: "a".repeat(40),
+    aceIdKind: "infohash",
+    name: "One",
+    enabled: true,
+    createdAt: "2026-11-06T10:00:00.000Z",
+    state: "playing",
+    stateSince: "2026-11-06T10:00:00.000Z",
+    message: null,
+    lastFrameAt: null,
+    liveEdge: null,
+    peers: { connected: null, active: null, uploading: null, countries: [] },
+    downloadKBps: null,
+    uploadKBps: null,
+    path: "direct",
+    recoveries: 0,
+    viewers: 0,
+    hls: { preview: "", full: "", thumbnail: "" },
+    engine: null,
+    standbys: [],
+  };
+  let current = stream;
+  new ControllerMetrics(registry, () => ({ streams: [current], paths: [] }));
+  const up = async (): Promise<string | undefined> =>
+    /^aceswarm_stream_up\{stream="s1"\} (\S+)$/m.exec(await registry.metrics())?.[1];
+
+  expect(await up()).toBe("1");
+  // Enabled and not playing is an outage: 0.
+  current = { ...stream, state: "recovering" };
+  expect(await up()).toBe("0");
+  // Turned off on purpose: no value, but the stream is still listed, and its state says why.
+  current = { ...stream, enabled: false, state: "stopped", path: null };
+  expect(await up()).toBeUndefined();
+  const scrape = await registry.metrics();
+  expect(scrape).toContain('aceswarm_stream_info{stream="s1",name="One"');
+  expect(scrape).toContain('aceswarm_stream_state{stream="s1",state="stopped"} 1');
+  // Enabled again: it counts as soon as it has a state of its own.
+  current = { ...stream, state: "starting" };
+  expect(await up()).toBe("0");
+});

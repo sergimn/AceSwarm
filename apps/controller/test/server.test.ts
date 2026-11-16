@@ -59,3 +59,21 @@ test("the API waits until the orchestrator started; the HLS proxy doesn't", asyn
   expect((await api).statusCode).toBe(200);
   await service.app.close();
 });
+
+test("restarting a stream with no run says whether it is disabled or unknown", async () => {
+  const service = createService({ name: "controller", logger: createLogger("test", "silent") });
+  const orchestrator = {
+    restartStream: () => false,
+    getStream: (id: string) => (id === "abcdef" ? { id, enabled: false, state: "stopped" } : undefined),
+  } as unknown as Orchestrator;
+  await registerRoutes(service, orchestrator, { uiDir: "/nonexistent", transcoderUrl: "http://127.0.0.1:9" });
+  const restart = async (id: string) => service.app.inject({ method: "POST", url: `/api/streams/${id}/restart` });
+
+  const disabled = await restart("abcdef");
+  expect(disabled.statusCode).toBe(404);
+  expect(disabled.json()).toEqual({ error: "stream is disabled" });
+  const unknown = await restart("ghijkl");
+  expect(unknown.statusCode).toBe(404);
+  expect(unknown.json()).toEqual({ error: "stream not found" });
+  await service.app.close();
+});

@@ -77,7 +77,10 @@ export function topCountries(countries: readonly CountryCount[], limit = 3): Cou
   return [...countries].sort((a, b) => b.count - a.count || a.code.localeCompare(b.code)).slice(0, limit);
 }
 
-/** Engine speeds are reported in kilobytes per second. */
+/**
+ * The engine reports speeds in KiB/s: on a steady download its downloaded bytes grew by 1024 per
+ * unit. So 1024 units are 1 MiB/s, which the tile spells "MB/s", as it spells KiB/s "KB/s".
+ */
 export function formatSpeed(kilobytesPerSecond: number | null): string {
   if (kilobytesPerSecond === null) {
     return "–";
@@ -107,6 +110,12 @@ export const STATE_LABELS: Record<StreamState, string> = {
 /** The state to show: a disabled stream is stopped from the moment it is disabled. */
 export function shownState(stream: Pick<StreamView, "enabled" | "state">): StreamState {
   return stream.enabled ? stream.state : "stopped";
+}
+
+/** The top bar's count of the streams that were turned off, such as "1 disabled"; undefined when none was. */
+export function formatDisabledCount(streams: readonly Pick<StreamView, "enabled" | "state">[]): string | undefined {
+  const count = streams.filter((stream) => shownState(stream) === "stopped").length;
+  return count === 0 ? undefined : `${String(count)} disabled`;
 }
 
 export function pathLabel(path: string | null, paths: readonly PathStatus[]): string {

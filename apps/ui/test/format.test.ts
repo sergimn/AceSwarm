@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PathStatus } from "@aceswarm/shared/api-types";
 import {
   countryHint,
+  formatDisabledCount,
   formatFreshness,
   formatLoss,
   formatPeers,
@@ -106,6 +107,8 @@ describe("topCountries", () => {
   });
 });
 
+const stream = (enabled: boolean, state: "playing" | "stopped" | "starting") => ({ enabled, state });
+
 describe("small formatters", () => {
   it("formats speeds, latency and loss", () => {
     expect(formatSpeed(null)).toBe("–");
@@ -114,6 +117,16 @@ describe("small formatters", () => {
     expect(formatRtt(12.6)).toBe("13 ms");
     expect(formatRtt(null)).toBe("–");
     expect(formatLoss(0.256)).toBe("26%");
+  });
+
+  it("counts the disabled streams for the top bar, and says nothing when there are none", () => {
+    expect(formatDisabledCount([])).toBeUndefined();
+    expect(formatDisabledCount([stream(true, "playing"), stream(true, "starting")])).toBeUndefined();
+    expect(formatDisabledCount([stream(true, "playing"), stream(false, "stopped")])).toBe("1 disabled");
+    // A stream that has just been disabled still has its old state in a snapshot that is a moment old.
+    expect(formatDisabledCount([stream(false, "playing"), stream(false, "stopped"), stream(true, "playing")])).toBe(
+      "2 disabled",
+    );
   });
 
   it("labels paths", () => {
