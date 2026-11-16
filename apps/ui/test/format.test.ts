@@ -3,6 +3,7 @@ import type { PathStatus } from "@aceswarm/shared/api-types";
 import {
   countryHint,
   formatFreshness,
+  formatLastUpdate,
   formatLoss,
   formatPeers,
   formatRtt,
@@ -47,6 +48,17 @@ describe("formatFreshness", () => {
     expect(formatFreshness(ago(-30), NOW)).toBe("Now");
     expect(isFresh(ago(10), NOW)).toBe(true);
     expect(isFresh(ago(120), NOW)).toBe(false);
+  });
+});
+
+describe("formatLastUpdate", () => {
+  it("says how long ago the page last heard from the controller", () => {
+    expect(formatLastUpdate(0)).toBe("last update 1s ago");
+    expect(formatLastUpdate(12_400)).toBe("last update 12s ago");
+    expect(formatLastUpdate(59_999)).toBe("last update 59s ago");
+    expect(formatLastUpdate(3 * 60_000)).toBe("last update 3m ago");
+    expect(formatLastUpdate(5 * 3_600_000)).toBe("last update 5h ago");
+    expect(formatLastUpdate(-5)).toBe("last update 1s ago");
   });
 });
 

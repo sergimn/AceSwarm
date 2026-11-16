@@ -186,6 +186,28 @@ a {
   color: var(--amber);
 }
 
+/*
+ * The page hears nothing from the controller (see liveness.ts): what it shows is old. The player and
+ * the dialogs cover the top bar, so they say it themselves.
+ */
+[data-stale] .tile,
+[data-stale] .summary,
+[data-stale] .dialog-body {
+  opacity: 0.5;
+}
+
+[data-stale] .dialog-header::after {
+  content: "Not updating";
+  order: 1;
+  margin: 0 16px 0 auto;
+  color: var(--amber);
+  font-size: 0.85em;
+}
+
+[data-stale] .dialog-header .icon-button {
+  order: 2;
+}
+
 .footer {
   margin-top: auto;
   padding-top: 16px;
@@ -813,6 +835,15 @@ p.form-error {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+}
+
+.player-connection {
+  margin: 6px 0 0;
+  color: var(--amber);
+}
+
+.player-connection[hidden] {
+  display: none;
 }
 
 .player-clock {

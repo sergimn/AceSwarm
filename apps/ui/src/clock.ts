@@ -1,6 +1,7 @@
 const TICK_MS = 1000;
 
 const clocks = new Set<HTMLElement>();
+const listeners = new Set<() => void>();
 const ticker: { timer?: ReturnType<typeof setInterval> } = {};
 
 function pad(value: number): string {
@@ -19,6 +20,9 @@ function tick(): void {
       clock.textContent = text;
     }
   }
+  for (const listener of listeners) {
+    listener();
+  }
 }
 
 /** Keeps each element showing the current time. One shared timer drives all of them. */
@@ -27,5 +31,11 @@ export function startClock(...elements: HTMLElement[]): void {
     clocks.add(element);
     element.textContent = formatClock(new Date());
   }
+  ticker.timer ??= setInterval(tick, TICK_MS);
+}
+
+/** Calls `listener` every second, on the clocks' timer. */
+export function onTick(listener: () => void): void {
+  listeners.add(listener);
   ticker.timer ??= setInterval(tick, TICK_MS);
 }

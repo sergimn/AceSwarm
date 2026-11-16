@@ -2,7 +2,7 @@ import type { Snapshot, StreamView } from "@aceswarm/shared/api-types";
 import Hls from "hls.js/light";
 import { api } from "./api.ts";
 import { startClock } from "./clock.ts";
-import { errorMessage, h, icon, toast } from "./dom.ts";
+import { errorMessage, h, icon, setText, toast } from "./dom.ts";
 import {
   formatFreshness,
   formatPeers,
@@ -13,6 +13,7 @@ import {
   STATE_LABELS,
 } from "./format.ts";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
+import { staleNotice, type PageTime } from "./liveness.ts";
 import type { Navigator } from "./navigation.ts";
 import type { WatchReporter } from "./watch.ts";
 
@@ -24,6 +25,8 @@ export class Player {
   private readonly video: HTMLVideoElement;
   private readonly title: HTMLElement;
   private readonly details: HTMLElement;
+  /** Under the details while the page hears nothing from the controller: they are old. */
+  private readonly connection: HTMLElement;
   /**
    * Shown instead of the picture while there is none to show: the stream waits for its broadcast
    * (stale source), or it is disabled.
@@ -39,7 +42,10 @@ export class Player {
   private readonly navigator: Navigator;
   private readonly watch: WatchReporter;
   private readonly backButton: HTMLButtonElement;
-  /** Shown beside the buttons only in full screen, where the overlay appears with the cursor. */
+  /**
+   * The browser's time, with the overlay. The player covers the whole window, top bar and its clock
+   * included, whether or not the browser could enter full screen.
+   */
   private readonly clock: HTMLElement;
   private hls: Hls | undefined;
   private streamId: string | undefined;
@@ -51,6 +57,7 @@ export class Player {
     this.video = h("video", { className: "player-video", attrs: { playsinline: true, autoplay: true } });
     this.title = h("h2", { className: "player-title" });
     this.details = h("p", { className: "player-details" });
+    this.connection = h("p", { className: "player-connection", attrs: { hidden: true } });
     this.waitingTitle = h("p", { className: "player-waiting-title" });
     this.waitingReason = h("p", { className: "player-waiting-reason" });
     this.waiting = h("div", { className: "player-waiting", attrs: { hidden: true, role: "status" } }, [
@@ -70,9 +77,9 @@ export class Player {
     restartButton.addEventListener("click", () => {
       this.restart();
     });
-    this.clock = h("time", { className: "player-clock", attrs: { hidden: true } });
+    this.clock = h("time", { className: "player-clock" });
     startClock(this.clock);
-    const info = h("div", { className: "player-info" }, [this.title, this.details]);
+    const info = h("div", { className: "player-info" }, [this.title, this.details, this.connection]);
     const top = h("div", { className: "player-top" }, [info, this.clock]);
     const actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
@@ -85,7 +92,6 @@ export class Player {
     });
     document.body.append(this.root);
     document.addEventListener("fullscreenchange", () => {
-      this.clock.hidden = document.fullscreenElement !== this.root;
       if (document.fullscreenElement === null && this.streamId !== undefined) {
         this.navigator.back();
       }
@@ -116,7 +122,7 @@ export class Player {
     this.showOverlay();
   }
 
-  update(snapshot: Snapshot): void {
+  update(snapshot: Snapshot, time: PageTime): void {
     if (this.streamId === undefined) {
       return;
     }
@@ -126,7 +132,7 @@ export class Player {
       return;
     }
     this.follow(stream);
-    this.title.textContent = stream.name;
+    setText(this.title, stream.name);
     const state = shownState(stream);
     const disabled = state === "stopped";
     // Its broadcast sends nothing new: the last picture would be old, so it doesn't show.
@@ -135,10 +141,11 @@ export class Player {
     this.root.classList.toggle("waiting-for-source", waiting);
     this.root.classList.toggle("disabled", disabled);
     this.waiting.hidden = !waiting && !disabled;
-    this.waitingTitle.textContent = disabled ? "This stream is disabled" : "Waiting for the live broadcast";
-    this.waitingReason.textContent = disabled ? "Enable it to watch it." : (stream.message ?? "");
+    setText(this.waitingTitle, disabled ? "This stream is disabled" : "Waiting for the live broadcast");
+    setText(this.waitingReason, disabled ? "Enable it to watch it." : (stream.message ?? ""));
     this.restartLabel.data = disabled ? "Enable stream" : "Restart stream";
-    const last = `Last frame: ${formatFreshness(stream.lastFrameAt, Date.now(), state === "playing")}`;
+    // A page that hears nothing doesn't know that the stream still plays, so it doesn't say "Now".
+    const last = `Last frame: ${formatFreshness(stream.lastFrameAt, time.now, state === "playing" && !time.stale)}`;
     // A disabled stream has no engine: no peers, no speed, no path.
     const running = disabled
       ? []
@@ -148,7 +155,9 @@ export class Player {
           pathLabel(stream.path, snapshot.paths),
           ...(stream.standbys.length > 0 ? [`Standby: ${formatStandbys(stream.standbys, snapshot.paths)}`] : []),
         ];
-    this.details.textContent = [STATE_LABELS[state], last, ...running].join("  ·  ");
+    setText(this.details, [STATE_LABELS[state], last, ...running].join("  ·  "));
+    this.connection.hidden = !time.stale;
+    setText(this.connection, time.stale ? staleNotice(time) : "");
   }
 
   /**

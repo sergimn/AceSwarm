@@ -53,6 +53,22 @@ test("adds a stream by its acestream:// link from the UI and shows its live stat
   expect(stream?.aceIdKind).toBe("content-id");
 });
 
+test("shows ages by the controller's clock when the browser's clock is wrong", async ({ page }) => {
+  // A TV whose clock is 5 minutes fast, as one whose time was never set can be: measured against
+  // it, every frame would be minutes old.
+  await page.addInitScript(() => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + 5 * 60_000;
+  });
+  await page.goto("/");
+  const tile = page.locator(".tile", { hasText: "Test pattern" });
+  await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
+  await tile.hover();
+  const freshness = tile.locator(".stat", { hasText: "Freshness" });
+  await expect(freshness).toContainText("Now");
+  await expect(freshness.locator(".fresh")).toBeAttached();
+});
+
 test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
   expect(stream).toBeDefined();

@@ -12,18 +12,10 @@ const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/**
- * Age of the last new frame: "Now" under a minute, then minutes, hours or days. A stream that is
- * not playing gets no new frames, so it never says "Now": under a minute it counts the seconds.
- */
-export function formatFreshness(lastFrameAt: string | null, now: number, playing = true): string {
-  const at = lastFrameAt === null ? NaN : Date.parse(lastFrameAt);
-  if (Number.isNaN(at)) {
-    return "Never";
-  }
-  const seconds = Math.max(0, (now - at) / 1000);
+/** An age in whole units: seconds under a minute (never 0), then minutes, hours or days. */
+function ago(seconds: number): string {
   if (seconds < MINUTE) {
-    return playing ? "Now" : `${String(Math.max(1, Math.floor(seconds)))}s ago`;
+    return `${String(Math.max(1, Math.floor(seconds)))}s ago`;
   }
   if (seconds < HOUR) {
     return `${String(Math.floor(seconds / MINUTE))}m ago`;
@@ -32,6 +24,25 @@ export function formatFreshness(lastFrameAt: string | null, now: number, playing
     return `${String(Math.floor(seconds / HOUR))}h ago`;
   }
   return `${String(Math.floor(seconds / DAY))}d ago`;
+}
+
+/**
+ * Age of the last new frame: "Now" under a minute, then minutes, hours or days. A stream that is
+ * not playing gets no new frames, so it never says "Now": under a minute it counts the seconds.
+ * `now` is the controller's time (see `PageClock`), the clock that `lastFrameAt` was taken from.
+ */
+export function formatFreshness(lastFrameAt: string | null, now: number, playing = true): string {
+  const at = lastFrameAt === null ? NaN : Date.parse(lastFrameAt);
+  if (Number.isNaN(at)) {
+    return "Never";
+  }
+  const seconds = Math.max(0, (now - at) / 1000);
+  return seconds < MINUTE && playing ? "Now" : ago(seconds);
+}
+
+/** How long ago the page last heard from the controller, such as "last update 12s ago". */
+export function formatLastUpdate(silentMs: number): string {
+  return `last update ${ago(Math.max(0, silentMs) / 1000)}`;
 }
 
 export function isFresh(lastFrameAt: string | null, now: number, playing = true): boolean {
