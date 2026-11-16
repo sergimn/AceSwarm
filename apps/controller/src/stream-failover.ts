@@ -67,6 +67,19 @@ export class StreamFailover {
 
   /** Keeps the stream's standbys on the other paths (see `StreamStandbys.maintain`). */
   async maintain(): Promise<void> {
+    await this.check(this.paths.known);
+  }
+
+  /**
+   * A check for a stream that plays from no session (it is starting, or waits for a path): drops the
+   * standbys it no longer wants and learns which are hot, but starts and changes none, since where
+   * the stream plays from is not settled.
+   */
+  async keepStandbys(): Promise<void> {
+    await this.check(false);
+  }
+
+  private async check(known: boolean): Promise<void> {
     const { paths } = this;
     const { path: current, pipeline } = this.host.playing();
     if (pipeline?.lastFrameAt !== null && pipeline?.lastFrameAt !== undefined) {
@@ -75,7 +88,7 @@ export class StreamFailover {
     await this.engines.standbys.maintain({
       enabled: this.host.enabled(),
       sharing: this.host.sharing(),
-      known: paths.known,
+      known,
       current,
       candidates: paths.standbyCandidates(current),
       usable: (path) => paths.allowed(path) && paths.exists(path),

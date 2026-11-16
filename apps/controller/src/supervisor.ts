@@ -1,12 +1,4 @@
-import type {
-  PathStatus,
-  PathStrategyName,
-  PeerStats,
-  PipelineStatus,
-  StreamState,
-  StreamView,
-  PathAssignment,
-} from "@aceswarm/shared/api-types";
+import type { PeerStats, PipelineStatus, StreamState, StreamView, PathAssignment } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
@@ -16,46 +8,16 @@ import { sleep, waitAtMost } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { SourceWait } from "./source-wait.ts";
-import { StreamEngines, type MovedStream, type StreamEnginesDeps } from "./stream-engines.ts";
+import { StepWatch } from "./step-watch.ts";
+import { StreamEngines, type MovedStream } from "./stream-engines.ts";
 import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
 import { StreamRecord } from "./stream-record.ts";
 import { streamView } from "./stream-view.ts";
 import type { StreamConfig } from "./stream-store.ts";
+import type { SupervisorDeps } from "./supervisor-deps.ts";
 
-export interface SupervisorSettings {
-  tickMs: number;
-  stallAfterMs: number;
-  startupGraceMs: number;
-  recoveryBaseDelayMs: number;
-  recoveryMaxDelayMs: number;
-  /**
-   * The first wait between tries while the broadcast sends nothing new (stale source); it doubles
-   * up to `recoveryMaxDelayMs`. 30 s when not given.
-   */
-  staleSourceRetryMs?: number;
-  handoverTimeoutMs: number;
-  pathStrategy: PathStrategyName;
-  pathMinDwellMs: number;
-}
-
-/** What a supervisor needs: its stream's engines' needs (see `StreamEngines`), and these. */
-export interface SupervisorDeps extends StreamEnginesDeps {
-  settings: SupervisorSettings;
-  /** Latest network path status from the gateway (empty when it is unreachable). */
-  paths: () => PathStatus[];
-  /** Whether the network policy lets engines use a path (the direct path is off with WireGuard only). */
-  pathAllowed?: (path: string) => boolean;
-  /** Number of running streams per path. */
-  pathLoad: () => ReadonlyMap<string, number>;
-  /** Whether streams share one engine per path (the setting can change at any time). */
-  sharedEngines?: () => boolean;
-  /** Whether streams keep hot standbys on the other paths (the setting can change at any time). */
-  hotStandby?: () => boolean;
-  /** Number of players showing this stream full screen. */
-  viewers?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-}
+export type { SupervisorDeps, SupervisorSettings } from "./supervisor-deps.ts";
 
 /**
  * Keeps one stream alive: owns its engine (or its place on its path's shared engine), playback
@@ -94,6 +56,8 @@ export class StreamSupervisor {
   /** Its hot standbys on the other paths, and failing over to them. */
   private readonly failover: StreamFailover;
 
+  /** Keeps what the stream shows up to date while a step takes long. */
+  private readonly watch: StepWatch;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
   private current: Promise<void> = Promise.resolve();
@@ -115,6 +79,7 @@ export class StreamSupervisor {
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
+    this.watch = new StepWatch(deps.settings.tickMs, this.now, this.logger, async () => this.observe());
     this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
       ...deps,
       logger: this.logger,
@@ -161,6 +126,7 @@ export class StreamSupervisor {
       return;
     }
     this.running = true;
+    this.watch.start();
     this.schedule(0);
   }
 
@@ -173,6 +139,7 @@ export class StreamSupervisor {
   async stop(teardown: boolean, waitMs = Infinity): Promise<void> {
     this.running = false;
     clearTimeout(this.timer);
+    this.watch.stop();
     await waitAtMost(this.current, teardown ? Infinity : waitMs);
     // Before the pipeline goes: nobody follows the stream's video from here on.
     await this.record.saveLastVideo(teardown);
@@ -205,6 +172,7 @@ export class StreamSupervisor {
   async tick(): Promise<void> {
     await this.engines.expireSpare();
     if (this.engine === undefined || this.session === undefined) {
+      await this.failover.keepStandbys();
       await this.bootstrap();
       return;
     }
@@ -224,6 +192,7 @@ export class StreamSupervisor {
       } else if (this.paths.noneUsable()) {
         // Restarting the session or the engine can't help while there is nowhere to send it.
         this.setState("stalled", this.paths.waitingMessage());
+        await this.poll();
         return;
       }
     }
@@ -298,7 +267,8 @@ export class StreamSupervisor {
       return;
     }
     this.timer = setTimeout(() => {
-      this.current = this.tick()
+      this.current = this.watch
+        .during(async () => this.tick())
         .catch((error: unknown) => {
           this.logger.error({ err: error }, "supervisor tick failed");
         })
@@ -395,11 +365,24 @@ export class StreamSupervisor {
     });
   }
 
+  /**
+   * Brings the stream's pipeline, stats and peers up to date, and its standbys' data (see
+   * `StepWatch`, which calls it while a step takes long). Public for tests.
+   */
+  async observe(): Promise<void> {
+    await Promise.all([this.poll(), this.engines.standbys.refreshReaders()]);
+  }
+
   private async poll(): Promise<void> {
-    if (this.engine === undefined || this.session === undefined) {
+    const { engine, session, pipeline } = this;
+    if (engine === undefined || session === undefined) {
       return;
     }
-    const polled = await this.engines.poll(this.engine, this.session, this.pipeline);
+    const polled = await this.engines.poll(engine, session, pipeline);
+    if (this.engine !== engine || this.session !== session || this.pipeline !== pipeline) {
+      // The stream moved or restarted meanwhile: what was polled is about what it left.
+      return;
+    }
     this.pipeline = polled.pipeline;
     // Before the step goes on: a recovery replaces the pipeline, and its video with it.
     await this.record.sawVideo(this.pipeline, this.now());
@@ -494,6 +477,8 @@ export class StreamSupervisor {
       this.deps.metrics.pathSwitches.inc({ stream: this.stream.id, from, to: target });
     }
     this.logger.info({ from, to: target, engine: moved.engine.name }, "stream moved to another engine");
+    // The peers and speed it showed were the old engine's.
+    await this.poll();
   }
 
   private async runAction(action: RecoveryAction, reason: string): Promise<void> {
@@ -625,6 +610,9 @@ export class StreamSupervisor {
   private async stopSessionQuietly(): Promise<void> {
     await this.record.playback.stop(this.session);
     this.session = undefined;
+    // The figures were the session's: until a new one is polled, they are unknown.
+    this.stats = undefined;
+    this.peers = undefined;
   }
 
   private async teardown(): Promise<void> {

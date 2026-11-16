@@ -157,16 +157,13 @@ export class StreamStandbys {
    * learns which of them are hot, and starts what is missing, in the background.
    */
   async maintain(context: StandbyContext): Promise<void> {
-    if (!context.enabled) {
-      this.dropAll("hot standby is off");
-    } else if (!context.active) {
-      this.dropAll("the stream has not played lately");
-    } else if (context.known) {
+    const wanted = this.dropUnwanted(context);
+    if (wanted && context.known) {
       this.usable = context.usable;
       this.dropUnneeded(context);
     }
     await this.syncReaders();
-    if (!context.enabled || !context.active || !context.known) {
+    if (!wanted || !context.known) {
       return;
     }
     this.forgetPathRetries(context);
@@ -178,6 +175,40 @@ export class StreamStandbys {
       this.advance(standby, context);
     }
     this.startMissing(context);
+  }
+
+  /**
+   * Drops every standby when hot standby is off or the stream has not played lately, which every
+   * check does, also one of a stream that has no session to play from. Returns whether standbys are
+   * wanted at all.
+   */
+  dropUnwanted(context: Pick<StandbyContext, "enabled" | "active">): boolean {
+    if (!context.enabled) {
+      this.dropAll("hot standby is off");
+    } else if (!context.active) {
+      this.dropAll("the stream has not played lately");
+    }
+    return context.enabled && context.active;
+  }
+
+  /**
+   * Learns when each standby last brought data, without changing what the transcoder reads. For
+   * the time a step takes long and no check runs: a standby nobody asks about would count as warming
+   * up after `hotWithinMs`, although the transcoder's reader still gets its data.
+   */
+  async refreshReaders(): Promise<void> {
+    if (this.standbys.size === 0) {
+      return;
+    }
+    const sessions = this.bySource(this.openSessions());
+    let readers: StandbyReaderStatus[] | undefined;
+    try {
+      readers = await this.deps.transcoder.standbyStatus(this.deps.streamId);
+    } catch (error) {
+      this.logger.debug({ err: describeError(error) }, "could not reach the transcoder for the standbys");
+      return;
+    }
+    this.learn(sessions, readers ?? []);
   }
 
   /**
@@ -543,15 +574,10 @@ export class StreamStandbys {
 
   /** Has the transcoder read every open standby session, and learns when each one last brought data. */
   private async syncReaders(): Promise<void> {
-    const sessions = new Map<string, StandbyEngine>();
-    const stats: StandbySource[] = [];
-    for (const standby of this.standbys.values()) {
-      if (standby.session !== undefined && !standby.busy) {
-        sessions.set(standby.session.playbackUrl, standby);
-        // With its stat URL, only data that comes while its live edge moves counts.
-        stats.push({ source: standby.session.playbackUrl, stat: standby.session.statUrl });
-      }
-    }
+    const open = this.openSessions();
+    const sessions = this.bySource(open);
+    // With its stat URL, only data that comes while its live edge moves counts.
+    const stats: StandbySource[] = open.map(({ session }) => ({ source: session.playbackUrl, stat: session.statUrl }));
     const sources = sessions.keys().toArray();
     this.readersSynced = false;
     if (sources.length === 0 && this.readerSources?.length === 0) {
@@ -567,12 +593,36 @@ export class StreamStandbys {
     this.readersSynced = status !== undefined;
     // Without a pipeline the transcoder reads nothing for the stream.
     this.readerSources = status === undefined ? [] : sources;
-    const readers = status ?? [];
+    this.learn(sessions, status ?? []);
+  }
+
+  /** The standbys whose session is open and which are not busy starting or restarting it. */
+  private openSessions(): { standby: StandbyEngine; session: EngineSession }[] {
+    return this.standbys
+      .values()
+      .flatMap((standby) =>
+        standby.busy || standby.session === undefined ? [] : [{ standby, session: standby.session }],
+      )
+      .toArray();
+  }
+
+  private bySource(open: readonly { standby: StandbyEngine; session: EngineSession }[]): Map<string, StandbyEngine> {
+    return new Map(open.map(({ standby, session }) => [session.playbackUrl, standby]));
+  }
+
+  /** Notes when each standby's reader last got data. */
+  private learn(sessions: ReadonlyMap<string, StandbyEngine>, readers: readonly StandbyReaderStatus[]): void {
     for (const reader of readers) {
       const standby = sessions.get(reader.source);
       const at = reader.lastDataAt === null ? undefined : Date.parse(reader.lastDataAt);
-      // Data from before its session opened, or before a failed failover, doesn't count.
-      if (standby !== undefined && at !== undefined && at >= (standby.openedAt ?? 0)) {
+      // Data from before its session opened, or before a failed failover, doesn't count. Nor does
+      // data older than what a check already learned while this answer was on its way.
+      if (
+        standby !== undefined &&
+        at !== undefined &&
+        at >= (standby.openedAt ?? 0) &&
+        at >= (standby.lastDataAt ?? 0)
+      ) {
         standby.lastDataAt = at;
         standby.played = true;
       }
