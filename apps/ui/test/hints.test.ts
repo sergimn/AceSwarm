@@ -13,7 +13,7 @@ describe("sharedEnginesHint", () => {
     expect(hint).toContain("more than 3 of its streams fail within 90 s");
     expect(hint).toContain("every stream on it fails");
     expect(hint).toContain("stops answering");
-    expect(hint).toContain("press Restart");
-    expect(hint).not.toContain("only");
+    expect(hint).toContain("press Restart on one of its streams");
+    expect(hint).not.toContain("restarts only");
   });
 });

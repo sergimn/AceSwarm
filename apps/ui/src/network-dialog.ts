@@ -130,13 +130,11 @@ export class NetworkDialog {
   }
 
   open(snapshot: Snapshot | undefined): void {
-    if (snapshot !== undefined) {
-      this.snapshot = snapshot;
-    }
+    // The dialog already has the latest snapshot (the page gives it every one, open or not), and a
+    // newer view of the policy than the page's own after the switch was turned.
+    this.snapshot ??= snapshot;
     this.errors.hidden = true;
-    // What the last open knew is old: the switch works it out again from this snapshot, and the
-    // profile list below says whether profiles changed since.
-    this.profileCount = undefined;
+    // What the last open knew about the paths is old; the profile list below is loaded again.
     this.wireguardPaths = undefined;
     // Open the layer first: it remembers the focused element, and showModal() moves focus.
     this.navigator.open({
