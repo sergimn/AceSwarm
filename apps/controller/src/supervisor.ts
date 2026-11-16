@@ -4,10 +4,11 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { duration, evaluateHealth } from "./health.ts";
-import { sleep, waitAtMost } from "./playback.ts";
+import { sleep } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { SourceWait } from "./source-wait.ts";
+import { StepLoop } from "./step-loop.ts";
 import { StreamEngines, type MovedStream } from "./stream-engines.ts";
 import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
@@ -55,11 +56,8 @@ export class StreamSupervisor {
   /** Its hot standbys on the other paths, and failing over to them. */
   private readonly failover: StreamFailover;
 
-  private timer: NodeJS.Timeout | undefined;
-  private running = false;
-  /** True while the first step waits for the stream's previous run to stop (see `start`). */
-  private waitingForPrevious = false;
-  private current: Promise<void> = Promise.resolve();
+  /** Runs its steps, and keeps what the stream shows up to date while one takes long. */
+  private readonly loop: StepLoop;
 
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
     this.deps = deps;
@@ -78,6 +76,13 @@ export class StreamSupervisor {
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
+    this.loop = new StepLoop({
+      delayMs: deps.settings.tickMs,
+      now: this.now,
+      logger: this.logger,
+      step: async () => this.tick(),
+      observe: async () => this.observe(),
+    });
     this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
       ...deps,
       logger: this.logger,
@@ -114,12 +119,12 @@ export class StreamSupervisor {
    * waits for the previous one has no engine yet, so it has nothing to assign.
    */
   get settled(): boolean {
-    return this.bootstrapped || !this.running || this.waitingForPrevious;
+    return this.bootstrapped || !this.loop.running || this.loop.waiting;
   }
 
   /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
   get triedEngine(): boolean {
-    return this.engines.tried || !this.running;
+    return this.engines.tried || !this.loop.running;
   }
 
   /**
@@ -128,24 +133,14 @@ export class StreamSupervisor {
    * its id, and this run would take them over and then lose them.
    */
   start(previous?: Promise<void>): void {
-    if (this.running) {
+    if (this.loop.running) {
       return;
     }
-    this.running = true;
-    if (previous === undefined) {
-      this.schedule(0);
-      return;
+    if (previous !== undefined) {
+      this.logger.info("waiting for the stream's previous run to stop before starting");
+      this.setState("starting", "waiting for the previous run to stop");
     }
-    this.waitingForPrevious = true;
-    this.logger.info("waiting for the stream's previous run to stop before starting");
-    this.setState("starting", "waiting for the previous run to stop");
-    // `stop` waits for it too, so a run stopped while it waits is torn down after the previous one.
-    this.current = previous
-      .catch(() => undefined)
-      .then(() => {
-        this.waitingForPrevious = false;
-        this.schedule(0);
-      });
+    this.loop.start(previous);
   }
 
   /**
@@ -155,9 +150,7 @@ export class StreamSupervisor {
    * leaves, the next run takes over.
    */
   async stop(teardown: boolean, waitMs = Infinity): Promise<void> {
-    this.running = false;
-    clearTimeout(this.timer);
-    await waitAtMost(this.current, teardown ? Infinity : waitMs);
+    await this.loop.stop(teardown ? Infinity : waitMs);
     // Before the pipeline goes: nobody follows the stream's video from here on.
     await this.record.saveLastVideo(teardown);
     if (teardown) {
@@ -195,6 +188,7 @@ export class StreamSupervisor {
     await this.engines.expireSpare();
     if (this.engine === undefined || this.session === undefined) {
       this.startNowIfAsked();
+      await this.failover.keepStandbys();
       if (await this.bootstrap()) {
         // A restart asked for while it started changes nothing: the stream just started, and a
         // restart on the next check would replace the engine it started.
@@ -218,6 +212,7 @@ export class StreamSupervisor {
       } else if (this.paths.noneUsable()) {
         // Restarting the session or the engine can't help while there is nowhere to send it.
         this.setState("stalled", this.paths.waitingMessage());
+        await this.poll();
         return;
       }
     }
@@ -299,21 +294,6 @@ export class StreamSupervisor {
     this.forceRestart = false;
     this.logger.info("manual restart; the stream has no session, starting it now");
     this.recovery = { failures: 0, lastActionAt: undefined };
-  }
-
-  private schedule(delayMs: number): void {
-    if (!this.running) {
-      return;
-    }
-    this.timer = setTimeout(() => {
-      this.current = this.tick()
-        .catch((error: unknown) => {
-          this.logger.error({ err: error }, "supervisor tick failed");
-        })
-        .finally(() => {
-          this.schedule(this.deps.settings.tickMs);
-        });
-    }, delayMs);
   }
 
   private readonly setState = (state: StreamState, message: string | null): void => {
@@ -406,11 +386,24 @@ export class StreamSupervisor {
     });
   }
 
+  /**
+   * Brings the stream's pipeline, stats and peers up to date, and its standbys' data (see
+   * `StepWatch`, which calls it while a step takes long). Public for tests.
+   */
+  async observe(): Promise<void> {
+    await Promise.all([this.poll(), this.engines.standbys.refreshReaders()]);
+  }
+
   private async poll(): Promise<void> {
-    if (this.engine === undefined || this.session === undefined) {
+    const { engine, session, pipeline } = this;
+    if (engine === undefined || session === undefined) {
       return;
     }
-    const polled = await this.engines.poll(this.engine, this.session, this.pipeline);
+    const polled = await this.engines.poll(engine, session, pipeline);
+    if (this.engine !== engine || this.session !== session || this.pipeline !== pipeline) {
+      // The stream moved or restarted meanwhile: what was polled is about what it left.
+      return;
+    }
     this.pipeline = polled.pipeline;
     // Before the step goes on: a recovery replaces the pipeline, and its video with it.
     await this.record.sawVideo(this.pipeline, this.now());
@@ -497,6 +490,10 @@ export class StreamSupervisor {
     this.engine = moved.engine;
     this.session = moved.session;
     this.pipeline = moved.pipeline;
+    // The peers and speed it showed were the old engine's; the next check polls the new one's. Not
+    // here: the old engine goes once the commit is done, and a poll would hold that up.
+    this.stats = undefined;
+    this.peers = undefined;
     await this.record.playback.save(moved.session);
     this.attemptStartedAt = this.now();
     await this.record.persistPath(target);
@@ -636,6 +633,9 @@ export class StreamSupervisor {
   private async stopSessionQuietly(): Promise<void> {
     await this.record.playback.stop(this.session);
     this.session = undefined;
+    // The figures were the session's: until a new one is polled, they are unknown.
+    this.stats = undefined;
+    this.peers = undefined;
   }
 
   private async teardown(): Promise<void> {
