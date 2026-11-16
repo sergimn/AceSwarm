@@ -80,7 +80,7 @@ When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over 
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this. On a [shared engine](#shared-engines), the engine restart steps only restart the stream's session.
 
-**Restart stream** in the UI acts on the next check, whatever the stream is doing. A stream that plays or stalls restarts its engine (or on a shared engine, its session) and the ladder's delays start over. A stream that has no session yet, because it is still starting or its last start failed, starts at once instead of waiting out the delay after that failure, and the delays start over from there. A restart asked for while the stream is starting, and then starts, is dropped: the engine it just started isn't replaced.
+**Restart stream** in the UI acts on the next check, whatever the stream is doing. A stream that has a session restarts its engine, and the ladder's delays start over. On a [shared engine](#shared-engines), its session restarts now and the path's engine is replaced in the background, for every stream on it. A stream that has no session yet, because it is still starting or its last start failed, starts at once instead of waiting out the delay after that failure, and the delays start over from there. That start takes over or starts the engine but doesn't restart it, and it doesn't replace a shared engine. A restart asked for while such a start is in progress is dropped once the start works, so it never restarts what it just started. If the start fails, the request buys one more try at once.
 
 ### Stale sources
 
@@ -144,7 +144,7 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
   - more than `SHARED_ENGINE_MAX_FAILURES` (2) different streams on it failed within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
   - a stream reached the ladder's engine restart step and every other stream on it failed within that window too (whether or not they had played from it), which also covers a stream alone on its engine,
   - a stream starting again on it finds it gone or not answering (`unresponsive`), or
-  - someone pressed **Restart** on one of its streams.
+  - someone pressed **Restart** on one of its streams that has a session.
 
   Apart from **Restart**, a path's engine is replaced at most once per failure window. When the new engine doesn't help either, the streams' own recovery goes on.
 

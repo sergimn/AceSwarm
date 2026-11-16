@@ -276,7 +276,6 @@ export class StreamSupervisor {
     this.forceRestart = false;
     this.logger.info("manual restart; the stream has no session, starting it now");
     this.recovery = { failures: 0, lastActionAt: undefined };
-    this.sourceWait.due();
   }
 
   private schedule(delayMs: number): void {

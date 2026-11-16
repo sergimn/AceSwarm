@@ -597,6 +597,23 @@ describe("a manual restart of a stream that has no session", () => {
     expect(fake.instance.view()).toMatchObject({ state: "starting", recoveries: 0 });
   });
 
+  test("a request while no path is up waits for one, and doesn't restart the engine that starts then", async () => {
+    const paths: PathStatus[] = [{ ...direct, up: false }];
+    const fake = supervisor(paths, { video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(0);
+    expect(fake.instance.view().state).toBe("stalled");
+
+    paths[0] = direct;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.creates()).toBe(1);
+    expect(fake.restarted).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
   test("a stream that has a session restarts as before", async () => {
     const fake = supervisor([direct], { video: { on: true } });
     await fake.instance.tick();
