@@ -27,7 +27,12 @@ function stream(overrides: Partial<StreamView>): StreamView {
   } as StreamView;
 }
 
-const standby = (pathId: string, state: StandbyView["state"]): StandbyView => ({ path: pathId, state, engine: null });
+const standby = (pathId: string, state: StandbyView["state"]): StandbyView => ({
+  path: pathId,
+  state,
+  engine: null,
+  reason: null,
+});
 
 describe("the top bar's paths up", () => {
   const paths = [path("direct", true), path("wg:a", false)];
