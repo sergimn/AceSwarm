@@ -88,14 +88,18 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     await expect
       .poll(async () => (await streamById(request, stream.id))?.state, { timeout: 120_000, intervals: [1000] })
       .toBe("stale-source");
+    // It still says when it last had video, and nothing counts as new video from here on. This is
+    // read as soon as the stream waits, before anything else: video wrongly counted while the
+    // playlist expires (up to 45 s below) would show as a later time.
+    const quiet = (await streamById(request, stream.id))?.lastFrameAt;
+    expect(quiet).not.toBeNull();
     // Nothing older than the threshold stays published: no playlist, no thumbnail.
     await expect.poll(async () => (await request.get(playlist)).status(), { timeout: 45_000 }).toBe(404);
     // Its tries show as waiting for the broadcast too (each one is a new engine).
     const waiting = await streamById(request, stream.id);
     expect(waiting?.state).toBe("stale-source");
     expect(waiting?.message).toContain("broadcast");
-    // It still says when it last had video.
-    expect(waiting?.lastFrameAt).not.toBeNull();
+    expect(waiting?.lastFrameAt).toBe(quiet);
 
     // While it waits, new sessions bring the old window: none of it is published, and it doesn't
     // restart on every stall (a new session every 10 s here, STALE_SOURCE_RETRY_SECONDS).
@@ -104,7 +108,7 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
       const current = await streamById(request, stream.id);
       expect(current?.state).toBe("stale-source");
       // The time of its last video stays where it was: the old window is no new video.
-      expect(current?.lastFrameAt).toBe(waiting?.lastFrameAt);
+      expect(current?.lastFrameAt).toBe(quiet);
       expect((await request.get(playlist)).status()).toBe(404);
       expect((await request.get(stream.hls.thumbnail)).status()).toBe(404);
     }
