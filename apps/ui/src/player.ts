@@ -234,6 +234,8 @@ export class Player {
   private close(): void {
     this.streamId = undefined;
     this.following = false;
+    // The next `update` finds the page stale or not afresh, and raises the overlay if it is.
+    this.stale = false;
     this.watch.show(null);
     this.detach();
     this.root.hidden = true;

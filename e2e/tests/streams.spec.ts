@@ -74,6 +74,13 @@ test("shows ages by the controller's clock when the browser's clock is wrong", a
   const age = tile.locator(".stat", { hasText: "Freshness" }).locator(".stat-value");
   await expect(age).toHaveText("Now");
   await expect(age).toHaveClass(/\bfresh\b/);
+
+  // The player's "Last frame" is measured on the same clock.
+  await tile.click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player.locator(".player-details")).toContainText("Last frame: Now");
+  await player.getByRole("button", { name: "Back" }).click();
+  await expect(player).toBeHidden();
 });
 
 test("says when it hears nothing from the controller, and recovers when it does again", async ({ page }) => {
@@ -98,6 +105,8 @@ test("says when it hears nothing from the controller, and recovers when it does 
   await tile.click();
   const player = page.getByRole("dialog", { name: "Player" });
   await expect(player.locator(".player-connection")).toHaveText(/^Reconnecting… last update \d+s ago$/);
+  // Its clock shows too, whether or not the browser let it enter full screen.
+  await expect(player.locator(".player-clock")).toHaveText(/^\d\d:\d\d$/);
   await page.waitForTimeout(5500);
   await expect(player).toHaveClass(/\bshow-overlay\b/);
   await player.getByRole("button", { name: "Back" }).click();

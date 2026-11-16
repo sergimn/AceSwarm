@@ -43,8 +43,10 @@ describe("PageClock", () => {
   it("is stale only after more than three missed snapshots", () => {
     const clock = new PageClock();
     clock.receive(generatedAt, 0);
-    expect(clock.read(STALE_AFTER_MS).stale).toBe(false);
-    expect(clock.read(STALE_AFTER_MS + 1).stale).toBe(true);
+    // Three of the controller's 2-second intervals, by the literal value.
+    expect(clock.read(6000).stale).toBe(false);
+    expect(clock.read(6001).stale).toBe(true);
+    expect(STALE_AFTER_MS).toBe(6000);
     // The next snapshot makes it current again.
     clock.receive(generatedAt, 20_000);
     expect(clock.read(20_000).stale).toBe(false);
