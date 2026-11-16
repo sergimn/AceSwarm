@@ -109,8 +109,8 @@ test("a gateway that stops answering leaves the paths it last reported and says 
   // Not "0 paths": they are there, only their health is unknown.
   expect(orchestrator.snapshot().paths.map((candidate) => candidate.id)).toEqual(["direct", "wg:mullvad-de"]);
 
-  // The controller itself still acts on what the gateway says now, not on its last answer: it
-  // sends no assignments while the gateway is away (they are sent after each answer).
+  // The snapshot keeps the last answer, but the controller does not act on it: it sends no
+  // assignments while the gateway is away (they are sent after each answer).
   const syncs = gateway.syncs;
   await new Promise((resolve) => setTimeout(resolve, 60));
   expect(gateway.syncs).toBe(syncs);

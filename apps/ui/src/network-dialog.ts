@@ -182,10 +182,14 @@ export class NetworkDialog {
     }
     this.renderWireguardOnly();
     this.gatewayNotice.hidden = snapshot.gatewayReachable;
-    this.gatewayNotice.textContent =
+    // Only when it changes: the notice is a live region, and every snapshot comes every 2 seconds.
+    const notice =
       snapshot.paths.length > 0
         ? "The network gateway isn't answering, so the health of the paths below isn't known."
         : "The network gateway isn't answering, so the network paths aren't known.";
+    if (this.gatewayNotice.textContent !== notice) {
+      this.gatewayNotice.textContent = notice;
+    }
     const loads = pathLoads(snapshot.streams);
     this.paths.replaceChildren(
       ...snapshot.paths.map((path) =>
