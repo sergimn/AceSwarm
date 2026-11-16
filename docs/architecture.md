@@ -82,6 +82,8 @@ When a stream stalls and has a [hot standby](#hot-standby) ready, it fails over 
 
 A path that is down, or whose WireGuard profile was removed, is left right away. Each stream's recovery is independent, so restarting one engine never touches the others. The E2E suite checks this. On a [shared engine](#shared-engines), the engine restart steps only restart the stream's session.
 
+**Restart stream** in the UI acts on the next check, whatever the stream is doing. A stream that has a session restarts its engine, and the ladder's delays start over. On a [shared engine](#shared-engines), its session restarts now and the path's engine is replaced in the background, for every stream on it. A stream that has no session yet, because it is still starting or its last start failed, starts at once instead of waiting out the delay after that failure, and the delays start over from there. That start takes over or starts the engine but doesn't restart it, and it doesn't ask for a shared engine's replacement the way Restart on a stream with a session does. Like any start, it still replaces a shared engine it finds gone or not answering. While no network path is up, or a shared engine waits for the gateway, there is nothing to start: the request only resets the delays, and the stream starts as soon as a path or the gateway is there. A restart asked for while such a start is in progress is dropped once the start works, so it never restarts what it just started. If the start fails, the request is kept and the next check acts on it again: it starts the stream again at once, or restarts it as above if the failed start got as far as a session.
+
 ### Stale sources
 
 A broadcast that stops doesn't look like a stall to the engine. The engine keeps its peers, keeps answering, and keeps serving the window it already has, and so do peers that have the same window. A new session gets that old window too: it plays for a few seconds, then stops. Restarting on every stall therefore loops forever and shows old video each time. Only the engine's **live edge** tells: `livepos.last` in the session's stats, the newest data of the broadcast the engine knows of.
@@ -144,7 +146,7 @@ With **One engine per path** on (`PATCH /api/settings`, `{ "sharedEngines": true
   - more than `SHARED_ENGINE_MAX_FAILURES` (2) different streams on it failed within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
   - a stream reached the ladder's engine restart step and every other stream on it failed within that window too (whether or not they had played from it), which also covers a stream alone on its engine,
   - a stream starting again on it finds it gone or not answering (`unresponsive`), or
-  - someone pressed **Restart** on one of its streams.
+  - someone pressed **Restart** on one of its streams that has a session.
 
   Apart from **Restart**, a path's engine is replaced at most once per failure window. When the new engine doesn't help either, the streams' own recovery goes on.
 
@@ -211,6 +213,7 @@ Every ffmpeg run writes its segments into a new "generation" directory. The tran
 - **Probes.**
   - Every path is pinged at an interval (`PROBE_TARGETS`, by default `1.1.1.1` and `9.9.9.9`), and its loss and latency become a 0–1 score.
   - A tunnel without a WireGuard handshake in the last three minutes counts as down.
+  - A tunnel's ping is bound to the tunnel's interface: it can only leave through that tunnel, and only an answer that comes back through it counts. Nothing about a tunnel is keyed by its `Address`, so profiles may share one (every ProtonVPN profile is `10.2.0.2/32`, and the profiles of one Mullvad device share an address too) and each still shows its own latency, loss and state.
 - **Peer stats.** The engine API doesn't list peers, so the gateway reads the kernel's connection tracking table.
   - Per engine, it counts peers that answered ("connected") and the connected peers that sent the engine stream data since the last sample ("sending"): at least one 16 KiB block (`PEERS_INTERVAL_SECONDS` apart) on top of 1/8 of what the engine sent that peer, the rule that "uploading" peers use the other way round (see Metrics). Handshakes, resets and the short answers of trackers and DHT nodes don't add up to a block, and the 1/8 share leaves out the acknowledgements of a peer the engine uploads to, which can: so none of them count. The engine's peers on the engines' own network, such as a hot standby that feeds it, never pass the gateway: they show in the engine's connected count and not in "sending".
   - It looks up the countries of the sending peers (of the connected ones without connection accounting) in the DB-IP Lite database, which it downloads monthly.

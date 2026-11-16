@@ -4,11 +4,11 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
 import { duration, evaluateHealth } from "./health.ts";
-import { sleep, waitAtMost } from "./playback.ts";
+import { sleep } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
 import { SourceWait } from "./source-wait.ts";
-import { StepWatch } from "./step-watch.ts";
+import { StepLoop } from "./step-loop.ts";
 import { StreamEngines, type MovedStream } from "./stream-engines.ts";
 import { StreamFailover, type PlayingStream } from "./stream-failover.ts";
 import { StreamPaths } from "./stream-paths.ts";
@@ -56,11 +56,8 @@ export class StreamSupervisor {
   /** Its hot standbys on the other paths, and failing over to them. */
   private readonly failover: StreamFailover;
 
-  /** Keeps what the stream shows up to date while a step takes long. */
-  private readonly watch: StepWatch;
-  private timer: NodeJS.Timeout | undefined;
-  private running = false;
-  private current: Promise<void> = Promise.resolve();
+  /** Runs its steps, and keeps what the stream shows up to date while one takes long. */
+  private readonly loop: StepLoop;
 
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
     this.deps = deps;
@@ -79,7 +76,13 @@ export class StreamSupervisor {
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
-    this.watch = new StepWatch(deps.settings.tickMs, this.now, this.logger, async () => this.observe());
+    this.loop = new StepLoop({
+      delayMs: deps.settings.tickMs,
+      now: this.now,
+      logger: this.logger,
+      step: async () => this.tick(),
+      observe: async () => this.observe(),
+    });
     this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
       ...deps,
       logger: this.logger,
@@ -113,21 +116,16 @@ export class StreamSupervisor {
 
   /** True once the first start attempt finished, so `assignments()` is complete. */
   get settled(): boolean {
-    return this.bootstrapped || !this.running;
+    return this.bootstrapped || !this.loop.running;
   }
 
   /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
   get triedEngine(): boolean {
-    return this.engines.tried || !this.running;
+    return this.engines.tried || !this.loop.running;
   }
 
   start(): void {
-    if (this.running) {
-      return;
-    }
-    this.running = true;
-    this.watch.start();
-    this.schedule(0);
+    this.loop.start();
   }
 
   /**
@@ -137,10 +135,7 @@ export class StreamSupervisor {
    * leaves, the next run takes over.
    */
   async stop(teardown: boolean, waitMs = Infinity): Promise<void> {
-    this.running = false;
-    clearTimeout(this.timer);
-    this.watch.stop();
-    await waitAtMost(this.current, teardown ? Infinity : waitMs);
+    await this.loop.stop(teardown ? Infinity : waitMs);
     // Before the pipeline goes: nobody follows the stream's video from here on.
     await this.record.saveLastVideo(teardown);
     if (teardown) {
@@ -152,6 +147,11 @@ export class StreamSupervisor {
     this.record.update(stream);
   }
 
+  /**
+   * The user asked for a restart. It happens on the next check: a running stream restarts, and one
+   * that has no session yet (it is starting, or its last start failed) starts now instead of after
+   * the ladder's wait.
+   */
   requestRestart(): void {
     this.forceRestart = true;
   }
@@ -172,8 +172,13 @@ export class StreamSupervisor {
   async tick(): Promise<void> {
     await this.engines.expireSpare();
     if (this.engine === undefined || this.session === undefined) {
+      this.startNowIfAsked();
       await this.failover.keepStandbys();
-      await this.bootstrap();
+      if (await this.bootstrap()) {
+        // A restart asked for while it started changes nothing: the stream just started, and a
+        // restart on the next check would replace the engine it started.
+        this.forceRestart = false;
+      }
       return;
     }
     if (this.forceRestart) {
@@ -262,20 +267,18 @@ export class StreamSupervisor {
     await this.runAction("restart-engine", "manual restart");
   }
 
-  private schedule(delayMs: number): void {
-    if (!this.running) {
+  /**
+   * A restart was asked for while there is no session to restart: the stream starts now, rather than
+   * when the ladder's wait after a failed start is over. The ladder starts over from there, like it
+   * does when a running stream restarts by hand.
+   */
+  private startNowIfAsked(): void {
+    if (!this.forceRestart) {
       return;
     }
-    this.timer = setTimeout(() => {
-      this.current = this.watch
-        .during(async () => this.tick())
-        .catch((error: unknown) => {
-          this.logger.error({ err: error }, "supervisor tick failed");
-        })
-        .finally(() => {
-          this.schedule(this.deps.settings.tickMs);
-        });
-    }, delayMs);
+    this.forceRestart = false;
+    this.logger.info("manual restart; the stream has no session, starting it now");
+    this.recovery = { failures: 0, lastActionAt: undefined };
   }
 
   private readonly setState = (state: StreamState, message: string | null): void => {
@@ -292,22 +295,22 @@ export class StreamSupervisor {
     return { engine, session, pipeline, path: this.stream.path };
   }
 
-  private async bootstrap(): Promise<void> {
+  /** Starts the stream's engine and session. Returns true once the stream started. */
+  private async bootstrap(): Promise<boolean> {
     if (this.recovery.lastActionAt !== undefined) {
       const { notBefore } = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), false);
       if (this.now() < notBefore) {
-        return;
+        return false;
       }
     }
     try {
       if (this.paths.noneUsable()) {
         // No engine until there is a path for it: the gateway would only block it.
         this.setState("stalled", this.paths.waitingMessage());
-        return;
+        return false;
       }
       if (this.sharing) {
-        await this.bootstrapShared();
-        return;
+        return await this.bootstrapShared();
       }
       this.setState(this.sourceWait.state("starting"), "starting engine");
       this.engine = await this.engines.startOwn(this.engine, async (starting) => {
@@ -319,32 +322,35 @@ export class StreamSupervisor {
       }
       this.setState(this.sourceWait.state("starting"), "opening stream");
       await this.startPlayback(this.engine);
+      return true;
     } catch (error) {
       this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
       this.setState(this.sourceWait.state("error"), describeError(error));
       this.logger.warn({ err: error }, "could not start stream");
+      return false;
     } finally {
       this.bootstrapped = true;
     }
   }
 
-  /** Starts the stream on its path's shared engine. */
-  private async bootstrapShared(): Promise<void> {
+  /** Starts the stream on its path's shared engine. Returns true once the stream started. */
+  private async bootstrapShared(): Promise<boolean> {
     if (!this.paths.known) {
       // The shared engine to use depends on the path.
       this.setState(this.sourceWait.state("starting"), "waiting for the network gateway");
-      return;
+      return false;
     }
     const path = this.paths.forStart(this.stream.path, this.recovery.failures);
     if (path === undefined) {
       this.setState(this.sourceWait.state("stalled"), this.paths.waitingMessage());
-      return;
+      return false;
     }
     this.setState(this.sourceWait.state("starting"), "starting engine");
     this.engine = await this.engines.startShared(path, this.engine);
     await this.record.persistPath(path);
     this.setState(this.sourceWait.state("starting"), "opening stream");
     await this.startPlayback(this.engine);
+    return true;
   }
 
   /** Moves the stream to the kind of engine the setting asks for (see `StreamEngines.moveToWanted`). */
