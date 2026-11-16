@@ -57,6 +57,8 @@ export class StreamSupervisor {
 
   private timer: NodeJS.Timeout | undefined;
   private running = false;
+  /** True while the first step waits for the stream's previous run to stop (see `start`). */
+  private waitingForPrevious = false;
   private current: Promise<void> = Promise.resolve();
 
   constructor(stream: StreamConfig, deps: SupervisorDeps) {
@@ -107,9 +109,12 @@ export class StreamSupervisor {
     return this.engines.assignments();
   }
 
-  /** True once the first start attempt finished, so `assignments()` is complete. */
+  /**
+   * True once the first start attempt finished, so `assignments()` is complete. A run that still
+   * waits for the previous one has no engine yet, so it has nothing to assign.
+   */
   get settled(): boolean {
-    return this.bootstrapped || !this.running;
+    return this.bootstrapped || !this.running || this.waitingForPrevious;
   }
 
   /** True once it tried to start an engine (or take over its last one), or doesn't need one. */
@@ -117,12 +122,30 @@ export class StreamSupervisor {
     return this.engines.tried || !this.running;
   }
 
-  start(): void {
+  /**
+   * Starts supervising. With `previous`, the stream's earlier run being torn down (see `stop`), it
+   * waits for that first: the teardown removes every engine, session and pipeline of the stream by
+   * its id, and this run would take them over and then lose them.
+   */
+  start(previous?: Promise<void>): void {
     if (this.running) {
       return;
     }
     this.running = true;
-    this.schedule(0);
+    if (previous === undefined) {
+      this.schedule(0);
+      return;
+    }
+    this.waitingForPrevious = true;
+    this.logger.info("waiting for the stream's previous run to stop before starting");
+    this.setState("starting", "waiting for the previous run to stop");
+    // `stop` waits for it too, so a run stopped while it waits is torn down after the previous one.
+    this.current = previous
+      .catch(() => undefined)
+      .then(() => {
+        this.waitingForPrevious = false;
+        this.schedule(0);
+      });
   }
 
   /**
