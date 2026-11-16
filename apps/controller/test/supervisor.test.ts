@@ -15,7 +15,7 @@ import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { FailureReport, SharedEngines } from "../src/shared-engines.ts";
-import { DEFAULT_STANDBY_SETTINGS, type StandbySettings } from "../src/standby.ts";
+import { DEFAULT_STANDBY_SETTINGS, StreamStandbys, type StandbySettings } from "../src/standby.ts";
 import type { StreamConfig, StreamStore } from "../src/stream-store.ts";
 import { MoveSlots } from "../src/stream-paths.ts";
 import { StreamSupervisor, type SupervisorSettings } from "../src/supervisor.ts";
@@ -2347,6 +2347,13 @@ describe("the figures of a stream during a long step", () => {
     await fake.instance.tick();
     await fake.instance.tick();
     expect(fake.instance.view()).toMatchObject({ state: "playing", peers: { connected: 5 } });
+  });
+
+  test("a failing check of the standbys does not hold up the start of a stream without a session", async () => {
+    vi.spyOn(StreamStandbys.prototype, "maintain").mockRejectedValue(new Error("the standbys broke"));
+    const fake = supervisor([direct], { video: { on: true } });
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "starting", message: "opening stream" });
   });
 
   test("keeps polling while it waits for a network path", async () => {
