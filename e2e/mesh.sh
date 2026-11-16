@@ -206,7 +206,7 @@ download_peer() {
 }
 
 # Downloads a peer's artifact that the run lists, trying again for up to MESH_DOWNLOAD_SECONDS if
-# that fails. GitHub lists a new artifact before it can be downloaded: within a second of the upload,
+# that fails. GitHub lists a new artifact before it can be downloaded: shortly after the upload,
 # `gh run download` has answered "no artifact matches any of the names or patterns provided" and
 # "HTTP 404" for one that the list showed. The peer's job is still running and the artifact does
 # exist, so waiting a few seconds fixes it, and a download that never works still fails the join.
@@ -433,7 +433,7 @@ case "${1:-}" in
   wait-all) wait_all "${@:2}" ;;
   wait-fetched) wait_fetched "${@:2}" ;;
   *)
-    sed -n '2,29p' "$0" >&2
+    sed -n '2,30p' "$0" >&2
     exit 2
     ;;
 esac
