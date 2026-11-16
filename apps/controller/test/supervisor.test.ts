@@ -1756,6 +1756,38 @@ describe("sharing one engine per path", () => {
     expect(fake.stopped).toEqual([`${sharedEngine.baseUrl}/cmd`]);
   });
 
+  test("a manual restart while the stream starts on the shared engine doesn't replace that engine", async () => {
+    const pool = sharedEngines();
+    const { promise: sessionGate, resolve: open } = Promise.withResolvers<undefined>();
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, sessionGate, video: { on: true } });
+    const starting = fake.instance.tick();
+    await setImmediate();
+    fake.instance.requestRestart();
+    open(undefined);
+    await starting;
+    await fake.instance.tick();
+    expect(pool.restarts).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("a manual restart while the gateway's paths are unknown waits for them, then starts without a restart", async () => {
+    const pool = sharedEngines();
+    const paths: PathStatus[] = [];
+    const fake = supervisor(paths, { shared: pool.shared, sharing: { on: true }, video: { on: true } });
+    await fake.instance.tick();
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view().message).toBe("waiting for the network gateway");
+    expect(pool.acquired).toEqual([]);
+
+    paths.push(direct);
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(pool.acquired).toEqual(["direct"]);
+    expect(pool.restarts).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
   test("a manual restart replaces the shared engine and restarts the stream's session", async () => {
     const pool = sharedEngines();
     const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
