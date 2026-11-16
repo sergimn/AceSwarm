@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus, StandbyView, StreamView } from "@aceswarm/shared/api-types";
-import { formatPathLoad, formatPathsUp, isPathOff, pathLoads, usablePaths } from "../src/paths.ts";
+import { formatPathLoad, formatPathsUp, formatSummary, isPathOff, pathLoads, usablePaths } from "../src/paths.ts";
 
 function path(id: string, up: boolean): PathStatus {
   return {
@@ -32,6 +32,24 @@ const standby = (pathId: string, state: StandbyView["state"]): StandbyView => ({
   state,
   engine: null,
   reason: null,
+});
+
+describe("the top bar", () => {
+  const paths = [path("direct", true)];
+  const playing = stream({ state: "playing" });
+  const stalled = stream({ state: "stalled" });
+  const summary = (streams: StreamView[]): string =>
+    formatSummary({ streams, paths, wireguardOnly: false, gatewayReachable: true });
+
+  it("counts streams and says so in the singular for one", () => {
+    expect(summary([])).toBe("0 streams · 0 live · 1/1 network paths up");
+    expect(summary([playing])).toBe("1 stream · 1 live · 1/1 network paths up");
+    expect(summary([playing, stalled])).toBe("2 streams · 1 live · 1/1 network paths up");
+    // A stream that was turned off does not count as live, and is counted as disabled.
+    expect(summary([playing, stream({ enabled: false, state: "stopped" })])).toBe(
+      "2 streams · 1 live · 1 disabled · 1/1 network paths up",
+    );
+  });
 });
 
 describe("the top bar's paths up", () => {

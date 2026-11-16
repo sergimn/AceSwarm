@@ -114,7 +114,7 @@ describe("what a reader says is wrong", () => {
   test("is its error, or that the live edge of the broadcast is stale", () => {
     expect(readerNote(reader())).toBeUndefined();
     expect(readerNote(reader({ error: "the engine answered 500" }))).toBe("the engine answered 500");
-    const stale = { state: "stale", edgeAt: null, advancedAt: null, behindSeconds: null } as const;
+    const stale = { state: "stale", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null } as const;
     expect(readerNote(reader({ liveEdge: stale }))).toBe("its broadcast sends no new data");
     expect(readerNote(reader({ error: "the engine answered 500", liveEdge: stale }))).toBe("the engine answered 500");
     expect(readerNote(reader({ liveEdge: { ...stale, state: "live" } }))).toBeUndefined();
