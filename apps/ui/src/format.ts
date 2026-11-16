@@ -78,8 +78,9 @@ export function topCountries(countries: readonly CountryCount[], limit = 3): Cou
 }
 
 /**
- * The engine reports speeds in KiB/s: on a steady download its downloaded bytes grew by 1024 per
- * unit. So 1024 units are 1 MiB/s, which the tile spells "MB/s", as it spells KiB/s "KB/s".
+ * The engine reports speeds in KiB/s: on a steady download its downloaded bytes grew by 1013 to
+ * 1030 (mean 1023) per unit, not 1000. So 1024 units are 1 MiB/s, which the tile spells "MB/s",
+ * as it spells KiB/s "KB/s".
  */
 export function formatSpeed(kilobytesPerSecond: number | null): string {
   if (kilobytesPerSecond === null) {

@@ -152,6 +152,12 @@ test("keeps streams and their detected kind across a controller restart", async 
   }
 });
 
+/** One series' value in the controller's metrics text; the registry adds a service label of its own. */
+function metricValue(text: string, name: string, labels: string): number | undefined {
+  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(text);
+  return match === null ? undefined : Number(match[1]);
+}
+
 test("disables a stream, says how long ago it had video, and plays it again once enabled", async ({
   page,
   request,
@@ -209,8 +215,8 @@ test("disables a stream, says how long ago it had video, and plays it again once
   // It is no outage in the metrics: the stream is listed and says why, but has no up value, so the
   // alert, the dashboard's outages and its availability leave the time it is off out.
   const off = await (await request.get("/metrics")).text();
-  expect(off).toContain(`aceswarm_stream_state{stream="${id}",state="stopped"} 1`);
-  expect(off).not.toContain(`aceswarm_stream_up{stream="${id}"}`);
+  expect(metricValue(off, "aceswarm_stream_state", `stream="${id}",state="stopped"`)).toBe(1);
+  expect(metricValue(off, "aceswarm_stream_up", `stream="${id}"`)).toBeUndefined();
 
   // The tile says so: "Disabled", no path, the age of its last video (not "Never"), no peers.
   await page.goBack();
@@ -247,8 +253,8 @@ test("disables a stream, says how long ago it had video, and plays it again once
   await expect(tile).toHaveAttribute("data-state", "playing");
   await expect(page.locator("#summary")).not.toContainText("disabled");
   await expect
-    .poll(async () => (await (await request.get("/metrics")).text()).includes(`aceswarm_stream_up{stream="${id}"} 1`))
-    .toBe(true);
+    .poll(async () => metricValue(await (await request.get("/metrics")).text(), "aceswarm_stream_up", `stream="${id}"`))
+    .toBe(1);
   expect(engineContainers(id)).toHaveLength(1);
 });
 

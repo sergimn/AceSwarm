@@ -133,9 +133,11 @@ export async function registerRoutes(
     if (params.success && orchestrator.restartStream(params.data.id)) {
       return reply.code(202).send({ status: "restarting" });
     }
-    // A stream that exists but has no run is a disabled one: say so, as the UI does.
-    const exists = params.success && orchestrator.getStream(params.data.id) !== undefined;
-    return reply.code(404).send({ error: exists ? "stream is disabled" : "stream not found" });
+    // Say what the UI says: a disabled stream has no run to restart, an unknown one doesn't exist.
+    const stream = params.success ? orchestrator.getStream(params.data.id) : undefined;
+    const error =
+      stream === undefined ? "stream not found" : stream.enabled ? "stream not running" : "stream is disabled";
+    return reply.code(404).send({ error });
   });
 
   app.get("/api/paths", () => orchestrator.snapshot().paths);
