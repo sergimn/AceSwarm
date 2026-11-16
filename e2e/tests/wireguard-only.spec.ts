@@ -111,6 +111,13 @@ test("moves a playing stream off the direct path as soon as it is turned on", as
   await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off");
   expect(await wireguardOnly(request)).toBe(true);
 
+  // Opened again, the dialog shows the policy at once, not what it showed when it was closed.
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Network", exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true", { timeout: 1000 });
+  await expect(section("Paths").locator(".row", { hasText: "Direct" })).toContainText("Off", { timeout: 1000 });
+
   // The gateway cuts the engine off the direct path at once, and the stream moves without first
   // waiting to stall. The move is not counted as a recovery.
   await expect

@@ -28,7 +28,7 @@ export function formatPathsUp(snapshot: Pick<Snapshot, "paths" | "wireguardOnly"
 
 /** What runs through one path right now. */
 export interface PathLoad {
-  /** Streams that play from an engine on the path. */
+  /** Streams that have an engine on the path, whatever state they are in. */
   streams: number;
   /** Standbys that pull a stream through the path, or are about to. */
   standbys: number;
@@ -36,9 +36,10 @@ export interface PathLoad {
 
 /**
  * What runs on each path, by path id. A stream counts on the path of its engine: one without an
- * engine (disabled, or waiting for a path) runs nowhere, whichever path it used last. A standby
- * counts while its engine or session exists; one that failed waits for its next try and pulls
- * nothing.
+ * engine (disabled, or waiting for a path) runs nowhere, whichever path it used last. (The path
+ * strategy balances on something else: the controller counts the streams whose last path it is,
+ * with or without an engine.) A standby counts from the moment it is wanted, starting up included;
+ * one that failed waits for its next try and pulls nothing.
  */
 export function pathLoads(streams: readonly StreamView[]): Map<string, PathLoad> {
   const loads = new Map<string, PathLoad>();

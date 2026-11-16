@@ -13,7 +13,7 @@ export function sharedEnginesHint(view: SharedEnginesView | undefined): string {
     "On: streams on the same network path share one engine, which needs much less memory.",
     "The engine is replaced when a stream someone is watching fails,",
     `when more than ${String(view.maxFailures)} of its streams fail within ${String(view.failureWindowSeconds)} s,`,
-    "when every stream on it fails, when it stops answering, or when you press Restart.",
+    "when every stream on it fails, when it stops answering, or when you press Restart on one of its streams.",
     "A stream's connected peers are its own, but the peers sending data and their countries are the engine's:",
     "every stream on it shows the same.",
   ].join(" ");

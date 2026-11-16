@@ -137,12 +137,13 @@ export class NetworkDialog {
     );
   }
 
-  open(snapshot: Snapshot | undefined): void {
-    if (snapshot !== undefined) {
-      this.snapshot = snapshot;
-    }
+  /**
+   * Opens the dialog, drawn from the latest snapshot: the page gives it every one (see `update`),
+   * open or not, and after the WireGuard only switch is turned its own is newer than the page's.
+   */
+  open(): void {
     this.errors.hidden = true;
-    // What the last open knew is old: the switch works it out again from this snapshot, and the
+    // What the last open knew is old: the switch works it out again from the snapshot, and the
     // profile list below says whether profiles changed since.
     this.profileCount = undefined;
     this.wireguardPaths = undefined;
