@@ -62,9 +62,15 @@ export function parseAceId(input: string): ParsedAceId | undefined {
   if (contentId !== undefined) {
     return { id: contentId.toLowerCase(), kind: "content-id" };
   }
+  // The slashes at the end go in a loop: `/\/+$/` takes time quadratic in a long run of slashes
+  // that isn't at the end, and a pasted list can hold a very long line.
+  let end = text.length;
+  while (end > 0 && text.charAt(end - 1) === "/") {
+    end--;
+  }
   const bare = text
+    .slice(0, end)
     .replace(/^acestream:\/\//i, "")
-    .replace(/\/+$/, "")
     .toLowerCase();
   return HEX_ID.test(bare) ? { id: bare, kind: null } : undefined;
 }

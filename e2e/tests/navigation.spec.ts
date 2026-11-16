@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { addStream, resetStack, waitForPlaying } from "./helpers.ts";
+import { addStreamList, resetStack, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -7,14 +7,21 @@ test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ request }) => {
   await resetStack(request);
   const [first, second, third] = await broadcasts(3);
-  const streams = [
-    await addStream(request, first!.infohash, "Channel 11"),
-    await addStream(request, second!.contentId, "Channel 12"),
-    await addStream(request, third!.infohash, "Channel 13"),
-  ];
-  // The engines start side by side.
+  // One pasted list, a line of each kind: its streams start right away, side by side.
+  const streams = await addStreamList(request, [
+    first!.infohash,
+    `acestream://${second!.contentId}`,
+    `magnet:?xt=urn:btih:${third!.infohash}`,
+  ]);
   for (const stream of streams) {
     await waitForPlaying(request, stream.id);
+  }
+  // A list gives its streams no names: the tests below find them by these.
+  for (const [index, stream] of streams.entries()) {
+    const renamed = await request.patch(`/api/streams/${stream.id}`, {
+      data: { name: `Channel ${String(index + 11)}` },
+    });
+    expect(renamed.ok(), await renamed.text()).toBe(true);
   }
 });
 

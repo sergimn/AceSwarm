@@ -3,15 +3,15 @@ import type { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
-import { parseAceId } from "@aceswarm/shared/ace-id";
-import type { Settings } from "@aceswarm/shared/api-types";
+import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseAceIdText } from "@aceswarm/shared/ace-id-list";
+import type { BulkAddResponse, BulkAddResult, Settings } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { NetworkPolicyError, type Orchestrator } from "./orchestrator.ts";
-import { DuplicateStreamError } from "./stream-store.ts";
+import { DuplicateStreamError, type NewStream } from "./stream-store.ts";
 import { describeDevice } from "./viewers.ts";
 import { InvalidProfileError } from "./wireguard-store.ts";
 
@@ -19,6 +19,16 @@ const newStreamSchema = z.object({
   aceId: z.string().min(1).max(300),
   name: z.string().max(80).optional(),
 });
+
+const bulkStreamsSchema = z
+  .object({
+    text: z.string().min(1).max(MAX_ACE_ID_LIST_LENGTH),
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
+/** How much of a line a bulk result repeats: enough to recognise it, whatever its length. */
+const RESULT_TEXT_LENGTH = 200;
 
 const patchStreamSchema = z
   .object({
@@ -86,7 +96,9 @@ export async function registerRoutes(
     if (!parsed.success) {
       return badRequest(reply, "expected { aceId, name? }");
     }
-    const ace = parseAceId(parsed.data.aceId);
+    // Read as a line of a list is, so the same untidy text works here: quotes or a comma around
+    // the identifier, or other text beside it.
+    const ace = parseAceIdText(parsed.data.aceId);
     if (ace === undefined) {
       return badRequest(
         reply,
@@ -102,6 +114,50 @@ export async function registerRoutes(
       }
       throw error;
     }
+  });
+
+  // A pasted list, one stream per line. Every line gets its own result, so a line that is no
+  // stream, or one that is in the list already, doesn't keep the others from being added.
+  app.post("/api/streams/bulk", async (request, reply) => {
+    const parsed = bulkStreamsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(
+        reply,
+        `expected { text, enabled? }, with a list of at most ${String(MAX_ACE_ID_LIST_LENGTH)} characters in text`,
+      );
+    }
+    const entries = parseAceIdList(parsed.data.text);
+    const enabled = parsed.data.enabled ?? true;
+    // Each identifier once, at the line that has it first.
+    const fresh: NewStream[] = [];
+    for (const entry of entries) {
+      if (entry.ace !== undefined && entry.repeats === undefined) {
+        fresh.push({ aceId: entry.ace.id, aceIdKind: entry.ace.kind, enabled });
+      }
+    }
+    const added = await orchestrator.addStreams(fresh);
+    const outcomes = new Map(added.map((outcome) => [outcome.stream.aceId, outcome] as const));
+    const results = entries.map((entry): BulkAddResult => {
+      const outcome = entry.ace === undefined ? undefined : outcomes.get(entry.ace.id);
+      const isNew = outcome?.added === true && entry.repeats === undefined;
+      return {
+        line: entry.line,
+        text: entry.text.slice(0, RESULT_TEXT_LENGTH),
+        status: outcome === undefined ? "invalid" : isNew ? "added" : "duplicate",
+        aceId: entry.ace?.id ?? null,
+        stream: outcome?.stream ?? null,
+        repeatsLine: entry.repeats ?? null,
+      };
+    });
+    const count = (status: BulkAddResult["status"]): number =>
+      results.filter((result) => result.status === status).length;
+    const response: BulkAddResponse = {
+      results,
+      added: count("added"),
+      duplicates: count("duplicate"),
+      invalid: count("invalid"),
+    };
+    return response;
   });
 
   app.patch("/api/streams/:id", async (request, reply) => {

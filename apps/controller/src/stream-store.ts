@@ -53,6 +53,14 @@ export interface NewStream {
   aceId: string;
   aceIdKind?: AceIdKind | null;
   name?: string | undefined;
+  /** Whether the stream starts as soon as it is added (the default), or waits to be enabled. */
+  enabled?: boolean | undefined;
+}
+
+/** What became of a stream given to `addMany`: the stream that has its identifier, new or not. */
+export interface AddOutcome {
+  stream: StreamConfig;
+  added: boolean;
 }
 
 export type StreamPatch = Partial<
@@ -87,25 +95,54 @@ export class StreamStore {
   }
 
   async add(input: NewStream): Promise<StreamConfig> {
+    const [outcome] = await this.addMany([input]);
+    if (outcome?.added !== true) {
+      throw new DuplicateStreamError(input.aceId);
+    }
+    return outcome.stream;
+  }
+
+  /**
+   * Adds the streams of a list that aren't in the store yet, with one write of the file: a long
+   * list takes as long as one stream, and after a crash it is there whole or not at all. Says for
+   * each one, in the order given, whether it was added and which stream has its identifier.
+   */
+  async addMany(inputs: readonly NewStream[]): Promise<AddOutcome[]> {
     return this.mutex.run(async () => {
-      if (this.streams.some((stream) => stream.aceId === input.aceId)) {
-        throw new DuplicateStreamError(input.aceId);
+      const byAceId = new Map(this.streams.map((stream) => [stream.aceId, stream]));
+      const ids = new Set(this.streams.map((stream) => stream.id));
+      const next = [...this.streams];
+      const outcomes = inputs.map((input): AddOutcome => {
+        const existing = byAceId.get(input.aceId);
+        if (existing !== undefined) {
+          return { stream: { ...existing }, added: false };
+        }
+        let id: string;
+        do {
+          id = randomBytes(5).toString("hex");
+        } while (ids.has(id));
+        const name = input.name?.trim();
+        const stream: StreamConfig = {
+          id,
+          aceId: input.aceId,
+          aceIdKind: input.aceIdKind ?? null,
+          name: name === undefined || name.length === 0 ? `Stream ${input.aceId.slice(0, 6)}` : name,
+          enabled: input.enabled ?? true,
+          createdAt: new Date().toISOString(),
+          path: null,
+          ownEngine: null,
+          session: null,
+          lastFrameAt: null,
+        };
+        ids.add(id);
+        byAceId.set(stream.aceId, stream);
+        next.push(stream);
+        return { stream: { ...stream }, added: true };
+      });
+      if (next.length > this.streams.length) {
+        await this.persist(next);
       }
-      const name = input.name?.trim();
-      const stream: StreamConfig = {
-        id: randomBytes(5).toString("hex"),
-        aceId: input.aceId,
-        aceIdKind: input.aceIdKind ?? null,
-        name: name === undefined || name.length === 0 ? `Stream ${input.aceId.slice(0, 6)}` : name,
-        enabled: true,
-        createdAt: new Date().toISOString(),
-        path: null,
-        ownEngine: null,
-        session: null,
-        lastFrameAt: null,
-      };
-      await this.persist([...this.streams, stream]);
-      return { ...stream };
+      return outcomes;
     });
   }
 

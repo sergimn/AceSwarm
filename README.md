@@ -7,6 +7,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   - how many peers are actually sending data (and how many the engine says are connected),
   - where the peers sending data are from, as flags.
 - **Paste anything.** Content IDs, infohashes, `acestream://` links and magnet links all work. You don't have to say which kind it is: Ace Swarm works it out.
+- **Add a whole list.** Turn on **Add several at once** and paste a list with one stream per line. It can be untidy, like a list copied from a page or an M3U playlist: Ace Swarm takes the ID from each line and ignores the rest. Lines without an ID don't stop the others: they stay in the box for you to correct.
 - **Built for remotes.** Arrow keys and Back move around the UI, so it works on Android TV and other TV browsers.
 - **Self-healing.** Each stream runs in its own engine container. A stalled stream is recovered step by step, without touching the other streams:
   1. restart the stream,

@@ -277,6 +277,25 @@ export class Orchestrator {
     return this.view(stream);
   }
 
+  /**
+   * Adds the streams of a list that aren't there yet, saved together, and starts the enabled ones.
+   * Says for each one, in the order given, whether it was added, with the stream that has its
+   * identifier: the new one, or the one that was there.
+   */
+  async addStreams(inputs: readonly NewStream[]): Promise<{ stream: StreamView; added: boolean }[]> {
+    const outcomes = await this.deps.store.addMany(inputs);
+    for (const { stream, added } of outcomes) {
+      if (!added) {
+        continue;
+      }
+      this.logger.info({ stream: stream.id, aceId: stream.aceId, enabled: stream.enabled }, "stream added");
+      if (stream.enabled) {
+        this.launch(stream);
+      }
+    }
+    return outcomes.map(({ stream, added }) => ({ stream: this.view(stream), added }));
+  }
+
   async updateStream(id: string, patch: Pick<StreamPatch, "name" | "enabled">): Promise<StreamView | undefined> {
     // A stream being disabled loses its supervisor, which knows when it last had video: that is
     // saved with the change, so the stream shows it from the first moment it is off.

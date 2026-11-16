@@ -1,4 +1,11 @@
-import type { NetworkPolicy, Settings, Snapshot, StreamView, WireguardProfileView } from "@aceswarm/shared/api-types";
+import type {
+  BulkAddResponse,
+  NetworkPolicy,
+  Settings,
+  Snapshot,
+  StreamView,
+  WireguardProfileView,
+} from "@aceswarm/shared/api-types";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -44,6 +51,9 @@ export const api = {
   snapshot: async (): Promise<Snapshot> => (await json("GET", "/api/snapshot")) as Snapshot,
   addStream: async (aceId: string, name: string): Promise<StreamView> =>
     (await json("POST", "/api/streams", name.length > 0 ? { aceId, name } : { aceId })) as StreamView,
+  /** Adds a pasted list, one stream per line; `enabled` says whether the new streams start right away. */
+  addStreams: async (text: string, enabled: boolean): Promise<BulkAddResponse> =>
+    (await json("POST", "/api/streams/bulk", { text, enabled })) as BulkAddResponse,
   updateStream: async (id: string, patch: { name?: string; enabled?: boolean }): Promise<StreamView> =>
     (await json("PATCH", `/api/streams/${encodeURIComponent(id)}`, patch)) as StreamView,
   removeStream: async (id: string): Promise<void> => {
