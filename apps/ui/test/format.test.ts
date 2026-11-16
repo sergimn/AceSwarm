@@ -120,27 +120,28 @@ describe("small formatters", () => {
   it("labels paths", () => {
     expect(pathLabel(null, [])).toBe("–");
     expect(pathLabel("direct", [])).toBe("Direct");
-    expect(pathLabel("wg:sweden", [])).toBe("VPN sweden");
+    // The gateway labels a tunnel with its profile's name, which is what a path it no longer reports gets.
+    expect(pathLabel("wg:sweden", [])).toBe("sweden");
   });
 });
 
 describe("formatStandbys", () => {
   it("names each standby's path and whether it is hot", () => {
-    const vpn = { id: "wg:a", label: "VPN A" } as PathStatus;
+    const vpn = { id: "wg:mullvad-de", label: "mullvad-de" } as PathStatus;
     expect(formatStandbys([], [vpn])).toBe("–");
     expect(
       formatStandbys(
         [
-          { path: "wg:a", state: "hot", engine: { name: "e1", shared: false }, reason: null },
+          { path: "wg:mullvad-de", state: "hot", engine: { name: "e1", shared: false }, reason: null },
           { path: "direct", state: "warming", engine: null, reason: null },
         ],
         [vpn],
       ),
-    ).toBe("VPN A (hot), Direct (warming up)");
+    ).toBe("mullvad-de (hot), Direct (warming up)");
   });
 
   it("says why a standby is not hot, and that a path was given up", () => {
-    const vpn = { id: "wg:a", label: "VPN A" } as PathStatus;
+    const vpn = { id: "wg:a", label: "mullvad-de" } as PathStatus;
     expect(
       formatStandbys(
         [
@@ -149,22 +150,22 @@ describe("formatStandbys", () => {
         ],
         [vpn],
       ),
-    ).toBe("Direct (warming up: ffmpeg decoded no video from it), VPN A (failed: gave up, no data for 90s)");
+    ).toBe("Direct (warming up: ffmpeg decoded no video from it), mullvad-de (failed: gave up, no data for 90s)");
   });
 
   it("can leave the reasons out, and lists them apart", () => {
     const paths = [
-      { id: "wg:a", label: "VPN A" },
-      { id: "wg:b", label: "VPN B" },
+      { id: "wg:a", label: "mullvad-de" },
+      { id: "wg:b", label: "mullvad-se" },
     ] as PathStatus[];
     const standbys: StandbyView[] = [
       { path: "direct", state: "warming", engine: null, reason: "ffmpeg decoded no video from it" },
       { path: "wg:a", state: "hot", engine: null, reason: null },
       { path: "wg:b", state: "failed", engine: null, reason: "gave up, no data for 90s" },
     ];
-    expect(formatStandbys(standbys, paths, false)).toBe("Direct (warming up), VPN A (hot), VPN B (failed)");
+    expect(formatStandbys(standbys, paths, false)).toBe("Direct (warming up), mullvad-de (hot), mullvad-se (failed)");
     expect(standbyReasons(standbys, paths)).toBe(
-      "Direct: ffmpeg decoded no video from it\nVPN B: gave up, no data for 90s",
+      "Direct: ffmpeg decoded no video from it\nmullvad-se: gave up, no data for 90s",
     );
     expect(standbyReasons([], paths)).toBe("");
   });

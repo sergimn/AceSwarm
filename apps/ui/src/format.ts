@@ -117,7 +117,8 @@ export function pathLabel(path: string | null, paths: readonly PathStatus[]): st
   if (known !== undefined) {
     return known.label;
   }
-  return path === "direct" ? "Direct" : path.replace(/^wg:/, "VPN ");
+  // The gateway labels a tunnel with its profile's name, so this is the label it would have sent.
+  return path === "direct" ? "Direct" : path.replace(/^wg:/, "");
 }
 
 const STANDBY_LABELS: Record<StandbyState, string> = {
@@ -128,8 +129,8 @@ const STANDBY_LABELS: Record<StandbyState, string> = {
 };
 
 /**
- * A stream's standbys on other paths, such as "VPN A (hot)", with why one is not hot when the
- * controller knows (and `withReasons`), such as "VPN A (warming up: ffmpeg decoded no video from
+ * A stream's standbys on other paths, such as "mullvad-de (hot)", with why one is not hot when the
+ * controller knows (and `withReasons`), such as "mullvad-de (warming up: ffmpeg decoded no video from
  * it)"; "–" without any.
  */
 export function formatStandbys(
@@ -144,7 +145,7 @@ export function formatStandbys(
   return labels.length === 0 ? "–" : labels.join(", ");
 }
 
-/** The reasons of the standbys that have one, a line each, such as "VPN A: ffmpeg decoded no video from it". */
+/** The reasons of the standbys that have one, a line each, such as "mullvad-de: ffmpeg decoded no video from it". */
 export function standbyReasons(standbys: readonly StandbyView[], paths: readonly PathStatus[]): string {
   return standbys
     .filter(({ reason }) => reason !== null)

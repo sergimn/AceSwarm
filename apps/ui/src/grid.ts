@@ -103,8 +103,8 @@ class Tile {
     this.peers.textContent = formatPeers(stream.peers, state, shared);
     this.peers.title = state === "stopped" ? "" : peersHint(shared);
     this.speed.textContent = formatSpeed(stream.downloadKBps);
-    // The tile has room for one reason: with several standbys, the reasons are in the tooltip (and
-    // in full in the player's overlay).
+    // The tile has room for one reason: with several standbys, the reasons are in the tooltip (the
+    // player's overlay shows them beside each state).
     const several = stream.standbys.length > 1;
     this.standbys.textContent = formatStandbys(stream.standbys, snapshot.paths, !several);
     this.standbys.title = several ? standbyReasons(stream.standbys, snapshot.paths) : "";
