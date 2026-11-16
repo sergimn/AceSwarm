@@ -626,11 +626,6 @@ p.form-error {
   background: var(--surface);
 }
 
-.notice {
-  margin: 0;
-  color: var(--amber);
-}
-
 .dialog-header h2 {
   margin: 0;
   font-size: 1.2em;
@@ -645,6 +640,12 @@ p.form-error {
 .section h3 {
   margin: 0 0 8px;
   font-size: 1em;
+}
+
+/* Empty, and so without height, while there is nothing to say. */
+.notice {
+  margin: 0;
+  color: var(--amber);
 }
 
 .setting {

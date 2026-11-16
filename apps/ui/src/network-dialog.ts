@@ -56,10 +56,9 @@ export class NetworkDialog {
     this.dialog = shell.dialog;
     this.paths = h("ul", { className: "rows" });
     this.strategy = h("p", { className: "muted" });
-    this.gatewayNotice = h("p", {
-      className: "notice",
-      attrs: { role: "status", hidden: true },
-    });
+    // A live region that is always there, and empty while the gateway answers, so that screen
+    // readers announce its text when it appears.
+    this.gatewayNotice = h("p", { className: "notice", attrs: { role: "status" } });
     // A switch, not a disabled control: a disabled button can't take focus, and remote users
     // would never reach it to read why it is unavailable. It sits on the right, under the dialog's
     // close button and above the profiles' buttons, so Up and Down reach it.
@@ -181,12 +180,14 @@ export class NetworkDialog {
       this.wireguardPaths = wireguardPaths;
     }
     this.renderWireguardOnly();
-    this.gatewayNotice.hidden = snapshot.gatewayReachable;
-    // Only when it changes: the notice is a live region, and every snapshot comes every 2 seconds.
-    const notice =
-      snapshot.paths.length > 0
-        ? "The network gateway isn't answering, so the health of the paths below isn't known."
-        : "The network gateway isn't answering, so the network paths aren't known.";
+    // Set only when it changes: every snapshot (every 2 seconds) comes through here.
+    let notice = "";
+    if (!snapshot.gatewayReachable) {
+      notice =
+        snapshot.paths.length > 0
+          ? "The network gateway isn't answering, so the health of the paths below isn't known."
+          : "The network gateway isn't answering, so the network paths aren't known.";
+    }
     if (this.gatewayNotice.textContent !== notice) {
       this.gatewayNotice.textContent = notice;
     }

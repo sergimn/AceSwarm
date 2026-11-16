@@ -140,7 +140,7 @@ export interface Snapshot {
   paths: PathStatus[];
   /**
    * Whether the gateway answered the controller's last poll (every 5 seconds). When it didn't, the
-   * health in `paths` is unknown, not zero: streams on their paths keep playing.
+   * health in `paths` is unknown, not zero: the controller doesn't move or restart a stream because of it.
    */
   gatewayReachable: boolean;
   pathStrategy: PathStrategyName;
