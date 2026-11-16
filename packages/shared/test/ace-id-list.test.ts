@@ -116,6 +116,28 @@ describe("parseAceIdList", () => {
   it("takes nothing but the btih value from a magnet link", () => {
     expect(read(`magnet:?xt=urn:sha1:${A}&dn=x`)).toEqual([{ line: 1, id: undefined, kind: undefined }]);
     expect(read(`"magnet:?dn=${B}&xt=urn:btih:${A}"`)).toEqual([{ line: 1, id: A, kind: "infohash" }]);
+    // Also when the link doesn't start its piece of the line.
+    expect(read(`[Sports](magnet:?xt=urn:btih:${A}&dn=${B})`)).toEqual([{ line: 1, id: A, kind: "infohash" }]);
+    expect(read("Sports:magnet:?xt=urn:btih:aaaqeayeaudaocajbifqydiob4ibceqt")).toEqual([
+      { line: 1, id: "000102030405060708090a0b0c0d0e0f10111213", kind: "infohash" },
+    ]);
+    expect(read(`${B},magnet:?xt=urn:btih:${A}`)).toEqual([
+      { line: 1, id: B, kind: null },
+      { line: 1, id: A, kind: "infohash" },
+    ]);
+    expect(read(`Sports:magnet:?xt=urn:sha1:${A}`)).toEqual([{ line: 1, id: undefined, kind: undefined }]);
+  });
+
+  it("finds an identifier in a link that is escaped inside another link", () => {
+    expect(read(`plugin://program.plexus/?url=acestream%3A%2F%2F${A}&mode=1`)).toEqual([
+      { line: 1, id: A, kind: null },
+    ]);
+    expect(
+      read(`http://proxy.example/play?url=http%3A%2F%2F127.0.0.1%3A6878%2Face%2Fgetstream%3Finfohash%3D${A}`),
+    ).toEqual([{ line: 1, id: A, kind: "infohash" }]);
+    expect(read(`http://proxy.example/play?url=magnet%3A%3Fxt%3Durn%3Abtih%3A${A}`)).toEqual([
+      { line: 1, id: A, kind: null },
+    ]);
   });
 
   it("says which line an identifier repeats", () => {
@@ -125,6 +147,24 @@ describe("parseAceIdList", () => {
       { line: 3, id: A, kind: null, repeats: 1 },
       { line: 4, id: B, kind: null, repeats: 2 },
       { line: 4, id: B, kind: null, repeats: 2 },
+    ]);
+    // Twice on one line: the second repeats the line it is on.
+    expect(read(`${A} ${A}`)).toEqual([
+      { line: 1, id: A, kind: null },
+      { line: 1, id: A, kind: null, repeats: 1 },
+    ]);
+  });
+
+  it("takes the kind a repeat says for the first one, which is the one that is added", () => {
+    expect(read(`acestream://${A}\nhttp://127.0.0.1:6878/ace/getstream?infohash=${A}\nid=${A}`)).toEqual([
+      { line: 1, id: A, kind: "infohash" },
+      { line: 2, id: A, kind: "infohash", repeats: 1 },
+      { line: 3, id: A, kind: "content-id", repeats: 1 },
+    ]);
+    // What the first one says itself stays.
+    expect(read(`id=${A}\ninfohash=${A}`)).toEqual([
+      { line: 1, id: A, kind: "content-id" },
+      { line: 2, id: A, kind: "infohash", repeats: 1 },
     ]);
   });
 
@@ -138,17 +178,28 @@ describe("parseAceIdList", () => {
       // A directive is never a stream, whatever it holds: here a logo named after a hash.
       `#EXTINF:-1 tvg-logo="http://logos.example/${C}.png",News`,
       `http://127.0.0.1:6878/ace/getstream?id=${B}`,
+      // Neither is a comment, or a stream that was commented out.
+      "# old channels",
+      "#EXTINF:-1,Old channel",
+      `#acestream://${C}`,
+      `  # ${C}`,
     ].join("\n");
     expect(read(playlist)).toEqual([
       { line: 4, id: A, kind: null },
       { line: 7, id: B, kind: "content-id" },
     ]);
+    // A piece of a playlist is one too, wherever its first directive is, and however it is written.
+    expect(read(`#${C}\n${A}\n\u{FEFF} #extinf:-1,News\n${B}`)).toEqual([
+      { line: 2, id: A, kind: null },
+      { line: 4, id: B, kind: null },
+    ]);
   });
 
-  it("skips comment lines, and reads a stream on a line that starts with #", () => {
-    expect(read(`# my list\n#${A}\n# Sports ${B}`)).toEqual([
+  it("reads a stream on a line that starts with # in a list that is no playlist, and skips its comments", () => {
+    expect(read(`# my list\n#${A}\n#2 ${B}\n# Sports ${C}`)).toEqual([
       { line: 2, id: A, kind: null },
       { line: 3, id: B, kind: null },
+      { line: 4, id: C, kind: null },
     ]);
   });
 

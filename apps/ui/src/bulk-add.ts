@@ -4,6 +4,9 @@ import type { BulkAddResponse, BulkAddResult } from "@aceswarm/shared/api-types"
 /** How many line numbers or stream names a sentence lists before it says "and N more". */
 const LISTED = 5;
 
+/** A list with more streams than this gets a word of caution before they all start together. */
+export const MANY_STREAMS = 10;
+
 function plural(count: number, one: string, many: string): string {
   return `${String(count)} ${count === 1 ? one : many}`;
 }
@@ -17,6 +20,15 @@ function listOf(items: readonly string[]): string {
   }
   const last = shown.pop();
   return shown.length === 0 ? (last ?? "") : `${shown.join(", ")} and ${last ?? ""}`;
+}
+
+/**
+ * How many lines have a stream that a line above them has too, from each entry's line and the line
+ * it repeats. A stream that is twice on one line repeats nothing above.
+ */
+function repeatingLines(entries: readonly (readonly [line: number, repeats: number | null | undefined])[]): number {
+  const lines = entries.filter(([line, repeats]) => typeof repeats === "number" && repeats < line);
+  return new Set(lines.map(([line]) => line)).size;
 }
 
 /** How many streams a list would add: each identifier once. */
@@ -36,11 +48,24 @@ export function listSummary(entries: readonly AceIdListEntry[]): string {
   if (invalid.length > 0) {
     parts.push(`No Acestream ID or infohash on ${invalid.length === 1 ? "line" : "lines"} ${listOf(invalid)}.`);
   }
-  const repeated = entries.filter((entry) => entry.repeats !== undefined).length;
+  const repeated = repeatingLines(entries.map((entry) => [entry.line, entry.repeats] as const));
   if (repeated > 0) {
     parts.push(`${plural(repeated, "line repeats", "lines repeat")} a stream above.`);
   }
   return parts.join(" ");
+}
+
+/**
+ * What the switch that starts a list's streams says under it. Every started stream downloads its
+ * broadcast, so a long list gets a word of caution while the switch is on.
+ */
+export function startHint(startNow: boolean, count: number): string {
+  if (!startNow) {
+    return "Off: the streams are added disabled. Enable the ones you want under Streams.";
+  }
+  return count > MANY_STREAMS
+    ? `On: all ${String(count)} streams start together, and each downloads its broadcast from then on. That is a lot at once: turn this off to add them disabled, and enable the ones you want under Streams.`
+    : "On: every stream starts as soon as it is added, and downloads its broadcast from then on.";
 }
 
 function added(response: BulkAddResponse, enabled: boolean): string {
@@ -52,12 +77,21 @@ function alreadyThere(results: readonly BulkAddResult[]): BulkAddResult[] {
   return results.filter((result) => result.status === "duplicate" && result.repeatsLine === null);
 }
 
-/** What the toast says once a list was added and nothing of it is left to correct. */
-export function addedToast(response: BulkAddResponse, enabled: boolean): string {
+/**
+ * What the toast says about a list that was sent, when the dialog doesn't say it: once the list was
+ * added and nothing of it is left to correct, or when the answer comes after the dialog was closed.
+ * Then it may also have to say that nothing was added, and how many lines had no stream.
+ */
+export function listToast(response: BulkAddResponse, enabled: boolean): string {
+  const parts = [response.added > 0 ? added(response, enabled) : "No stream was added."];
   const existing = alreadyThere(response.results).length;
-  return existing === 0
-    ? added(response, enabled)
-    : `${added(response, enabled)} ${plural(existing, "was", "were")} already in the list.`;
+  if (existing > 0) {
+    parts.push(`${plural(existing, "was", "were")} already in the list.`);
+  }
+  if (response.invalid > 0) {
+    parts.push(`${plural(response.invalid, "line", "lines")} had no Acestream ID or infohash.`);
+  }
+  return parts.join(" ");
 }
 
 /**
@@ -71,7 +105,7 @@ export function resultLines(response: BulkAddResponse, enabled: boolean): string
     const names = existing.map((result) => result.stream?.name ?? result.aceId ?? result.text);
     lines.push(`${plural(existing.length, "was", "were")} already in the list: ${listOf(names)}.`);
   }
-  const repeated = response.results.filter((result) => result.repeatsLine !== null).length;
+  const repeated = repeatingLines(response.results.map((result) => [result.line, result.repeatsLine] as const));
   if (repeated > 0) {
     lines.push(`${plural(repeated, "line repeats", "lines repeat")} a stream above.`);
   }
