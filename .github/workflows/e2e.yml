@@ -7,6 +7,9 @@
 #   stack-podman  the same on rootless Podman, set up like a host that runs `docker compose up` on
 #                 Podman (e2e/podman.sh)
 #
+# All four run on ubuntu-26.04. Its AppArmor profiles for wg and pasta matter to the mesh and the
+# Podman leg (see "The Podman stack runner" in e2e/README.md).
+#
 # The runners can't accept connections from the internet, so they first join a WireGuard mesh by
 # hole punching, using STUN and this run's artifacts to find each other (e2e/mesh.sh). The
 # WireGuard server and the broadcasts then start in parallel. e2e/README.md has diagrams.
@@ -44,7 +47,7 @@ jobs:
       # The runners publish their mesh addresses as artifacts and read the others' through the
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 60
     steps:
@@ -111,7 +114,7 @@ jobs:
       # The runners publish their mesh addresses as artifacts and read the others' through the
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 60
     steps:
@@ -184,7 +187,7 @@ jobs:
         include:
           - runtime: docker
             role: stack
-            os: ubuntu-24.04
+            os: ubuntu-26.04
             broadcasts: bc1,bc2,bc3
           # Rootless Podman 5 from the distribution, as on a current Ubuntu host.
           - runtime: podman

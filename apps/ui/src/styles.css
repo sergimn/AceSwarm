@@ -510,6 +510,11 @@ a {
   margin: 0;
 }
 
+/* A hint that warns about what the setting is about to do. */
+.setting-text p.caution {
+  color: var(--amber);
+}
+
 /* An on/off switch (role="switch"). It stays focusable when unavailable, so remotes can reach it. */
 .switch {
   display: inline-flex;
@@ -601,6 +606,12 @@ a {
 
 textarea.input {
   resize: vertical;
+}
+
+/* While its form's request is out. */
+.input[readonly] {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 .form-actions {

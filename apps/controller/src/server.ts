@@ -3,7 +3,7 @@ import type { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import fastifyStatic from "@fastify/static";
-import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseAceIdText } from "@aceswarm/shared/ace-id-list";
+import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseOneAceId } from "@aceswarm/shared/ace-id-list";
 import type { BulkAddResponse, BulkAddResult, Settings } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Service } from "@aceswarm/shared/service";
@@ -96,13 +96,14 @@ export async function registerRoutes(
     if (!parsed.success) {
       return badRequest(reply, "expected { aceId, name? }");
     }
-    // Read as a line of a list is, so the same untidy text works here: quotes or a comma around
-    // the identifier, or other text beside it.
-    const ace = parseAceIdText(parsed.data.aceId);
-    if (ace === undefined) {
+    // The dialog reads the text with the same function before it sends it.
+    const ace = parseOneAceId(parsed.data.aceId);
+    if (typeof ace === "string") {
       return badRequest(
         reply,
-        "that does not look like an Acestream ID or infohash (40 hex characters, an acestream:// or a magnet link)",
+        ace === "several"
+          ? "that names more than one stream: send them as a list to POST /api/streams/bulk"
+          : "that does not look like an Acestream ID or infohash (40 hex characters, an acestream:// or a magnet link)",
       );
     }
     try {

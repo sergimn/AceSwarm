@@ -190,6 +190,17 @@ test("rejects text that is not a stream ID", async ({ page }) => {
   await dialog.getByLabel("Acestream ID or infohash").fill("not an id");
   await dialog.getByRole("button", { name: "Add stream" }).click();
   await expect(dialog.getByRole("alert")).toContainText("does not look like");
+  // Two streams are a list: the dialog says where a list goes, and sends nothing.
+  const sent: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST") {
+      sent.push(request.url());
+    }
+  });
+  await dialog.getByLabel("Acestream ID or infohash").fill(`${"1".repeat(40)}, ${"2".repeat(40)}`);
+  await dialog.getByRole("button", { name: "Add stream" }).click();
+  await expect(dialog.getByRole("alert")).toContainText('Turn on "Add several at once"');
+  expect(sent).toEqual([]);
 });
 
 test("adds a pasted list with the remote: wrong lines stay to correct, known streams are skipped", async ({
@@ -199,6 +210,9 @@ test("adds a pasted list with the remote: wrong lines stay to correct, known str
   // Two streams nobody broadcasts. They are added disabled, so no engine starts for them.
   const fresh = ["1".repeat(40), "2".repeat(40)];
   await page.goto("/");
+  // Once the page has its streams it has also moved the focus to the first tile, as it does when
+  // it opens: from here on the focus is the test's.
+  await expect(page.locator(".tile")).toHaveCount(3);
   const add = page.getByRole("button", { name: "Add", exact: true });
   await add.focus();
   await page.keyboard.press("Enter");
@@ -240,8 +254,38 @@ test("adds a pasted list with the remote: wrong lines stay to correct, known str
   await page.keyboard.press("Enter");
   await expect(start).toHaveAttribute("aria-checked", "false");
   await page.keyboard.press("ArrowDown");
-  await expect(dialog.getByRole("button", { name: "Add 3 streams" })).toBeFocused();
+  const sendButton = dialog.getByRole("button", { name: "Add 3 streams" });
+  await expect(sendButton).toBeFocused();
+
+  // The request is held back, to look at the dialog while it is out. Nothing can be changed then:
+  // the answer rewrites the box. But the focus stays, and a remote still moves through the
+  // dialog, also out of the box, which keeps no key now that it can't be edited.
+  const held = Promise.withResolvers<undefined>();
+  await page.route("**/api/streams/bulk", async (route) => {
+    await held.promise;
+    await route.continue();
+  });
   await page.keyboard.press("Enter");
+  await expect(sendButton).toHaveAttribute("aria-busy", "true");
+  await expect(sendButton).toBeFocused();
+  await expect(list).toHaveJSProperty("readOnly", true);
+  // Both switches wait: OK on them changes nothing.
+  await page.keyboard.press("ArrowUp");
+  await expect(start).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(start).toHaveAttribute("aria-checked", "false");
+  // The caret is at the end of the box, where Up would move it if the box could be edited.
+  await page.keyboard.press("ArrowUp");
+  await expect(list).toBeFocused();
+  const sentList = await list.inputValue();
+  await page.keyboard.type("x");
+  await expect(list).toHaveValue(sentList);
+  await page.keyboard.press("ArrowUp");
+  await expect(several).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(several).toHaveAttribute("aria-checked", "true");
+  // From here on the route lets every request through at once.
+  held.resolve(undefined);
 
   // One line is no stream, so the dialog stays, says what became of each kind of line, and keeps
   // only that line in the box. What it says has the focus: a remote scrolls by moving it.
@@ -271,12 +315,15 @@ test("adds a pasted list with the remote: wrong lines stay to correct, known str
   }
   expect(streams.find((stream) => stream.aceId === bc[0]!.contentId)).toMatchObject({ name: "Test pattern" });
 
-  // Sent again, the line that is left adds nothing: the dialog says so and stays.
+  // Sent again, the line that is left adds nothing: the dialog says so and stays. On the way to
+  // Add is the button that closes the dialog, which says Done now that streams were added.
   await page.keyboard.press("ArrowDown");
+  await expect(dialog.getByRole("button", { name: "Done" })).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(dialog.getByRole("button", { name: "Add streams" })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(dialog.getByRole("alert")).toHaveText("No line of the list has an Acestream ID or infohash.");
+  await expect(dialog.getByRole("button", { name: "Done" })).toBeVisible();
 
   // Back closes the dialog, and the new tiles are in the grid.
   await page.keyboard.press("Escape");
@@ -291,6 +338,7 @@ test("adds a pasted list with the remote: wrong lines stay to correct, known str
   // a list. The page pastes it, as the clipboard of a browser under test can't be relied on.
   await add.click();
   await expect(several).toHaveAttribute("aria-checked", "false");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeVisible();
   const pasted = `${fresh[0]!}\n${fresh[1]!}\n`;
   await page.evaluate(`(() => {
     const data = new DataTransfer();

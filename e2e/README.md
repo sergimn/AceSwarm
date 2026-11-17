@@ -6,6 +6,8 @@ The end-to-end tests drive the real AceSwarm services (controller, transcoder, n
 | -------------------------- | -------------------------------------------- | ----------------------- | ---------------------------------------------- |
 | Workflow "E2E" (`e2e.yml`) | real Acestream engines (`engine/Dockerfile`) | 4 GitHub-hosted runners | every PR and push to `main`, or "Run workflow" |
 
+All four runners use the `ubuntu-26.04` image, with its AppArmor profiles for `wg` and `pasta` (see [The Podman stack runner](#the-podman-stack-runner)).
+
 - **Docker and rootless Podman.** Two stack runners run the whole suite side by side: `stack` on Docker and `stack-podman` on rootless Podman. They share the broadcast runner and the WireGuard server. See [The Podman stack runner](#the-podman-stack-runner).
 
 - **No single-machine run.** The broadcasts and the WireGuard server need their own hosts, joined to AceSwarm's by the mesh, so the suite runs on the CI runners only. To try a branch, push it and start the workflow with "Run workflow".

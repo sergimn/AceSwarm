@@ -230,10 +230,41 @@ test("a single stream is read from untidy text too, and keeps the name it was gi
   // In the list already, however it is written.
   const duplicate = await post("/api/streams", { aceId: `Sports ${ID_A.toUpperCase()}` });
   expect(duplicate.statusCode).toBe(409);
-  // No stream, or more than one: the text for one stream must name one.
-  for (const aceId of ["not a stream", ID_A.slice(1), `${ID_B} ${"d".repeat(40)}`]) {
+  // No stream: the text for one stream must name one.
+  for (const aceId of ["not a stream", ID_A.slice(1)]) {
     const response = await post("/api/streams", { aceId });
     expect(response.statusCode, aceId).toBe(400);
     expect(response.json<{ error: string }>().error).toContain("does not look like");
   }
+  // More than one: the answer says where a list goes.
+  for (const aceId of [`${ID_B} ${"d".repeat(40)}`, `${ID_B}\nacestream://${"d".repeat(40)}`]) {
+    const response = await post("/api/streams", { aceId });
+    expect(response.statusCode, aceId).toBe(400);
+    expect(response.json<{ error: string }>().error).toContain("more than one stream");
+  }
+});
+
+test("a single stream is still read from every text it was read from before lists", async () => {
+  const { post, asked } = await withStreams();
+  const other = "d".repeat(40);
+  const base32 = "aaaqeayeaudaocajbifqydiob4ibceqt";
+  const texts = [
+    // The same stream written twice.
+    `acestream://${ID_B} http://127.0.0.1:6878/ace/getstream?id=${ID_B}`,
+    // A magnet link with a space in its name, and one whose name holds another hash.
+    `magnet:?dn=My Stream&xt=urn:btih:${base32}`,
+    `magnet:?xt=urn:btih:${ID_C}&dn=copy of ${other}`,
+    // An engine URL after other lines.
+    `Sports\nhttp://127.0.0.1:6878/ace/getstream?infohash=${other}`,
+  ];
+  for (const aceId of texts) {
+    const response = await post("/api/streams", { aceId });
+    expect(response.statusCode, aceId).toBe(201);
+  }
+  expect(asked).toEqual([
+    [{ aceId: ID_B, aceIdKind: "content-id", name: undefined }],
+    [{ aceId: "000102030405060708090a0b0c0d0e0f10111213", aceIdKind: "infohash", name: undefined }],
+    [{ aceId: ID_C, aceIdKind: "infohash", name: undefined }],
+    [{ aceId: other, aceIdKind: "infohash", name: undefined }],
+  ]);
 });
