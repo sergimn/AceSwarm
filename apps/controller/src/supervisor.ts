@@ -281,7 +281,7 @@ export class StreamSupervisor {
     // Someone stepped in: it acts now, and the ladder's waits start over from this step.
     this.recovery = { failures: 0, lastActionAt: undefined };
     this.sourceWait.due();
-    await this.runAction("restart-engine", "manual restart");
+    await this.runAction("restart-engine", "manual restart", this.state !== "playing");
   }
 
   /**
@@ -506,7 +506,8 @@ export class StreamSupervisor {
     this.logger.info({ from, to: target, engine: moved.engine.name }, "stream moved to another engine");
   }
 
-  private async runAction(action: RecoveryAction, reason: string): Promise<void> {
+  /** Takes a step of the ladder; one without `credit` is only an attempt (see `RecoverySteps.take`). */
+  private async runAction(action: RecoveryAction, reason: string, credit = true): Promise<void> {
     const engine = this.engine;
     if (engine === undefined) {
       return;
@@ -515,19 +516,21 @@ export class StreamSupervisor {
     this.logger.warn({ action, reason, failures: this.recovery.failures }, "recovering stream");
     this.setState(this.sourceWait.state("recovering"), `${reason}; ${action.replace("-", " ")}`);
     try {
-      await this.steps.take(action, async () => {
-        if (action === "restart-pipeline") {
-          await this.stopSessionQuietly();
-          await this.startPlayback(engine);
-        } else if (action === "restart-engine") {
-          await this.runRestartInPlace(engine);
-        } else {
-          await this.switchPath(engine);
-        }
-      });
+      await this.steps.take(action, async () => this.runStep(action, engine), credit);
     } catch (error) {
       this.setState(this.sourceWait.state("stalled"), `${action.replace("-", " ")} failed: ${describeError(error)}`);
       this.logger.warn({ err: error, action }, "recovery action failed");
+    }
+  }
+
+  private async runStep(action: RecoveryAction, engine: EngineHandle): Promise<void> {
+    if (action === "restart-pipeline") {
+      await this.stopSessionQuietly();
+      await this.startPlayback(engine);
+    } else if (action === "restart-engine") {
+      await this.runRestartInPlace(engine);
+    } else {
+      await this.switchPath(engine);
     }
   }
 

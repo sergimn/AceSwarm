@@ -663,7 +663,7 @@
         "overrides": []
       },
       "options": {},
-      "description": "Recoveries that brought video back (aceswarm_stream_recoveries_succeeded_total): a stream counts one each time it plays again after recovery steps, under the last step that changed where it plays from: restart-pipeline, restart-engine, switch-path, or failover to a hot standby. A restart by hand counts as restart-engine. The steps tried before that one don't count, nor do the tries of a stream that waits for a broadcast that is off: every step taken is in Recovery attempts per hour, in the collapsed row Recovery attempts below."
+      "description": "Recoveries that brought video back (aceswarm_stream_recoveries_succeeded_total): a stream counts one each time it plays again after recovery steps, under the last step that changed where it plays from: restart-pipeline, restart-engine, switch-path, or failover to a hot standby. A restart by hand counts as restart-engine, unless the stream was playing. The steps tried before that one don't count, nor do the tries of a stream that waits for a broadcast that is off: every step taken is in Recovery attempts per hour, in the collapsed row Recovery attempts below."
     },
     {
       "type": "timeseries",

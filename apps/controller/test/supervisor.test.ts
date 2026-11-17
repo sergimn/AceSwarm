@@ -747,17 +747,29 @@ describe("recoveries that brought video back", () => {
     expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
   });
 
-  test("a restart by hand counts once the stream plays again", async () => {
-    const fake = await stalled(0);
+  test("a restart by hand of a stream that doesn't play counts once it plays again", async () => {
+    const fake = await stalled(1);
     fake.video.on = true;
     fake.instance.requestRestart();
     await fake.instance.tick();
-    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
+    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 2 });
     expect(await succeeded(fake)).toEqual({});
     fake.clock.now += 1000;
     await fake.instance.tick();
     expect(fake.instance.view().state).toBe("playing");
     expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+  });
+
+  test("a restart by hand of a stream that plays is only an attempt", async () => {
+    const fake = await stalled(0);
+    fake.video.on = true;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({});
   });
 
   test("starts both counters at zero for every step, under the stream's id, before its first check", async () => {
@@ -772,27 +784,17 @@ describe("recoveries that brought video back", () => {
     }
   });
 
-  test("a restart by hand whose transcoder can't start counts nothing while the old picture lasts", async () => {
+  test("a restart by hand whose transcoder can't start leaves the credit with the step before it", async () => {
     const transcoderStartFails = { left: 0 };
-    const fake = await stalled(0, { sessionIds: true, transcoderStartFails });
-    fake.video.on = true;
+    const fake = await stalled(1, { sessionIds: true, transcoderStartFails });
     transcoderStartFails.left = 1;
     fake.instance.requestRestart();
     await fake.instance.tick();
-    expect(fake.instance.view()).toMatchObject({ state: "stalled", recoveries: 1 });
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", recoveries: 2 });
     expect(fake.instance.view().message).toMatch(/^restart engine failed: transcoder said no/);
 
-    // The ffmpeg it had still publishes its last video, from the session the restart stopped.
-    fake.clock.now += 1000;
-    await fake.instance.tick();
-    expect(fake.instance.view().state).toBe("playing");
-    expect(await succeeded(fake)).toEqual({});
-
-    // Once that video ends, the step that brings it back counts.
-    fake.video.on = false;
-    fake.clock.now += settings.startupGraceMs + 1000;
-    await fake.instance.tick();
-    expect(fake.instance.view()).toMatchObject({ state: "recovering", recoveries: 2 });
+    // The transcoder still reads the session of the pipeline the first step started, not the one
+    // the restart opened: the video that comes is not the restart's.
     fake.video.on = true;
     fake.clock.now += 1000;
     await fake.instance.tick();

@@ -6,12 +6,15 @@ import type { RecoveryAction } from "./recovery.ts";
 /** A step that tries to bring a stream's video back: one of the ladder's, or a failover to a hot standby. */
 export type RecoveryStep = RecoveryAction | "failover";
 
-export const RECOVERY_STEPS: readonly RecoveryStep[] = [
-  "restart-pipeline",
-  "restart-engine",
-  "switch-path",
-  "failover",
-];
+/** Every step, so that a new one can't be left out of the counters that start at zero. */
+const STEPS: Record<RecoveryStep, true> = {
+  "restart-pipeline": true,
+  "restart-engine": true,
+  "switch-path": true,
+  failover: true,
+};
+
+export const RECOVERY_STEPS = Object.keys(STEPS) as readonly RecoveryStep[];
 
 /** Where a stream plays from, as its supervisor knows it: its session, and what its transcoder reads. */
 export interface PlayedFrom {
@@ -31,7 +34,8 @@ export interface PlayedFrom {
  * transcoder doesn't read (the transcoder could not start): the step before it keeps the credit.
  * Should the video of a move that gave up arrive late, and the stream move to it after all, the
  * step that started that move gets the credit. A step that stopped the stream's session keeps the
- * credit even when it fails, because the starts that follow finish what it began.
+ * credit even when it fails, because the starts that follow finish what it began. A restart by hand
+ * of a stream that plays recovers nothing.
  *
  * Whether the step or the swarm brought the video back can't be told apart, so "succeeded" means
  * no more than that video came back after it.
@@ -68,13 +72,16 @@ export class RecoverySteps {
     return this.count;
   }
 
-  /** Takes `step`, which `run` carries out. Throws what `run` throws. */
-  async take(step: RecoveryStep, run: () => Promise<void>): Promise<void> {
+  /**
+   * Takes `step`, which `run` carries out. Throws what `run` throws. Without `credit` (a restart by
+   * hand of a stream that plays) it is only an attempt: there was no outage to recover from.
+   */
+  async take(step: RecoveryStep, run: () => Promise<void>, credit = true): Promise<void> {
     const before = this.credited;
     const { session } = this.playing();
     this.count += 1;
     this.metrics.recoveries.inc({ stream: this.stream, action: step });
-    this.credited = step;
+    this.credited = credit ? step : before;
     this.running = step;
     try {
       await run();

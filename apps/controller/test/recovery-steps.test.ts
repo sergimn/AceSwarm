@@ -171,6 +171,18 @@ test("a late move that no recovery step started gets no credit", async () => {
   expect(await fake.succeeded()).toEqual({});
 });
 
+test("a policy move to a session a failed step had handed over to gives that step no credit", async () => {
+  const fake = steps();
+  const kept = session("kept");
+  await fake.works("restart-engine");
+  await fake.fails("switch-path", undefined, kept);
+  // WireGuard only is turned on: the move off the direct path tries the engine the path switch kept.
+  fake.steps.handingOver(kept);
+  fake.arrives(kept);
+  fake.steps.played();
+  expect(await fake.succeeded()).toEqual({ "restart-engine": 1 });
+});
+
 test("once the stream plays, late video from a move that gave up counts nothing more", async () => {
   const fake = steps();
   const standby = session("standby");
