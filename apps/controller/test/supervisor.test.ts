@@ -94,6 +94,10 @@ interface Fakes {
   created?: EngineHandle[];
   /** Fails the first session start, like an engine that dies right away. */
   failFirstSession?: boolean;
+  /** Gives each session URLs of its own, as a real engine does (by default an engine's sessions share them). */
+  sessionIds?: boolean;
+  /** Starting the transcoder fails this many more times. */
+  transcoderStartFails?: { left: number };
   /** Whether video arrives from the new engine when a stream moves to another path (a holder can change it). */
   handover?: "delivers" | "stops" | { value: "delivers" | "stops" };
   /** Makes removing an engine fail. */
@@ -233,7 +237,12 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       if (fakes.failFirstSession === true && sessions === 1) {
         throw new Error("engine died");
       }
-      return { playbackUrl: `${baseUrl}/play`, statUrl: `${baseUrl}/stat`, commandUrl: `${baseUrl}/cmd` };
+      const id = fakes.sessionIds === true ? `?session=${String(sessions)}` : "";
+      return {
+        playbackUrl: `${baseUrl}/play${id}`,
+        statUrl: `${baseUrl}/stat${id}`,
+        commandUrl: `${baseUrl}/cmd${id}`,
+      };
     },
     stopSession: (commandUrl: string) => {
       stopped.push(commandUrl);
@@ -311,6 +320,10 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const transcoderStarts: string[] = [];
   const transcoder = {
     start: (_id: string, input: { source: string }, handover?: boolean) => {
+      if (fakes.transcoderStartFails !== undefined && fakes.transcoderStartFails.left > 0) {
+        fakes.transcoderStartFails.left -= 1;
+        return Promise.reject(new Error("transcoder said no"));
+      }
       transcoderStarts.push(input.source);
       pending = handover === true ? input.source : undefined;
       if (handover === true) {
@@ -441,7 +454,18 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     updates,
     saved: () => saved,
     real,
+    metrics,
   };
+}
+
+/** The stream's recoveries that brought video back, by the step that counted (see `RecoverySteps`). */
+async function succeeded(fake: { metrics: ControllerMetrics }): Promise<Record<string, number>> {
+  const { values } = await fake.metrics.recoveriesSucceeded.get();
+  return Object.fromEntries(
+    values
+      .filter(({ value }) => value > 0)
+      .map(({ labels, value }) => [String((labels as Record<string, unknown>)["action"]), value]),
+  );
 }
 
 test("gives an engine a path at start when the gateway's paths are known", async () => {
@@ -652,6 +676,193 @@ describe("a manual restart of a stream that has no session", () => {
     await fake.instance.tick();
     expect(fake.restarted).toEqual([engine.containerId]);
     expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
+  });
+});
+
+describe("recoveries that brought video back", () => {
+  const vpn: PathStatus = { ...direct, id: "wg:a", kind: "wireguard", label: "VPN", score: 0.5 };
+
+  /** A stream that played, then stalled: its ladder took `steps` steps that brought no video. */
+  async function stalled(steps: number, fakes: Fakes = {}, paths: PathStatus[] = [direct]) {
+    const video = { on: true };
+    const fake = supervisor(paths, { video, ...fakes });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    video.on = false;
+    for (let step = 0; step < steps; step += 1) {
+      fake.clock.now += settings.startupGraceMs + 1000;
+      await fake.instance.tick();
+    }
+    expect(fake.instance.view().recoveries).toBe(steps);
+    return { ...fake, video };
+  }
+
+  test("counts one recovery once the stream plays again, under the last step, not the steps tried before", async () => {
+    // The pipeline twice, then the engine.
+    const fake = await stalled(3);
+    expect(fake.instance.view()).toMatchObject({ state: "recovering", message: "no video after 61s; restart engine" });
+    expect(await succeeded(fake)).toEqual({});
+
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 3 });
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+
+    // It plays on: nothing more to count.
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+
+    // The next outage counts by itself.
+    fake.video.on = false;
+    fake.clock.now += settings.startupGraceMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().recoveries).toBe(4);
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1, "restart-pipeline": 1 });
+  });
+
+  test("a stream that waits for its broadcast counts its tries as attempts, and one recovery once it is back", async () => {
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = await stalled(0, { liveEdge });
+    for (let second = 0; second <= 240; second += 1) {
+      fake.clock.now += 1000;
+      liveEdge.value = stale(fake.clock.now);
+      await fake.instance.tick();
+    }
+    expect(fake.instance.view().state).toBe("stale-source");
+    expect(fake.instance.view().recoveries).toBe(5);
+    expect(await succeeded(fake)).toEqual({});
+
+    liveEdge.value = { state: "live", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: 0 };
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+  });
+
+  test("a restart by hand of a stream that doesn't play counts once it plays again", async () => {
+    const fake = await stalled(1);
+    fake.video.on = true;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 2 });
+    expect(await succeeded(fake)).toEqual({});
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+  });
+
+  test("a restart by hand of a stream that plays is only an attempt", async () => {
+    const fake = await stalled(0);
+    fake.video.on = true;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({});
+  });
+
+  test("starts both counters at zero for every step, under the stream's id, before its first check", async () => {
+    const fake = supervisor([direct]);
+    const zero = ["restart-pipeline", "restart-engine", "switch-path", "failover"].map((action) => ({
+      labels: { stream: "s1", action },
+      value: 0,
+    }));
+    for (const counter of [fake.metrics.recoveries, fake.metrics.recoveriesSucceeded]) {
+      const { values } = await counter.get();
+      expect(values.map(({ labels, value }) => ({ labels, value }))).toEqual(zero);
+    }
+  });
+
+  test("a restart by hand whose transcoder can't start leaves the credit with the step before it", async () => {
+    const transcoderStartFails = { left: 0 };
+    const fake = await stalled(1, { sessionIds: true, transcoderStartFails });
+    transcoderStartFails.left = 1;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", recoveries: 2 });
+    expect(fake.instance.view().message).toMatch(/^restart engine failed: transcoder said no/);
+
+    // The transcoder still reads the session of the pipeline the first step started, not the one
+    // the restart opened: the video that comes is not the restart's.
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({ "restart-pipeline": 1 });
+  });
+
+  test("a stream that starts, even after failed starts, recovered nothing", async () => {
+    const video = { on: true };
+    const fake = supervisor([direct], { failFirstSession: true, video });
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("error");
+    fake.clock.now += settings.recoveryBaseDelayMs;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(await succeeded(fake)).toEqual({});
+  });
+
+  test("a step that fails after it stopped the session counts once the start that follows brings video", async () => {
+    const hold: Hold = {};
+    const fake = await stalled(0, { hold });
+    const refused = Promise.reject(new Error("engine said no"));
+    refused.catch(() => undefined);
+    hold.session = refused;
+    fake.clock.now += settings.startupGraceMs + 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", recoveries: 1 });
+    expect(fake.instance.view().message).toMatch(/^restart pipeline failed/);
+
+    // The start after the ladder's wait opens the session the step could not.
+    hold.session = undefined;
+    fake.video.on = true;
+    fake.clock.now += settings.recoveryBaseDelayMs;
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 1 });
+    expect(await succeeded(fake)).toEqual({ "restart-pipeline": 1 });
+  });
+
+  test("a path switch that brings no video leaves the credit with the step before it", async () => {
+    const fake = await stalled(3, { created: [engine, own(2)], handover: "stops" }, [direct, vpn]);
+    // Past the time a stream stays on a path, so the ladder's fourth step is a path switch.
+    fake.clock.now += settings.pathMinDwellMs;
+    await fake.instance.tick();
+    expect(fake.handovers).toEqual([play(own(2))]);
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", path: "direct", recoveries: 4 });
+    expect(fake.instance.view().message).toMatch(/^switch path failed/);
+
+    // The engine the third step restarted delivers after all: the stream never left it.
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", path: "direct", engine: { name: engine.name } });
+    expect(await succeeded(fake)).toEqual({ "restart-engine": 1 });
+  });
+
+  test("a path switch that works counts as the path switch", async () => {
+    const fake = await stalled(3, { created: [engine, own(2)], handover: "delivers" }, [direct, vpn]);
+    fake.clock.now += settings.pathMinDwellMs;
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ path: "wg:a", recoveries: 4 });
+    expect(await succeeded(fake)).toEqual({});
+    fake.video.on = true;
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    expect(await succeeded(fake)).toEqual({ "switch-path": 1 });
   });
 });
 
@@ -1119,9 +1330,35 @@ describe("moving a stream to another path", () => {
     expect(fake.updates).toContainEqual({ ownEngine: replacement.name });
     expect(fake.stopped).toContain(`${engine.baseUrl}/cmd`);
     expect(spareSlots.tryTake()).toBe(true);
+    // The path switch that gave up brought the video back after all, which counts once it plays.
+    expect(await succeeded(fake)).toEqual({});
     await fake.instance.tick();
-    expect(fake.instance.view().state).toBe("playing");
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 1 });
     expect(fake.removed).toEqual([engine.containerId]);
+    expect(await succeeded(fake)).toEqual({ "switch-path": 1 });
+  });
+
+  test("counts the move whose video arrived late, even when removing the engine it left failed", async () => {
+    const sources = new Set([`${engine.baseUrl}/play`]);
+    const paths = [direct, vpn];
+    const spareSlots = new MoveSlots(1);
+    const fake = supervisor(paths, { created: [engine, replacement], sources, spareSlots, failRemove: true });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    paths[0] = { ...direct, up: false };
+    sources.clear();
+    fake.clock.now += settings.stallAfterMs + 1000;
+    await fake.instance.tick();
+    expect(fake.real.active).toBe(`${replacement.baseUrl}/play`);
+    expect(fake.instance.path).toBe("direct");
+
+    sources.add(`${replacement.baseUrl}/play`);
+    await expect(fake.instance.tick()).rejects.toThrow("docker said no");
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.instance.view().engine?.name).toBe(replacement.name);
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 1 });
+    expect(await succeeded(fake)).toEqual({ "switch-path": 1 });
   });
 
   test("keeps the kept engine when taking it over fails for a moment", async () => {
@@ -1301,6 +1538,26 @@ describe("WireGuard only", () => {
     expect(removed).toEqual([engine.containerId]);
     expect(unassigned).toEqual([engine.ip]);
     expect(instance.view().recoveries).toBe(0);
+  });
+
+  test("a stream that plays again after it moved off the direct path recovered nothing", async () => {
+    const { state, pathAllowed } = policy(false);
+    const video = { on: true };
+    const fake = supervisor([direct, vpn], {
+      created: [engine, replacement],
+      handover: "delivers",
+      pathAllowed,
+      video,
+    });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    state.on = true;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(await succeeded(fake)).toEqual({});
   });
 
   test("waits before trying again when the move brings no video", async () => {
@@ -2040,9 +2297,12 @@ describe("hot standby on the other paths", () => {
       { ip: main.ip, path: "direct" },
     ]);
 
+    expect(await succeeded(fake)).toEqual({});
     await fake.instance.tick();
     await settle();
     expect(fake.instance.view().state).toBe("playing");
+    // The failover brought the video back.
+    expect(await succeeded(fake)).toEqual({ failover: 1 });
     // It opened a new session there, which the transcoder reads.
     await fake.instance.tick();
     expect(fake.readers.at(-1)).toEqual([play(main)]);
@@ -2188,8 +2448,40 @@ describe("hot standby on the other paths", () => {
     fake.clock.now += settings.startupGraceMs;
     await fake.instance.tick();
     expect(fake.handovers).toEqual([play(standbyEngine)]);
-    expect(fake.instance.view()).toMatchObject({ state: "recovering", path: "direct" });
+    expect(fake.instance.view()).toMatchObject({ state: "recovering", path: "direct", recoveries: 2 });
     expect(fake.real.active).toBe(play(main));
+
+    // The ladder's step brings the video back, not the failover that failed.
+    fake.sources.add(play(main));
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", path: "direct" });
+    expect(await succeeded(fake)).toEqual({ "restart-pipeline": 1 });
+  });
+
+  test("a failover that gives up counts nothing when the stream then plays on by itself", async () => {
+    const hold: Hold = {};
+    const standbyData = new Set([play(standbyEngine)]);
+    const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+    const fake = await withStandby({ standbyData, standby: { policy }, hold });
+    fake.sources.delete(play(main));
+    fake.sources.delete(play(standbyEngine));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    // The check sees the stall, and then the engine answers again while the failover waits.
+    const gate = latch();
+    hold.stats = new Map([[`${main.baseUrl}/stat`, gate.promise]]);
+    const step = fake.instance.tick();
+    await settle();
+    fake.sources.add(play(main));
+    hold.stats.clear();
+    gate.open();
+    await step;
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
+    expect(fake.instance.view()).toMatchObject({ state: "stalled", path: "direct", recoveries: 1 });
+    expect(fake.instance.view().message).toMatch(/^failing over to wg:a failed/);
+
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", path: "direct", recoveries: 1 });
+    expect(await succeeded(fake)).toEqual({});
   });
 
   test("a path switch moves to the standby on the new path, even before it is hot", async () => {
@@ -2271,6 +2563,10 @@ describe("hot standby on the other paths", () => {
     expect(fake.instance.view().engine?.name).toBe(standbyEngine.name);
     expect(fake.handovers).toEqual([play(standbyEngine)]);
     expect(fake.creates()).toBe(2);
+    // The failover that gave up brought the video back after all.
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 1 });
+    expect(await succeeded(fake)).toEqual({ failover: 1 });
   });
 
   test("leaves a standby alone while the transcoder still waits for its video", async () => {
