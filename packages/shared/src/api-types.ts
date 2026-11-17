@@ -274,6 +274,7 @@ export interface PipelineStatus {
   startedAt: string;
   lastFrameAt: string | null;
   frames: number;
+  /** The frame rate ffmpeg last reported (its average since it started); null while no ffmpeg runs. */
   fps: number | null;
   videoCodec: string | null;
   mode: "copy" | "transcode";

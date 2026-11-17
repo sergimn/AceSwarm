@@ -194,7 +194,7 @@ export class Pipeline {
       lastFrameAt:
         generation.publishedFrameAt === undefined ? null : new Date(generation.publishedFrameAt).toISOString(),
       frames: generation.frames,
-      fps: generation.fps ?? null,
+      fps: generation.frameRate(),
       videoCodec: generation.videoCodec ?? null,
       mode: generation.mode,
       exitCode: generation.exitCode,

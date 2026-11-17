@@ -732,7 +732,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Frames per second each stream's ffmpeg processes, as ffmpeg reports it: its average since that ffmpeg started. A new ffmpeg first reads what the engine has buffered, faster than real time, so its line starts high and falls to the stream's real frame rate. There is no line while no ffmpeg runs for the stream (aceswarm_pipeline_fps)."
     },
     {
       "type": "timeseries",

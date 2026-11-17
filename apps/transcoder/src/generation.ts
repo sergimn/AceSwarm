@@ -83,6 +83,16 @@ export class Generation {
     return this.watch?.edge.state() === "stale";
   }
 
+  /**
+   * The frame rate its ffmpeg last reported, while that runs. None once it exited or was stopped
+   * for a stale source: the last value it printed says nothing about a stream that has no ffmpeg.
+   */
+  frameRate(): number | null {
+    const child = this.process;
+    const runs = child?.exitCode === null && child.signalCode === null && this.state !== "exited" && !this.staleStopped;
+    return runs ? (this.fps ?? null) : null;
+  }
+
   /** Whether ffmpeg failed before any video, and opens the source again. */
   willReopen(): boolean {
     // A stale source is not opened again: it would only serve the same old window.
