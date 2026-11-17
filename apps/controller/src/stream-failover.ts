@@ -136,17 +136,15 @@ export class StreamFailover {
    * where it was, and recovery's next step comes on a later check.
    */
   async failOver(reason: string): Promise<void> {
-    const { engine, session } = this.host.playing();
+    const { engine } = this.host.playing();
     const standby = engine === undefined ? undefined : this.engines.standbys.takeHot(this.eligible, this.freshAfter());
     if (engine === undefined || standby === undefined) {
       return;
     }
-    this.host.steps.took("failover", session);
     this.host.logger.warn({ reason, to: standby.path }, "failing over to a standby");
     try {
-      await this.moveTo(engine, standby, reason);
+      await this.host.steps.take("failover", async () => this.moveTo(engine, standby, reason));
     } catch (error) {
-      this.host.steps.failed(this.host.playing().session);
       const state = this.host.sourceStale() ? "stale-source" : "stalled";
       this.host.setState(state, `failing over to ${standby.path} failed: ${describeError(error)}`);
       this.host.logger.warn({ err: error, path: standby.path }, "could not fail over to the standby");
@@ -176,12 +174,13 @@ export class StreamFailover {
     this.host.setState(state, `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
     const { handoverTimeoutMs, tickMs } = this.host.settings;
     const timeoutMs = standby.hot ? Math.min(handoverTimeoutMs, HOT_HANDOVER_TIMEOUT_MS) : handoverTimeoutMs;
+    const { now, sleep, steps } = this.host;
     await this.engines.failover({
       from: engine,
       fromPath: path,
       session,
       standby,
-      handover: { timeoutMs, pollMs: Math.min(tickMs, 1000), now: this.host.now, sleep: this.host.sleep },
+      handover: { timeoutMs, pollMs: Math.min(tickMs, 1000), now, sleep, starting: steps.handingOver },
       commit: this.host.commit,
     });
   }
@@ -195,20 +194,24 @@ export class StreamFailover {
     if (engine === undefined) {
       return false;
     }
-    const moved =
-      (await this.engines.finishLateMove(engine, session, pipeline)) ||
-      (await this.engines.finishLateFailover({
-        from: engine,
-        fromPath: path,
-        session,
-        pipeline,
-        commit: this.host.commit,
-      }));
-    if (moved) {
-      // When a recovery step's move is the one that gave up, the step worked after all.
-      this.host.steps.arrivedLate();
+    try {
+      return (
+        (await this.engines.finishLateMove(engine, session, pipeline)) ||
+        (await this.engines.finishLateFailover({
+          from: engine,
+          fromPath: path,
+          session,
+          pipeline,
+          commit: this.host.commit,
+        }))
+      );
+    } finally {
+      // Also when letting go of the engine it left failed afterwards: the stream moved all the same.
+      const moved = this.host.playing().session;
+      if (moved !== undefined && moved !== session) {
+        this.host.steps.arrivedLate(moved);
+      }
     }
-    return moved;
   }
 
   /**

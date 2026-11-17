@@ -78,7 +78,7 @@ export class StreamSupervisor {
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
-    this.steps = new RecoverySteps(stream.id, deps.metrics);
+    this.steps = new RecoverySteps(stream.id, deps.metrics, () => this.playing());
     this.loop = new StepLoop({
       delayMs: deps.settings.tickMs,
       now: this.now,
@@ -511,21 +511,21 @@ export class StreamSupervisor {
     if (engine === undefined) {
       return;
     }
-    this.steps.took(action, this.session);
     this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
     this.logger.warn({ action, reason, failures: this.recovery.failures }, "recovering stream");
     this.setState(this.sourceWait.state("recovering"), `${reason}; ${action.replace("-", " ")}`);
     try {
-      if (action === "restart-pipeline") {
-        await this.stopSessionQuietly();
-        await this.startPlayback(engine);
-      } else if (action === "restart-engine") {
-        await this.runRestartInPlace(engine);
-      } else {
-        await this.switchPath(engine);
-      }
+      await this.steps.take(action, async () => {
+        if (action === "restart-pipeline") {
+          await this.stopSessionQuietly();
+          await this.startPlayback(engine);
+        } else if (action === "restart-engine") {
+          await this.runRestartInPlace(engine);
+        } else {
+          await this.switchPath(engine);
+        }
+      });
     } catch (error) {
-      this.steps.failed(this.session);
       this.setState(this.sourceWait.state("stalled"), `${action.replace("-", " ")} failed: ${describeError(error)}`);
       this.logger.warn({ err: error, action }, "recovery action failed");
     }
@@ -575,7 +575,9 @@ export class StreamSupervisor {
       session: this.session,
       target,
       shared: this.sharing,
-      handover: options.handover ? { timeoutMs, pollMs, now: this.now, sleep: this.sleep } : undefined,
+      handover: options.handover
+        ? { timeoutMs, pollMs, now: this.now, sleep: this.sleep, starting: this.steps.handingOver }
+        : undefined,
       openSession: async (baseUrl) => this.record.openSession(baseUrl),
       commit: async (moved) => {
         await this.commitMove(moved, target, options.switchingPath);
