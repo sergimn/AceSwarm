@@ -59,6 +59,11 @@ function isTextField(element: Element | null): element is HTMLInputElement | HTM
 
 /** Lets arrows move the caret inside text fields, and leave the field once the caret is at its edge. */
 function caretKeepsKey(field: HTMLInputElement | HTMLTextAreaElement, direction: Direction): boolean {
+  // A field that can't be edited has no caret to move: some browsers leave it where it is, and
+  // the key would do nothing at all.
+  if (field.readOnly) {
+    return false;
+  }
   const start = field.selectionStart ?? 0;
   const end = field.selectionEnd ?? 0;
   const multiline = field instanceof HTMLTextAreaElement;

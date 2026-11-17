@@ -1,6 +1,15 @@
-import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList } from "@aceswarm/shared/ace-id-list";
+import { MAX_ACE_ID_LIST_LENGTH, parseAceIdList, parseOneAceId } from "@aceswarm/shared/ace-id-list";
 import { api, ApiError } from "./api.ts";
-import { addedToast, leftoverText, listSummary, resultLines, streamCount, submitLabel } from "./bulk-add.ts";
+import {
+  leftoverText,
+  listSummary,
+  listToast,
+  MANY_STREAMS,
+  resultLines,
+  startHint,
+  streamCount,
+  submitLabel,
+} from "./bulk-add.ts";
 import { dialogShell, errorMessage, h, switchSetting, toast, type SwitchSetting } from "./dom.ts";
 import type { Navigator } from "./navigation.ts";
 
@@ -10,10 +19,10 @@ const START_LIST_NOW = true;
 const LIST_HINT =
   "One stream per line: content IDs, infohashes, acestream:// or magnet: links. Anything else on a line is ignored.";
 
-const START_HINTS = {
-  on: "On: every stream starts as soon as it is added, and downloads its broadcast from then on.",
-  off: "Off: the streams are added disabled. Enable the ones you want under Streams.",
-} as const;
+/** How many lines of a text say something. */
+function countLines(text: string): number {
+  return text.split(/\r\n|\r|\n/).filter((line) => line.trim().length > 0).length;
+}
 
 /**
  * Dialog to add a stream by Acestream ID or `acestream://` link, or several at once from a pasted
@@ -37,8 +46,11 @@ export class AddStreamDialog {
   private readonly error: HTMLElement;
   /** What became of a list that was sent, when lines are left to correct or nothing was added. */
   private readonly result: HTMLElement;
+  private readonly cancel: HTMLButtonElement;
   private readonly submitButton: HTMLButtonElement;
   private several = false;
+  /** How many streams the list in the box would add. */
+  private count = 0;
   private startNow = START_LIST_NOW;
   private busy = false;
   /** How many times the dialog was opened: an answer that comes after it was closed belongs to an earlier one. */
@@ -53,7 +65,10 @@ export class AddStreamDialog {
     // On the right, under the dialog's close button and above the Add button, so Up and Down reach it.
     this.mode = switchSetting("add-several", "Add several at once", "Paste a list with one stream per line.");
     this.mode.button.addEventListener("click", () => {
-      this.setSeveral(!this.several);
+      // Not while a request is out: its answer goes to the fields that show now.
+      if (!this.busy) {
+        this.setSeveral(!this.several);
+      }
     });
     this.aceId = h("input", {
       className: "input mono",
@@ -69,11 +84,20 @@ export class AddStreamDialog {
     // its lines together.
     this.aceId.addEventListener("paste", (event) => {
       const pasted = event.clipboardData?.getData("text") ?? "";
-      if (pasted.split(/\r\n|\r|\n/).filter((line) => line.trim().length > 0).length < 2) {
+      if (this.busy || countLines(pasted) < 2) {
         return;
       }
       event.preventDefault();
-      this.list.value = [this.aceId.value.trim(), pasted].filter((part) => part.length > 0).join("\n");
+      // What is selected is what a paste replaces. The rest of the field goes first, after a list
+      // that is in the box already: one typed before the switch was turned back.
+      const { value } = this.aceId;
+      const typed = (
+        value.slice(0, this.aceId.selectionStart ?? value.length) + value.slice(this.aceId.selectionEnd ?? value.length)
+      ).trim();
+      const box = this.list.value.trimEnd();
+      // Unless the box has it as a line: it took what was typed when the switch was turned on.
+      const lines = box.split(/\r\n|\r|\n/).map((line) => line.trim());
+      this.list.value = [box, lines.includes(typed) ? "" : typed, pasted].filter((part) => part.length > 0).join("\n");
       this.aceId.value = "";
       this.setSeveral(true);
       this.list.focus();
@@ -84,6 +108,9 @@ export class AddStreamDialog {
       attrs: {
         name: "list",
         rows: "8",
+        // A line of the list is a row of the box, however narrow the box is: the lines are told
+        // apart by their numbers.
+        wrap: "off",
         autocomplete: "off",
         spellcheck: "false",
         "aria-describedby": "add-list-summary",
@@ -93,9 +120,14 @@ export class AddStreamDialog {
     this.list.addEventListener("input", () => {
       this.renderList();
     });
-    this.summary = h("p", { className: "muted small", attrs: { id: "add-list-summary", role: "status" } });
+    // The box's description, and no live region: it changes with every key.
+    this.summary = h("p", { className: "muted small", attrs: { id: "add-list-summary" } });
     this.start = switchSetting("add-start", "Start them right away");
     this.start.button.addEventListener("click", () => {
+      // Like the other switch, it waits while a request is out.
+      if (this.busy) {
+        return;
+      }
       this.startNow = !this.startNow;
       this.renderStart();
     });
@@ -115,8 +147,8 @@ export class AddStreamDialog {
     // It takes focus once it has something to say: a remote scrolls a dialog by moving the focus,
     // and a screen reader reads what gets it.
     this.result = h("div", { className: "form-result", attrs: { role: "status", tabindex: "0", hidden: true } });
-    const cancel = h("button", { className: "button", text: "Cancel", attrs: { type: "button" } });
-    cancel.addEventListener("click", () => {
+    this.cancel = h("button", { className: "button", text: "Cancel", attrs: { type: "button" } });
+    this.cancel.addEventListener("click", () => {
       this.navigator.back();
     });
     this.submitButton = h("button", { className: "button primary", text: "Add stream", attrs: { type: "submit" } });
@@ -126,7 +158,7 @@ export class AddStreamDialog {
       this.many,
       this.error,
       this.result,
-      h("div", { className: "form-actions" }, [cancel, this.submitButton]),
+      h("div", { className: "form-actions" }, [this.cancel, this.submitButton]),
     ]);
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -136,10 +168,13 @@ export class AddStreamDialog {
   }
 
   open(): void {
+    // A request of an earlier visit may still be out. Its answer will find another visit and only
+    // show a toast, so this one starts free to send its own.
     this.visits++;
+    this.setBusy(false);
     this.form.reset();
+    this.cancel.textContent = "Cancel";
     this.startNow = START_LIST_NOW;
-    this.renderStart();
     this.setSeveral(false);
     // Open the layer first: it remembers the focused element, and showModal() moves focus.
     this.navigator.open({
@@ -161,7 +196,7 @@ export class AddStreamDialog {
     // A hidden field that is required would keep the form from being sent.
     this.aceId.required = !several;
     this.error.hidden = true;
-    this.result.hidden = true;
+    this.showResult([]);
     // What was typed for one stream is the first line of the list.
     if (several && this.list.value.trim().length === 0 && this.aceId.value.trim().length > 0) {
       this.list.value = this.aceId.value.trim();
@@ -171,13 +206,45 @@ export class AddStreamDialog {
 
   private renderList(): void {
     const entries = parseAceIdList(this.list.value);
+    this.count = streamCount(entries);
     this.summary.textContent = entries.length === 0 ? LIST_HINT : listSummary(entries);
-    this.submitButton.textContent = this.several ? submitLabel(streamCount(entries)) : "Add stream";
+    this.submitButton.textContent = this.several ? submitLabel(this.count) : "Add stream";
+    this.renderStart();
   }
 
   private renderStart(): void {
     this.start.show(this.startNow);
-    this.start.hint.textContent = this.startNow ? START_HINTS.on : START_HINTS.off;
+    this.start.hint.textContent = startHint(this.startNow, this.count);
+    this.start.hint.classList.toggle("caution", this.startNow && this.count > MANY_STREAMS);
+  }
+
+  /**
+   * Shows what became of a list that was sent, a sentence per line, or nothing for no sentences.
+   * From the first one on, the button beside Add says Done until the dialog closes: by then
+   * streams may be added, and closing the dialog cancels nothing.
+   */
+  private showResult(sentences: readonly string[]): void {
+    this.result.replaceChildren(...sentences.map((sentence) => h("p", { text: sentence })));
+    this.result.hidden = sentences.length === 0;
+    if (sentences.length > 0) {
+      this.cancel.textContent = "Done";
+    }
+  }
+
+  /**
+   * While a request is out the fields and the switches can't be changed: its answer rewrites the
+   * box or closes the dialog, and what was typed meanwhile would be lost. The fields are read-only
+   * and not disabled, and so are the buttons: a disabled control drops the focus, and a remote
+   * would have nowhere to move from.
+   */
+  private setBusy(busy: boolean): void {
+    this.busy = busy;
+    for (const field of [this.aceId, this.name, this.list]) {
+      field.readOnly = busy;
+    }
+    for (const button of [this.submitButton, this.mode.button, this.start.button]) {
+      button.setAttribute("aria-busy", String(busy));
+    }
   }
 
   private showError(message: string): void {
@@ -195,15 +262,12 @@ export class AddStreamDialog {
   }
 
   private async submit(): Promise<void> {
-    // The button stays enabled while the request is out: disabling it would drop the focus, and a
-    // remote would have nowhere to move from.
     if (this.busy) {
       return;
     }
-    this.busy = true;
-    this.submitButton.setAttribute("aria-busy", "true");
+    this.setBusy(true);
     this.error.hidden = true;
-    this.result.hidden = true;
+    this.showResult([]);
     const visit = this.visits;
     try {
       await (this.several ? this.addList(visit) : this.addOne(visit));
@@ -216,13 +280,21 @@ export class AddStreamDialog {
         toast(message, "error");
       }
     } finally {
-      this.busy = false;
-      this.submitButton.removeAttribute("aria-busy");
+      // A later visit has a request of its own to wait for, or none.
+      if (visit === this.visits) {
+        this.setBusy(false);
+      }
     }
   }
 
   private async addOne(visit: number): Promise<void> {
-    const stream = await api.addStream(this.aceId.value.trim(), this.name.value.trim());
+    const text = this.aceId.value.trim();
+    // Read as the controller reads it, so the dialog refuses nothing that the controller takes.
+    if (parseOneAceId(text) === "several") {
+      this.showError('This names more than one stream. Turn on "Add several at once" to add them together.');
+      return;
+    }
+    const stream = await api.addStream(text, this.name.value.trim());
     toast(`Added ${stream.name}`);
     if (this.isVisit(visit)) {
       this.navigator.back();
@@ -248,13 +320,15 @@ export class AddStreamDialog {
     const enabled = this.startNow;
     const response = await api.addStreams(text, enabled);
     const open = this.isVisit(visit);
-    if (response.added > 0 && (response.invalid === 0 || !open)) {
-      toast(addedToast(response, enabled));
+    const done = response.added > 0 && response.invalid === 0;
+    // The toast says it when the dialog doesn't: it closes now, or was closed meanwhile.
+    if (done || !open) {
+      toast(listToast(response, enabled));
     }
     if (!open) {
       return;
     }
-    if (response.added > 0 && response.invalid === 0) {
+    if (done) {
       this.navigator.back();
       return;
     }
@@ -262,8 +336,7 @@ export class AddStreamDialog {
     // and the dialog says what became of the rest.
     this.list.value = leftoverText(text, response.results);
     this.renderList();
-    this.result.replaceChildren(...resultLines(response, enabled).map((line) => h("p", { text: line })));
-    this.result.hidden = false;
+    this.showResult(resultLines(response, enabled));
     this.result.focus();
   }
 }
