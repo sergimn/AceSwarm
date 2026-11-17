@@ -88,9 +88,7 @@ export class Generation {
    * for a stale source: the last value it printed says nothing about a stream that has no ffmpeg.
    */
   frameRate(): number | null {
-    const child = this.process;
-    const runs = child?.exitCode === null && child.signalCode === null && this.state !== "exited" && !this.staleStopped;
-    return runs ? (this.fps ?? null) : null;
+    return this.state === "exited" || this.staleStopped ? null : (this.fps ?? null);
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */

@@ -66,10 +66,12 @@ describe("the transcoder's metrics", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  /** The value of a stream's series in a scrape; every series also has the service's label. */
-  async function value(metric: string, stream: string): Promise<string | undefined> {
-    const line = new RegExp(String.raw`^${metric}\{stream="${stream}"[^}]*\} (\S+)$`, "m");
-    return line.exec(await service.registry.metrics())?.[1];
+  /** One scrape: what Prometheus gets when it asks once. */
+  async function scrape(): Promise<(metric: string, stream: string) => string | undefined> {
+    const text = await service.registry.metrics();
+    // Every series also has the service's label.
+    return (metric, stream) =>
+      new RegExp(String.raw`^${metric}\{stream="${stream}"[^}]*\} (\S+)$`, "m").exec(text)?.[1];
   }
 
   async function progress(run: number, block: string): Promise<void> {
@@ -80,26 +82,32 @@ describe("the transcoder's metrics", () => {
   test("a stream has a frame rate only while its ffmpeg runs, so a stopped one leaves a gap", async () => {
     await manager.start("s1", "http://e1/play", false);
     await manager.start("s2", "http://e2/play", false);
-    expect(await value("aceswarm_pipeline_fps", "s1")).toBeUndefined();
+    expect((await scrape())("aceswarm_pipeline_fps", "s1")).toBeUndefined();
 
     // Both start on a buffered window, which ffmpeg reads much faster than real time.
     await progress(0, "frame=5700\nfps=1140.93\nprogress=continue\n");
     await progress(1, "frame=4370\nfps=873.95\nprogress=continue\n");
-    expect(await value("aceswarm_pipeline_fps", "s1")).toBe("1140.93");
-    expect(await value("aceswarm_pipeline_running", "s1")).toBe("1");
+    // Each step is checked on the one scrape that follows it: a gauge that showed what the scrape
+    // before it collected would be a step behind here.
+    const running = await scrape();
+    expect(running("aceswarm_pipeline_fps", "s1")).toBe("1140.93");
+    expect(running("aceswarm_pipeline_running", "s1")).toBe("1");
+    expect(running("aceswarm_pipeline_fps", "s2")).toBe("873.95");
 
     // The first one's ffmpeg ends: its last value must not stay as a flat line.
     Object.assign(children[0] ?? {}, { exitCode: 255 });
     children[0]?.emit("exit", 255, null);
-    expect(await value("aceswarm_pipeline_fps", "s1")).toBeUndefined();
-    expect(await value("aceswarm_pipeline_running", "s1")).toBe("0");
+    const ended = await scrape();
+    expect(ended("aceswarm_pipeline_fps", "s1")).toBeUndefined();
+    expect(ended("aceswarm_pipeline_running", "s1")).toBe("0");
     // The other stream's goes on.
-    expect(await value("aceswarm_pipeline_fps", "s2")).toBe("873.95");
+    expect(ended("aceswarm_pipeline_fps", "s2")).toBe("873.95");
+    expect(ended("aceswarm_pipeline_running", "s2")).toBe("1");
 
     // A new run of the first one reports its own.
     await manager.start("s1", "http://e1/play", false);
-    expect(await value("aceswarm_pipeline_fps", "s1")).toBeUndefined();
+    expect((await scrape())("aceswarm_pipeline_fps", "s1")).toBeUndefined();
     await progress(2, "frame=50\nfps=25\nprogress=continue\n");
-    expect(await value("aceswarm_pipeline_fps", "s1")).toBe("25");
+    expect((await scrape())("aceswarm_pipeline_fps", "s1")).toBe("25");
   });
 });

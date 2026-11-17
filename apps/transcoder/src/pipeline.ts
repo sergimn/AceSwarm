@@ -504,6 +504,10 @@ export class Pipeline {
     const progress = new ProgressParser();
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      if (generation.state === "exited") {
+        // What it printed as it ended, read after its exit: it must not look like it runs again.
+        return;
+      }
       for (const block of progress.push(chunk)) {
         if (block.frame !== undefined && block.frame > generation.frames) {
           generation.frames = block.frame;
