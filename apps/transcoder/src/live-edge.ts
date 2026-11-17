@@ -96,6 +96,8 @@ export class LiveEdge {
     this.settings = settings;
     this.now = now;
     this.seed = seed;
+    // What the stream's sessions know goes on before this one has a live position of its own.
+    this.quietSince = seed === undefined ? undefined : (seed.quietSince ?? seed.since);
   }
 
   /** What a next session of the same stream starts from. */
@@ -156,7 +158,7 @@ export class LiveEdge {
     const window = this.settings.staleAfterMs / 1000;
     this.own = last;
     // Whatever edge the session starts on, it is no news until it is seen to move (see `rose`).
-    this.quietSince = seed === undefined ? now : (seed.quietSince ?? seed.since);
+    this.quietSince ??= now;
     if (seed !== undefined && last <= seed.edge && last >= seed.edge - window) {
       // The same window the previous session had: no newer, and its clock goes on.
       this.edge = seed.edge;

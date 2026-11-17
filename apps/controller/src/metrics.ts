@@ -55,19 +55,28 @@ function setCountries(gauge: Gauge<"stream" | "engine" | "country">, stream: Str
   }
 }
 
-/** The live edge of the session a stream plays from: how old its newest data is, and since when it is the same. */
+/**
+ * The live edge of the session a stream plays from: how old its newest data is, since when that
+ * session's edge is the same, and for how long the broadcast sent nothing new. The last one is the
+ * stream's, not the session's: it goes on when a retry opens a new session, whose own edge starts
+ * over (see `LiveEdgeView.quietSince`).
+ */
 function setLiveEdgeGauges(
-  gauges: Record<"age" | "unchanged", Gauge<"stream">>,
+  gauges: Record<"age" | "unchanged" | "quiet", Gauge<"stream">>,
   stream: StreamView,
   now: number,
 ): void {
   const edgeAt = stream.liveEdge?.edgeAt ?? null;
   const advancedAt = stream.liveEdge?.advancedAt ?? null;
+  const quietSince = stream.liveEdge?.quietSince ?? null;
   if (edgeAt !== null) {
     gauges.age.set({ stream: stream.id }, (now - Date.parse(edgeAt)) / 1000);
   }
   if (advancedAt !== null) {
     gauges.unchanged.set({ stream: stream.id }, Math.max(0, (now - Date.parse(advancedAt)) / 1000));
+  }
+  if (quietSince !== null) {
+    gauges.quiet.set({ stream: stream.id }, Math.max(0, (now - Date.parse(quietSince)) / 1000));
   }
 }
 
@@ -144,7 +153,8 @@ export class ControllerMetrics {
       registers,
       collect: () => {
         const current = snapshot();
-        const gauges = [info, state, up, frameAge, liveEdgeAge, liveEdgeStill, peers, countries, speed, path];
+        const liveEdge = [liveEdgeAge, liveEdgeStill, sourceQuiet];
+        const gauges = [info, state, up, frameAge, ...liveEdge, peers, countries, speed, path];
         const others = [memory, memoryLimit, viewers, cache, cacheLimit, watching, sharedStreams, sharedStandbys];
         for (const gauge of [...gauges, ...others, standbys]) {
           gauge.reset();
@@ -164,7 +174,7 @@ export class ControllerMetrics {
             up.set(labels, stream.state === "playing" ? 1 : 0);
           }
           setFrameAge(frameAge, stream, now, sources.runningSince?.(stream.id));
-          setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill }, stream, now);
+          setLiveEdgeGauges({ age: liveEdgeAge, unchanged: liveEdgeStill, quiet: sourceQuiet }, stream, now);
           if (stream.peers.connected !== null) {
             peers.set({ ...labels, kind: "connected" }, stream.peers.connected);
           }
@@ -239,7 +249,20 @@ export class ControllerMetrics {
     });
     const liveEdgeStill = new Gauge({
       name: "aceswarm_stream_live_edge_unchanged_seconds",
-      help: "Seconds since the live edge of the stream's engine session last moved, by our clock; past STALE_SOURCE_SECONDS the stream is stale-source",
+      help:
+        "Seconds since the live edge of the stream's current engine session last moved or was first seen, by our clock. " +
+        "It is the session's: it starts over when a retry opens a session on another window, though the broadcast " +
+        "sends nothing new. Past STALE_SOURCE_SECONDS that session is stale. " +
+        "For how long the broadcast is quiet, see aceswarm_stream_source_quiet_seconds",
+      labelNames: ["stream"],
+      registers,
+    });
+    const sourceQuiet = new Gauge({
+      name: "aceswarm_stream_source_quiet_seconds",
+      help:
+        "Seconds since the stream's broadcast last sent new data, by our clock: since the live edge of a live session " +
+        "of the stream last moved (while none was live yet, since its first session saw a live edge). " +
+        "It goes on through retries, whose new sessions start their own edge over, and is near 0 while the stream plays",
       labelNames: ["stream"],
       registers,
     });

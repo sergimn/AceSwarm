@@ -292,6 +292,21 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
 }
 
 /**
+ * One series' value in the controller's metrics, by its name and its first labels (such as
+ * `stream="…"`); undefined when it has none. The registry adds a service label of its own.
+ */
+export async function controllerMetric(
+  request: APIRequestContext,
+  name: string,
+  labels: string,
+): Promise<number | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(await response.text());
+  return match === null ? undefined : Number(match[1]);
+}
+
+/**
  * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
  * "Engines running" adds up); undefined before its first sample, or when it could not list them.
  */

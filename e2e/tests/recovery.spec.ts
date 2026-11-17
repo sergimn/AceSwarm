@@ -1,5 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { addStream, docker, engineContainers, resetStack, streamById, waitForPlaying } from "./helpers.ts";
+import {
+  addStream,
+  controllerMetric,
+  docker,
+  engineContainers,
+  resetStack,
+  streamById,
+  waitForPlaying,
+} from "./helpers.ts";
 import { broadcasts, newestSegment, setBroadcastInput, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -80,6 +88,11 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     .poll(async () => (await streamById(request, stream.id))?.liveEdge?.state, { timeout: 30_000 })
     .toBe("live");
   const playlist = stream.hls.full;
+  // How long the broadcast sent nothing new, as the dashboard's "Broadcast quiet for" shows it.
+  const quietFor = async (): Promise<number | undefined> =>
+    controllerMetric(request, "aceswarm_stream_source_quiet_seconds", `stream="${stream.id}"`);
+  // While it plays, its live edge keeps moving: less than the stale threshold (30 s here).
+  await expect.poll(quietFor, { timeout: 30_000 }).toBeLessThan(30);
 
   // The source engine keeps running with the window it has, and so does the stream's engine:
   // data still comes for each new session, but the live edge stops (STALE_SOURCE_SECONDS: 30).
@@ -100,6 +113,10 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     expect(waiting?.state).toBe("stale-source");
     expect(waiting?.message).toContain("broadcast");
     expect(waiting?.lastFrameAt).toBe(quiet);
+    // The broadcast has been quiet for the stale threshold at least (30 s here).
+    const quietAtFirst = await quietFor();
+    expect(quietAtFirst).toBeGreaterThanOrEqual(30);
+    let quietSoFar = quietAtFirst!;
 
     // While it waits, new sessions bring the old window: none of it is published, and it doesn't
     // restart on every stall (a new session every 10 s here, STALE_SOURCE_RETRY_SECONDS).
@@ -111,10 +128,17 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
       expect(current?.lastFrameAt).toBe(quiet);
       expect((await request.get(playlist)).status()).toBe(404);
       expect((await request.get(stream.hls.thumbnail)).status()).toBe(404);
+      // How long the broadcast is quiet keeps counting: a try's new session, whose own live edge
+      // is first seen when it opens, doesn't start it over, and it has a value all the time.
+      const quietNow = await quietFor();
+      expect(quietNow).toBeGreaterThanOrEqual(quietSoFar);
+      quietSoFar = quietNow!;
     }
     const tries = (await streamById(request, stream.id))!.recoveries - waiting!.recoveries;
     expect(tries).toBeGreaterThanOrEqual(1);
     expect(tries).toBeLessThanOrEqual(4);
+    // It grew through those tries by about the time they took.
+    expect(quietSoFar).toBeGreaterThanOrEqual(quietAtFirst! + 25);
   } finally {
     await setBroadcastInput(bc[2]!, true);
   }
