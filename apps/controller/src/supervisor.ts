@@ -7,6 +7,7 @@ import { duration, evaluateHealth } from "./health.ts";
 import { sleep } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
+import { RecoverySteps } from "./recovery-steps.ts";
 import { SourceWait } from "./source-wait.ts";
 import { StepLoop } from "./step-loop.ts";
 import { StreamEngines, type MovedStream } from "./stream-engines.ts";
@@ -48,7 +49,8 @@ export class StreamSupervisor {
   /** The paths this stream may use, and its history on them. */
   private readonly paths: StreamPaths;
   private lastSwitchAt = 0;
-  private recoveries = 0;
+  /** The recovery steps it took, and which of them brought video back. */
+  private readonly steps: RecoverySteps;
   private forceRestart = false;
   /** Its own engines (with their gateway paths) or its place on a shared engine, and its standbys. */
   private readonly engines: StreamEngines;
@@ -76,6 +78,7 @@ export class StreamSupervisor {
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
     this.sourceWait = new SourceWait(this.logger, this.policy, deps.settings.staleSourceRetryMs);
     this.stateSince = this.now();
+    this.steps = new RecoverySteps(stream.id, deps.metrics);
     this.loop = new StepLoop({
       delayMs: deps.settings.tickMs,
       now: this.now,
@@ -83,7 +86,7 @@ export class StreamSupervisor {
       step: async () => this.tick(),
       observe: async () => this.observe(),
     });
-    this.failover = new StreamFailover(stream.id, this.engines, this.paths, {
+    this.failover = new StreamFailover(this.engines, this.paths, {
       ...deps,
       logger: this.logger,
       now: this.now,
@@ -93,9 +96,7 @@ export class StreamSupervisor {
       playing: () => this.playing(),
       sourceStale: () => this.sourceWait.waiting,
       setState: this.setState,
-      countRecovery: () => {
-        this.recoveries += 1;
-      },
+      steps: this.steps,
       commit: async (moved, path) => this.commitMove(moved, path, true),
       openSession: async (baseUrl) => this.record.openSession(baseUrl),
     });
@@ -172,9 +173,9 @@ export class StreamSupervisor {
   }
 
   view(): StreamView {
-    const { state, stateSince, message, pipeline, stats, peers, recoveries, engine } = this;
+    const { state, stateSince, message, pipeline, stats, peers, engine } = this;
     const standbys = this.engines.standbys.view();
-    const live = { state, stateSince, message, pipeline, stats, peers, recoveries, engine, standbys };
+    const live = { state, stateSince, message, pipeline, stats, peers, recoveries: this.steps.taken, engine, standbys };
     return streamView(this.stream, this.deps.viewers?.() ?? 0, live);
   }
 
@@ -264,6 +265,7 @@ export class StreamSupervisor {
     }
     this.recovery = { failures: 0, lastActionAt: undefined };
     this.sourceWait.end();
+    this.steps.played();
     this.setState("playing", null);
   }
 
@@ -509,9 +511,8 @@ export class StreamSupervisor {
     if (engine === undefined) {
       return;
     }
-    this.recoveries += 1;
+    this.steps.took(action, this.session);
     this.recovery = { failures: this.recovery.failures + 1, lastActionAt: this.now() };
-    this.deps.metrics.recoveries.inc({ stream: this.stream.id, action });
     this.logger.warn({ action, reason, failures: this.recovery.failures }, "recovering stream");
     this.setState(this.sourceWait.state("recovering"), `${reason}; ${action.replace("-", " ")}`);
     try {
@@ -524,6 +525,7 @@ export class StreamSupervisor {
         await this.switchPath(engine);
       }
     } catch (error) {
+      this.steps.failed(this.session);
       this.setState(this.sourceWait.state("stalled"), `${action.replace("-", " ")} failed: ${describeError(error)}`);
       this.logger.warn({ err: error, action }, "recovery action failed");
     }

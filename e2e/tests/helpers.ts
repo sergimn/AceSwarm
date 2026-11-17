@@ -292,6 +292,31 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
 }
 
 /**
+ * The stream's recoveries that brought video back, by the step that counted
+ * (aceswarm_stream_recoveries_succeeded_total, which the dashboard's "Recoveries per hour" and
+ * "Recoveries in range" add up). Every step has a count from the stream's start, 0 at first.
+ */
+export async function recoveriesSucceeded(
+  request: APIRequestContext,
+  streamId: string,
+): Promise<Record<string, number>> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const text = await response.text();
+  const counts: Record<string, number> = {};
+  for (const action of ["restart-pipeline", "restart-engine", "switch-path", "failover"]) {
+    // The registry adds a default service label.
+    const labels = `stream="${streamId}",action="${action}"[^}]*`;
+    const line = new RegExp(String.raw`^aceswarm_stream_recoveries_succeeded_total\{${labels}\} (\S+)$`, "m").exec(
+      text,
+    );
+    expect(line, `no count of the stream's ${action} recoveries`).not.toBeNull();
+    counts[action] = Number(line?.[1]);
+  }
+  return counts;
+}
+
+/**
  * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
  * "Engines running" adds up); undefined before its first sample, or when it could not list them.
  */

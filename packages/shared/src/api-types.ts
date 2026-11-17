@@ -77,6 +77,7 @@ export interface StreamView {
    * while the stream has no engine; null before it has one, and while the stream is disabled.
    */
   path: string | null;
+  /** Recovery steps it took since it was started, whether or not they brought video back. */
   recoveries: number;
   /** The engine the stream plays from; shared engines serve every stream on their path. */
   engine: { name: string; shared: boolean } | null;
