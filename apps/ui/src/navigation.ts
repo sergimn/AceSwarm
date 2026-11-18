@@ -20,6 +20,17 @@ interface OpenLayer extends Layer {
   restoreFocus: Element | null;
 }
 
+/**
+ * A part of the page that left and right only reach when nothing else is that way, unless the focus
+ * is in it already. The page's footer is one: Settings at the bottom of the rail sits beside its
+ * links, and the way back to the streams from there is right, not a link that leaves the app.
+ */
+const SIDEWAYS_LAST = "[data-nav-sideways-last]";
+
+function isSidewaysLast(element: HTMLElement): boolean {
+  return element.closest(SIDEWAYS_LAST) !== null;
+}
+
 function toBox(element: Element): Box {
   const rect = element.getBoundingClientRect();
   return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
@@ -220,13 +231,20 @@ export class Navigator {
     // Up and down, along which pages and dialogs scroll, try the elements that scroll with the
     // focused one first. Otherwise, in a scrolled dialog, its sticky header would be nearer than
     // what scrolled out of view under it. Left and right compare everything as it is on screen, so
-    // the grid's left edge leads to the sticky rail beside it.
+    // the grid's left edge leads to the sticky rail beside it, but try what isn't in a
+    // `SIDEWAYS_LAST` part first.
     let next: HTMLElement | undefined;
     if (direction === "up" || direction === "down") {
       const part = stickyPart(current, root);
       next = nearest(
         current,
         others.filter((item) => stickyPart(item, root) === part),
+        direction,
+      );
+    } else if (!isSidewaysLast(current)) {
+      next = nearest(
+        current,
+        others.filter((item) => !isSidewaysLast(item)),
         direction,
       );
     }

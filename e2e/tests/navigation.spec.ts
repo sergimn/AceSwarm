@@ -124,6 +124,12 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   // `resetStack` turned both off.
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
+  const saved: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "PATCH") {
+      saved.push(request.url());
+    }
+  });
   // The dialog opens on its close button. Down goes through the settings on the right, and only
   // OK presses them.
   await page.keyboard.press("ArrowDown");
@@ -141,6 +147,8 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(settings).toBeFocused();
+  // Moving the focus saved nothing: the preview choice stays in the browser.
+  expect(saved).toEqual([]);
   // Up the rail, Streams lists the streams and no longer holds these settings.
   await page.keyboard.press("ArrowUp");
   await expect(network).toBeFocused();
@@ -151,6 +159,13 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await expect(streams.locator(".row")).toHaveCount(3);
   await expect(streams.getByRole("switch")).toHaveCount(0);
   await expect(streams.getByRole("button", { name: "Thumbnails only" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(streams).toBeHidden();
+
+  // Right from Settings goes back to the streams, not to the footer's links beside it.
+  await settings.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".tile:focus")).toHaveCount(1);
 
   // The choice is this browser's, and outlasts the page.
   await page.reload();
