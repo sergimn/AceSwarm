@@ -155,7 +155,7 @@ export class SettingsDialog {
         className: "segments",
         attrs: { role: "group", "aria-labelledby": "tile-previews-label", "aria-describedby": "tile-previews-hint" },
       },
-      // The tip comes right after Live video: the styles show it while that is hovered or focused.
+      // The tip comes right after Live video: the styles show it while the mouse is on that or a remote focuses it.
       [this.previewButtons.video, this.thumbnailsOnlyTip, this.previewButtons.thumbnails],
     );
     shell.body.append(

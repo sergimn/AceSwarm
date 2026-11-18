@@ -35,6 +35,9 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("/hls/s1/3/full/index.m3u8");
     expect(args).toContain("/hls/s1/3/preview/index.m3u8");
     expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
+    // Live previews decode every frame, whether the full stream is copied or re-encoded.
+    expect(args).not.toContain("-skip_frame");
+    expect(buildFfmpegArgs({ ...PLAN, fullMode: "transcode" })).not.toContain("-skip_frame");
   });
 
   it("makes no preview in thumbnails mode, and decodes key frames only while the full stream is copied", () => {
@@ -70,6 +73,7 @@ describe("buildFfmpegArgs", () => {
 
   it("decodes only key frames in keyframes mode", () => {
     const args = buildFfmpegArgs({ ...PLAN, previewMode: "keyframes" });
+    expect(valueAfter(args, "-skip_frame")).toBe("nokey");
     expect(args.indexOf("-skip_frame")).toBeLessThan(args.indexOf("-i"));
     expect(args).toContain("scale=-2:270");
     expect(buildFfmpegArgs(PLAN)).toContain("fps=15,scale=-2:270");

@@ -26,6 +26,22 @@ test.beforeAll(async ({ request }) => {
   }
 });
 
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The middle of the part two boxes share, if they share any. */
+function overlap(a: Box, b: Box): { x: number; y: number } | undefined {
+  const left = Math.max(a.x, b.x);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const top = Math.max(a.y, b.y);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return left < right && top < bottom ? { x: (left + right) / 2, y: (top + bottom) / 2 } : undefined;
+}
+
 /** The focused element, checked by its accessible label (tiles are labelled "<name>, <state>"). */
 function focused(page: Page) {
   return page.locator(":focus");
@@ -383,11 +399,17 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   await video.click({ force: true });
   await expect(video).toHaveAttribute("aria-pressed", "false");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
-  // The pointer can move onto the tip, which covers the next setting: a click there presses
-  // nothing under it. With the pointer gone, the tip goes, though the click left focus on Live video.
-  await tip.hover();
+  // The pointer can move onto the tip, which covers the next setting's switch at this size: a press
+  // there presses nothing under it. With the pointer gone, the tip goes, though the click left focus
+  // on Live video.
+  const sharing = dialog.getByRole("switch", { name: "One engine per path" });
+  const sharingWas = await sharing.getAttribute("aria-checked");
+  await tip.hover({ timeout: 5000 });
   await expect(tip).toBeVisible();
-  await tip.click();
+  const covered = overlap((await tip.boundingBox())!, (await sharing.boundingBox())!);
+  expect(covered, "the tip covers the switch").toBeDefined();
+  await page.mouse.click(covered!.x, covered!.y);
+  await expect(sharing).toHaveAttribute("aria-checked", sharingWas!);
   await page.mouse.move(0, 0);
   await expect(tip).toBeHidden();
   // The browser's own choice stays as it was, and no tile asked for a live preview.
@@ -417,6 +439,8 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   expect(previewLoads).toHaveLength(loaded);
   expect(await choiceWrites()).toEqual([]);
   expect(saved).toEqual([]);
+  // The page asks for snapshots until it closes, after the test's own request context is gone.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
 test("serves previews and thumbnails for the grid", async ({ request }) => {

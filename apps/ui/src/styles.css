@@ -531,7 +531,7 @@ a {
   border-color: var(--border);
 }
 
-/* Under the choices: why the one before it is greyed out, while the mouse is over it or it has the focus. */
+/* Under the choices: why the one before it is greyed out, while the mouse is on it or a remote focuses it. */
 .tip {
   position: absolute;
   z-index: 1;

@@ -270,7 +270,7 @@ describe("Pipeline with a source's live edge", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(): Pipeline {
+  function start(plan: Partial<PipelineSettings["plan"]> = {}): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -286,6 +286,7 @@ describe("Pipeline with a source's live edge", () => {
         playlistSize: 6,
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
+        ...plan,
       },
       liveEdge: { staleAfterMs: 60_000, noLiveAfterPolls: 10 },
     };
@@ -406,7 +407,7 @@ describe("Pipeline with a source's live edge", () => {
   });
 
   it("publishes a source that makes no preview, as with LOW_CPU_PREVIEWS, and has no preview to serve", async () => {
-    const instance = start();
+    const instance = start({ previewMode: "thumbnails" });
     await instance.start("http://e1/play", false);
     frames(25);
     await wrote(1, 2, ["full"]);

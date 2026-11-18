@@ -75,6 +75,9 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
   ];
   // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame. A full
   // stream that is re-encoded needs every frame decoded, so thumbnails mode leaves that one alone.
+  // ffmpeg reports no progress until every output has a frame, so an H.264 broadcast without IDR
+  // frames never counts as playing in these modes. In thumbnails mode with a copied full stream,
+  // the frames counted are the copied ones: ffmpeg 7 and later count those, 6.x stays at 0.
   if (plan.previewMode === "keyframes" || (plan.previewMode === "thumbnails" && plan.fullMode === "copy")) {
     input.push("-skip_frame", "nokey");
   }
