@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFfmpegArgs, type FfmpegPlan } from "../src/ffmpeg-args.ts";
+import { buildFfmpegArgs, decodesKeyFramesOnly, type FfmpegPlan } from "../src/ffmpeg-args.ts";
 
 const PLAN: FfmpegPlan = {
   source: "http://172.31.250.130:6878/ace/r/abc",
@@ -48,6 +48,17 @@ describe("buildFfmpegArgs", () => {
     expect(args.indexOf("-skip_frame")).toBeLessThan(args.indexOf("-i"));
     expect(args).toContain("scale=-2:270");
     expect(buildFfmpegArgs(PLAN)).toContain("fps=15,scale=-2:270");
+  });
+
+  it("decodes every frame in keyframes mode once the broadcast has no key frames to decode alone", () => {
+    const args = buildFfmpegArgs({ ...PLAN, previewMode: "keyframes", allFrames: true });
+    expect(args).not.toContain("-skip_frame");
+    // Every frame is decoded, so the preview thins them out as in video mode.
+    expect(args).toContain("fps=15,scale=-2:270");
+    expect(args).toEqual(buildFfmpegArgs({ ...PLAN, previewMode: "video" }));
+    expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes" })).toBe(true);
+    expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes", allFrames: true })).toBe(false);
+    expect(decodesKeyFramesOnly(PLAN)).toBe(false);
   });
 
   it("caps the preview bitrate", () => {

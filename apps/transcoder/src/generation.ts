@@ -17,6 +17,10 @@ export interface GenerationPlan {
   stat?: string | undefined;
   directory: string;
   mode: FullMode;
+  /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
+  allFrames: boolean;
+  /** Decodes key frames only (see `decodesKeyFramesOnly`). */
+  keyFramesOnly: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
 }
@@ -44,6 +48,9 @@ export class Generation {
   staleStopped = false;
   readonly directory: string;
   readonly mode: FullMode;
+  /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
+  readonly allFrames: boolean;
+  readonly keyFramesOnly: boolean;
   readonly startedAt: number;
   /** How long ffmpeg waits for data from the source before it gives up. */
   readonly inputTimeoutSeconds: number;
@@ -62,6 +69,8 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
+  /** Since when ffmpeg has read data from the source whose output may be published, or none yet. */
+  flowingSince: number | undefined;
 
   constructor(plan: GenerationPlan) {
     this.number = plan.number;
@@ -69,6 +78,8 @@ export class Generation {
     this.stat = plan.stat;
     this.directory = plan.directory;
     this.mode = plan.mode;
+    this.allFrames = plan.allFrames;
+    this.keyFramesOnly = plan.keyFramesOnly;
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
@@ -81,6 +92,20 @@ export class Generation {
 
   stale(): boolean {
     return this.watch?.edge.state() === "stale";
+  }
+
+  /**
+   * Whether ffmpeg has read the source for `patienceMs` without a frame, though the data comes: it
+   * opened the source (it knows its video), and the live edge moves. With key frames only
+   * decoding, that means the broadcast has none ffmpeg can use (see `decodesKeyFramesOnly`).
+   */
+  gaveNoFrames(now: number, patienceMs: number): boolean {
+    const idle = this.retired || this.state === "exited" || this.frames > 0;
+    if (!this.keyFramesOnly || idle || this.videoCodec === undefined || !this.publishing()) {
+      return false;
+    }
+    this.flowingSince ??= now;
+    return now - this.flowingSince >= patienceMs;
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */

@@ -17,6 +17,25 @@ export interface FfmpegPlan {
   thumbnailIntervalSeconds: number;
   /** Give up on the source after this long without data. Real engines can take 30+ s to start. */
   inputTimeoutSeconds: number;
+  /**
+   * Decodes every frame, even in keyframes mode: this broadcast gave key frames only decoding no
+   * picture to work with (see `decodesKeyFramesOnly`), so it is previewed as in video mode.
+   */
+  allFrames?: boolean;
+}
+
+/**
+ * Whether ffmpeg decodes key frames only (`-skip_frame nokey`), which previews the stream for a
+ * fraction of the CPU. It only affects decoding, so the copied full stream keeps every frame.
+ *
+ * It needs the broadcast to have key frames that ffmpeg takes for one: IDR frames, or frames with
+ * a recovery point (SEI). A broadcast without them (an open GOP whose I frames are no recovery
+ * points, or one that refreshes the picture bit by bit instead, as with x264's intra refresh) has
+ * none to decode, so ffmpeg writes no preview and thumbnail, and in ffmpeg 9 no progress at all
+ * before every output has started. The pipeline then starts the stream again with `allFrames`.
+ */
+export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "allFrames">): boolean {
+  return plan.previewMode === "keyframes" && plan.allFrames !== true;
 }
 
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
@@ -71,7 +90,7 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     "-rw_timeout",
     String(plan.inputTimeoutSeconds * 1_000_000),
   ];
-  if (plan.previewMode === "keyframes") {
+  if (decodesKeyFramesOnly(plan)) {
     // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame.
     input.push("-skip_frame", "nokey");
   }
@@ -108,10 +127,10 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     ...hlsOutput(plan, "full"),
   ];
 
-  const previewFilter =
-    plan.previewMode === "keyframes"
-      ? `scale=-2:${String(plan.previewHeight)}`
-      : `fps=${String(plan.previewFps)},scale=-2:${String(plan.previewHeight)}`;
+  // Key frames are sparse already; with every frame decoded, fps thins them out to the preview's rate.
+  const previewFilter = decodesKeyFramesOnly(plan)
+    ? `scale=-2:${String(plan.previewHeight)}`
+    : `fps=${String(plan.previewFps)},scale=-2:${String(plan.previewHeight)}`;
   const bitrate = plan.previewBitrateKbps;
   const preview = [
     "-map",
