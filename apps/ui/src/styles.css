@@ -903,11 +903,9 @@ p.form-error {
  * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
  * picture's left edge (black bars left out), a quarter of the way down it: the player sets
  * `--picture-left` and `--stats-top`. It holds nothing to press, so it never takes a click from
- * the controls.
- */
-/*
- * Sized in em throughout, so that its font size scales the whole window: large enough to read
- * from the sofa on a TV, and a bit smaller on a phone, where it would cover most of the picture.
+ * the controls. It is sized in em throughout, so that its font size scales the whole window:
+ * large enough to read from the sofa on a TV, and a bit smaller on a phone, where it would cover
+ * most of the picture.
  */
 .player-stats {
   position: absolute;
@@ -922,7 +920,7 @@ p.form-error {
   pointer-events: none;
 }
 
-@media (max-width: 500px), (max-height: 500px) {
+@media (width <= 500px), (height <= 500px) {
   .player-stats {
     font-size: 1.125em;
   }
