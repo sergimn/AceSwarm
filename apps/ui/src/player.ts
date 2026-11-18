@@ -54,6 +54,8 @@ export class Player {
   private hls: Hls | undefined;
   private streamId: string | undefined;
   private overlayTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The player's request to go full screen, until the browser has answered it. */
+  private fullscreenRequest: Promise<void> | undefined;
 
   constructor(navigator: Navigator, watch: WatchReporter) {
     this.navigator = navigator;
@@ -141,9 +143,17 @@ export class Player {
       onKey: (event) => this.onKey(event),
     });
     if (document.fullscreenEnabled) {
-      this.root.requestFullscreen().catch(() => {
-        // Not allowed (for example without a user gesture): the player still covers the window.
-      });
+      const request = this.root
+        .requestFullscreen()
+        .catch(() => {
+          // Not allowed (for example without a user gesture): the player still covers the window.
+        })
+        .then(() => {
+          if (this.fullscreenRequest === request) {
+            this.fullscreenRequest = undefined;
+          }
+        });
+      this.fullscreenRequest = request;
     }
     this.backButton.focus();
     this.showOverlay();
@@ -296,6 +306,15 @@ export class Player {
     this.root.hidden = true;
     if (document.fullscreenElement !== null) {
       void document.exitFullscreen().catch(() => undefined);
+    } else if (this.fullscreenRequest !== undefined) {
+      // Back came before the browser went full screen (OK then Back at once on a remote): it still
+      // goes, after the player closed, and would leave the page black, without focus, deaf to keys.
+      // It leaves full screen as soon as it is in, unless the player opened again meanwhile.
+      void this.fullscreenRequest.then(() => {
+        if (this.streamId === undefined && document.fullscreenElement === this.root) {
+          void document.exitFullscreen().catch(() => undefined);
+        }
+      });
     }
   }
 
