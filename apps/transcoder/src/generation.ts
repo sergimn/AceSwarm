@@ -8,6 +8,8 @@ export type Variant = "full" | "preview";
 export const VARIANTS: readonly Variant[] = ["full", "preview"];
 
 const KILL_GRACE_MS = 3000;
+/** The live edge of a source that sends data moves at least this often. */
+const EDGE_FRESH_MS = 10_000;
 
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
 export interface GenerationPlan {
@@ -19,8 +21,6 @@ export interface GenerationPlan {
   mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   allFrames: boolean;
-  /** Decodes key frames only (see `decodesKeyFramesOnly`). */
-  keyFramesOnly: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
 }
@@ -50,7 +50,6 @@ export class Generation {
   readonly mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   readonly allFrames: boolean;
-  readonly keyFramesOnly: boolean;
   readonly startedAt: number;
   /** How long ffmpeg waits for data from the source before it gives up. */
   readonly inputTimeoutSeconds: number;
@@ -69,7 +68,7 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
-  /** Since when ffmpeg has read data from the source whose output may be published, or none yet. */
+  /** Since when the data comes without a break (see `flowedWithoutFrames`), or none yet. */
   flowingSince: number | undefined;
 
   constructor(plan: GenerationPlan) {
@@ -79,7 +78,6 @@ export class Generation {
     this.directory = plan.directory;
     this.mode = plan.mode;
     this.allFrames = plan.allFrames;
-    this.keyFramesOnly = plan.keyFramesOnly;
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
@@ -95,17 +93,25 @@ export class Generation {
   }
 
   /**
-   * Whether ffmpeg has read the source for `patienceMs` without a frame, though the data comes: it
-   * opened the source (it knows its video), and the live edge moves. With key frames only
-   * decoding, that means the broadcast has none ffmpeg can use (see `decodesKeyFramesOnly`).
+   * Whether no frame came for `patienceMs` though the data came the whole time: ffmpeg opened the
+   * source (it knows its video), and the broadcast sent new data (the live edge moved lately; a
+   * source without a stat URL has nothing to tell, and counts). It notes when the data began to
+   * come, and starts over when it stopped for a while. With key frames only decoding, no frame
+   * means the broadcast has none ffmpeg can use (see `decodesKeyFramesOnly`).
    */
-  gaveNoFrames(now: number, patienceMs: number): boolean {
+  flowedWithoutFrames(now: number, patienceMs: number): boolean {
     const idle = this.retired || this.state === "exited" || this.frames > 0;
-    if (!this.keyFramesOnly || idle || this.videoCodec === undefined || !this.publishing()) {
+    const flowing = this.videoCodec !== undefined && this.publishing() && this.edgeMoves();
+    if (idle || !flowing) {
+      this.flowingSince = undefined;
       return false;
     }
     this.flowingSince ??= now;
     return now - this.flowingSince >= patienceMs;
+  }
+
+  private edgeMoves(): boolean {
+    return this.watch?.edge.movedWithin(EDGE_FRESH_MS) ?? true;
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */

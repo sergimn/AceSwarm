@@ -19,7 +19,7 @@ import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 
-export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode">;
+export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode" | "allFrames">;
 
 export interface PipelineSettings {
   hlsDir: string;
@@ -57,7 +57,8 @@ const REOPEN_DELAY_MS = 1000;
 /**
  * How long key frames only decoding may read a source without any frame coming of it before the
  * stream is decoded in full (see `decodesKeyFramesOnly`). A broadcast that has key frames every
- * few seconds starts within about 15 s of its first data; the controller waits 90 s for video.
+ * few seconds shows its first frame within about 15 s of its first data; the controller waits 90 s
+ * for video.
  */
 export const KEY_FRAMES_PATIENCE_MS = 20_000;
 /**
@@ -98,6 +99,8 @@ export class Pipeline {
    * none ffmpeg can use. It is the broadcast's trait, so it stays for every source of the stream.
    */
   private allFrames = false;
+  /** A run got frames with key frames only decoding: a source that gives none is slow, not the trait. */
+  private keyFramesWorked = false;
   /**
    * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
    * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
@@ -441,7 +444,9 @@ export class Pipeline {
    * controller takes the stream for dead. Every later run of the stream decodes every frame too.
    */
   private fallBackToAllFrames(generation: Generation): boolean {
-    if (!generation.gaveNoFrames(this.now(), KEY_FRAMES_PATIENCE_MS)) {
+    // Once the broadcast is known to need every frame, a run that started before that needs no patience.
+    const wanted = !this.keyFramesWorked && decodesKeyFramesOnly(this.planOf(generation));
+    if (!wanted || !generation.flowedWithoutFrames(this.now(), this.allFrames ? 0 : KEY_FRAMES_PATIENCE_MS)) {
       return false;
     }
     this.allFrames = true;
@@ -493,7 +498,6 @@ export class Pipeline {
       directory,
       mode,
       allFrames: this.allFrames,
-      keyFramesOnly: decodesKeyFramesOnly({ ...this.settings.plan, allFrames: this.allFrames }),
       startedAt: this.now(),
       inputTimeoutSeconds,
     });
@@ -551,6 +555,7 @@ export class Pipeline {
       for (const block of progress.push(chunk)) {
         if (block.frame !== undefined && block.frame > generation.frames) {
           generation.frames = block.frame;
+          this.keyFramesWorked ||= decodesKeyFramesOnly(this.planOf(generation));
           generation.lastFrameAt = this.now();
           generation.state = "running";
           if (generation.publishing() && generation.published) {

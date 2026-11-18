@@ -189,6 +189,11 @@ export class LiveEdge {
     return this.verified ? "live" : "waiting";
   }
 
+  /** Whether the edge moved within the last `ms`: the broadcast sends new data now. */
+  movedWithin(ms: number): boolean {
+    return this.edgeSince !== undefined && this.now() - this.edgeSince <= ms;
+  }
+
   /** Whether output from the session may be published: it is live, or has no live position at all. */
   publishable(): boolean {
     const state = this.state();

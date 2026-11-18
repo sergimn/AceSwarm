@@ -129,12 +129,20 @@ describe("Pipeline decoding key frames only", () => {
     await nextTurn();
   }
 
-  /** The session's live edge of the first run moves a second each second, and it downloads. */
-  function live(): void {
+  /** The session's live edge of a run moves a second each second, and it downloads. */
+  function live(run = 0): void {
     for (let step = 0; step <= 3; step += 1) {
       clock.now += step === 0 ? 0 : 1000;
-      edges[0]?.edge.observe({ status: "dl", downloaded: 100 + step * 100, last: 5000 + step, pos: 5000 + step });
+      const last = 5000 + clock.now / 1000;
+      edges[run]?.edge.observe({ status: "dl", downloaded: 100 + step * 100, last, pos: last });
     }
+  }
+
+  /** The live edge of the first run moves on, as the broadcast sends new data. */
+  function moves(seconds: number): void {
+    clock.now += seconds * 1000;
+    const last = 5000 + clock.now / 1000;
+    edges[0]?.edge.observe({ status: "dl", downloaded: 1000, last, pos: last });
   }
 
   /** Waits until `count` ffmpeg runs started (a run starts after its directories exist). */
@@ -238,12 +246,10 @@ describe("Pipeline decoding key frames only", () => {
 
     live();
     await instance.sync();
-    clock.now += KEY_FRAMES_PATIENCE_MS - 1000;
-    edges[0]?.edge.observe({ status: "dl", downloaded: 900, last: 5003 + 19, pos: 5003 + 19 });
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 1);
     await instance.sync();
     await noMoreRuns(1);
-    clock.now += 1000;
-    edges[0]?.edge.observe({ status: "dl", downloaded: 1000, last: 5003 + 20, pos: 5003 + 20 });
+    moves(1);
     await instance.sync();
     await runsStarted(2);
     // The new run follows the session's live edge again, from what the stream saw.
@@ -279,24 +285,67 @@ describe("Pipeline decoding key frames only", () => {
     await noMoreRuns(1);
   });
 
-  it("decodes every frame of a handover's source, and the handover goes on with that run", async () => {
+  it("decodes every frame of a handover's source whose first source shows nothing either", async () => {
     const instance = start();
-    await instance.start("http://e1/play", false);
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
     await opened();
-    await frames(50);
-    await instance.start("http://e2/play", true);
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
     expect(instance.status().pendingSource).toBe("http://e2/play");
     await opened(1);
+    live(1);
     await instance.sync();
     clock.now += KEY_FRAMES_PATIENCE_MS;
+    edges[1]?.edge.observe({
+      status: "dl",
+      downloaded: 900,
+      last: 5000 + clock.now / 1000,
+      pos: 5000 + clock.now / 1000,
+    });
     await instance.sync();
     await runsStarted(3);
     expect(children[1]?.killed).toBe(true);
     expect(children[0]?.killed).toBe(false);
     expect(skipsFrames(runs[2])).toBe(false);
     expect(reasons).toEqual(["start", "handover", "all-frames"]);
-    // The source it plays from keeps its key frames only decoding: it is running fine.
+    // The handover goes on with that run.
     expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
+  });
+
+  it("does not take a slow handover's source for a broadcast without key frames once frames came", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    await opened();
+    await frames(50);
+    await instance.start("http://e2/play", true);
+    await opened(1);
+    await instance.sync();
+    clock.now += 3 * KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await noMoreRuns(2);
+    // The next source keeps decoding key frames only.
+    await instance.start("http://e3/play", false);
+    expect(skipsFrames(runs[2])).toBe(true);
+  });
+
+  it("starts the run of a source that began before the broadcast was known to need every frame at once", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
+    await opened(1);
+    moves(15);
+    live(1);
+    await instance.sync();
+    // The first source has waited the patience, the second source has not.
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 18);
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "handover", "all-frames"]);
+    await instance.sync();
+    await runsStarted(4);
+    expect(reasons).toEqual(["start", "handover", "all-frames", "all-frames"]);
   });
 
   it("gives up on a handover that timed out instead of starting it again", async () => {
@@ -331,14 +380,69 @@ describe("Pipeline decoding key frames only", () => {
     expect(reasons).toEqual(["start", "transcode", "all-frames"]);
   });
 
+  it("waits the patience again when the data stops coming for a while", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    // The engine keeps answering, but its edge does not move: the broadcast sends nothing.
+    for (let step = 0; step < 6; step += 1) {
+      clock.now += 5000;
+      await instance.sync();
+    }
+    await noMoreRuns(1);
+    // It sends again, and the patience counts from there.
+    moves(1);
+    await instance.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 1);
+    await instance.sync();
+    await noMoreRuns(1);
+    moves(1);
+    await instance.sync();
+    await runsStarted(2);
+  });
+
+  it("does not start a run that decodes every frame again when it gets no frame either", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    await opened();
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await runsStarted(2);
+    await opened(1);
+    await instance.sync();
+    clock.now += 3 * KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await noMoreRuns(2);
+    expect(children[1]?.killed).toBe(false);
+  });
+
+  it("does not take a run that ended for one with no key frames to decode", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    await opened();
+    await instance.sync();
+    exit(children[0]);
+    clock.now += 3 * KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await noMoreRuns(1);
+    await instance.start("http://e2/play", false);
+    expect(skipsFrames(runs[1])).toBe(true);
+  });
+
+  it("waits 20 seconds, as the documentation says", () => {
+    expect(KEY_FRAMES_PATIENCE_MS).toBe(20_000);
+  });
+
   it("opens the source again when the run that decodes every frame fails before any video", async () => {
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");
     await opened();
     live();
     await instance.sync();
-    clock.now += KEY_FRAMES_PATIENCE_MS;
-    edges[0]?.edge.observe({ status: "dl", downloaded: 900, last: 5003 + 20, pos: 5003 + 20 });
+    moves(KEY_FRAMES_PATIENCE_MS / 1000);
     await instance.sync();
     await runsStarted(2);
     // The new run follows the session's live edge again.

@@ -34,7 +34,7 @@ export interface FfmpegPlan {
  * none to decode, so ffmpeg writes no preview and thumbnail, and in ffmpeg 9 no progress at all
  * before every output has started. The pipeline then starts the stream again with `allFrames`.
  */
-export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "allFrames">): boolean {
+export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "fullMode" | "allFrames">): boolean {
   return plan.previewMode === "keyframes" && plan.allFrames !== true;
 }
 
