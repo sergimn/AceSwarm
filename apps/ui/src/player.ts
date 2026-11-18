@@ -36,6 +36,14 @@ export class Player {
   private readonly waiting: HTMLElement;
   private readonly waitingTitle: HTMLElement;
   private readonly waitingReason: HTMLElement;
+  /**
+   * An unseen copy of that message that always stays in the middle of the screen, measured to see
+   * whether the stats window would cover it there. Measuring the message itself would find it
+   * where it was moved to, and moving it there and back to measure it would cut its slide short.
+   */
+  private readonly waitingProbe: HTMLElement;
+  private readonly probeTitle: HTMLElement;
+  private readonly probeReason: HTMLElement;
   /** The Restart button's label: it enables the stream while that is disabled, since it can't restart. */
   private readonly restartLabel: Text;
   private disabled = false;
@@ -90,6 +98,13 @@ export class Player {
       this.waitingTitle,
       this.waitingReason,
     ]);
+    this.probeTitle = h("p", { className: "player-waiting-title" });
+    this.probeReason = h("p", { className: "player-waiting-reason" });
+    this.waitingProbe = h(
+      "div",
+      { className: "player-waiting-probe", attrs: { hidden: true, "aria-hidden": "true" } },
+      [this.probeTitle, this.probeReason],
+    );
     const backButton = h("button", { className: "button", attrs: { type: "button" } }, [icon("back"), "Back"]);
     this.backButton = backButton;
     backButton.addEventListener("click", () => {
@@ -110,6 +125,7 @@ export class Player {
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
       this.waiting,
+      this.waitingProbe,
       h("div", { className: "player-overlay" }, [this.topBar, this.stats, this.actions]),
     ]);
     this.root.addEventListener("pointermove", () => {
@@ -183,8 +199,13 @@ export class Player {
     this.root.classList.toggle("waiting-for-source", waiting);
     this.root.classList.toggle("disabled", disabled);
     this.waiting.hidden = !waiting && !disabled;
-    setText(this.waitingTitle, disabled ? "This stream is disabled" : "Waiting for the live broadcast");
-    setText(this.waitingReason, disabled ? "Enable it to watch it." : (stream.message ?? ""));
+    this.waitingProbe.hidden = this.waiting.hidden;
+    const waitingTitle = disabled ? "This stream is disabled" : "Waiting for the live broadcast";
+    const waitingReason = disabled ? "Enable it to watch it." : (stream.message ?? "");
+    setText(this.waitingTitle, waitingTitle);
+    setText(this.waitingReason, waitingReason);
+    setText(this.probeTitle, waitingTitle);
+    setText(this.probeReason, waitingReason);
     const restartText = disabled ? "Enable stream" : "Restart stream";
     if (this.restartLabel.data !== restartText) {
       this.restartLabel.data = restartText;
@@ -239,39 +260,28 @@ export class Player {
    * takes that room only while the window shows (see the styles).
    */
   private placeWaiting(top: number, height: number): void {
-    const { style } = this.waiting;
-    // The message is measured where it sits with no room made for it: measured where the room put
-    // it, beside the window, it would seem clear of it, and the next update would move it back.
-    // Without the transition, so that it doesn't play from there and back.
-    style.transition = "none";
-    for (const side of WAITING_SIDES) {
-      style.removeProperty(`--waiting-${side}`);
-    }
-    this.waiting.classList.remove("under-stats");
-    const message = [this.waitingTitle, this.waitingReason];
+    const message = [this.probeTitle, this.probeReason];
     const room = this.waiting.hidden
       ? null
       : waitingRoom(
           { width: this.root.clientWidth, height: this.root.clientHeight },
           {
             left: Math.min(...message.map((line) => line.offsetLeft)),
-            height: this.waitingReason.offsetTop + this.waitingReason.offsetHeight - this.waitingTitle.offsetTop,
+            height: this.probeReason.offsetTop + this.probeReason.offsetHeight - this.probeTitle.offsetTop,
           },
           { top, right: this.stats.offsetLeft + this.stats.offsetWidth, bottom: top + height },
           this.actions.offsetTop,
           STATS_GAP,
         );
+    // Set only when they change, so that an update doesn't break into the slide.
     for (const side of WAITING_SIDES) {
       const pixels = room?.[side];
-      if (pixels !== undefined) {
-        style.setProperty(`--waiting-${side}`, `${String(pixels)}px`);
+      if (pixels === undefined) {
+        this.waiting.style.removeProperty(`--waiting-${side}`);
+      } else {
+        setPixels(this.waiting, `--waiting-${side}`, pixels);
       }
     }
-    this.waiting.classList.toggle("under-stats", room?.fromTop === true);
-    // The message is laid out where it goes before the transition comes back, which then only plays
-    // when the controls show or fade.
-    this.waiting.getBoundingClientRect();
-    style.removeProperty("transition");
   }
 
   /** While the page hears nothing, a line above the stats says so. */

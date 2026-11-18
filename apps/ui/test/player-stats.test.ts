@@ -191,12 +191,8 @@ describe("waitingRoom", () => {
     });
   });
 
-  it("starts it right under the window when there is no room beside it either", () => {
+  it("leaves it in the middle on a screen too small to move it anywhere", () => {
     const short = { top: 83, right: 326, bottom: 261 };
-    expect(waitingRoom({ width: 500, height: 320 }, message, short, 262, 12)).toEqual({
-      top: 273,
-      bottom: 32,
-      fromTop: true,
-    });
+    expect(waitingRoom({ width: 500, height: 320 }, message, short, 262, 12)).toBeNull();
   });
 });

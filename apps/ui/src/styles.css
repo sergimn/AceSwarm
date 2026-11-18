@@ -814,7 +814,8 @@ p.form-error {
   visibility: hidden;
 }
 
-.player-waiting {
+.player-waiting,
+.player-waiting-probe {
   position: absolute;
   inset: 0;
   display: flex;
@@ -824,7 +825,16 @@ p.form-error {
   /* WAITING_PADDING in player-stats.ts, and the fallbacks below. */
   padding: 32px;
   text-align: center;
+}
+
+.player-waiting {
   transition: padding 0.25s ease;
+}
+
+/* An unseen copy of the message, always in the middle, that the player measures (see player.ts). */
+.player-waiting-probe {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /*
@@ -839,12 +849,8 @@ p.form-error {
   padding-left: var(--waiting-left, 32px);
 }
 
-/* No room for all of it: the message starts right under the window, title first. */
-.player.show-overlay .player-waiting.under-stats {
-  justify-content: flex-start;
-}
-
-.player-waiting[hidden] {
+.player-waiting[hidden],
+.player-waiting-probe[hidden] {
   display: none;
 }
 

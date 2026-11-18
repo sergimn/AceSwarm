@@ -100,17 +100,15 @@ export interface WaitingRoom {
   bottom: number;
   /** Only when the message moves beside the window. */
   left?: number;
-  /** When there is no room for all of it: the message starts at `top`, rather than centred. */
-  fromTop?: true;
 }
 
 /**
- * Where the message that says why there is no picture goes while the stats window shows. Null
- * when the message, centred on the screen, is clear of the window and can stay there. Otherwise it
- * moves between the window and the controls. When that space is too small for it (a phone held
- * sideways), it moves beside the window, where it can wrap, and only on a screen too narrow for
- * that does it start right under the window: its title stays in sight, and its last lines can
- * reach the controls. The message is measured where it sits with no room made for it.
+ * Where the message that says why there is no picture goes while the stats window shows, measured
+ * where it sits with no room made for it. Null when the message, centred on the screen, is clear of
+ * the window and can stay there. Otherwise it moves between the window and the controls. When that
+ * space is too small for it (a phone held sideways), it moves beside the window, where it wraps: a
+ * line or two, like the controller's messages, fits there. Null too on a screen too small for
+ * either, where the message stays in the middle.
  */
 export function waitingRoom(
   screen: Size,
@@ -130,5 +128,5 @@ export function waitingRoom(
   const beside = window.right + 2 * gap;
   return screen.width - WAITING_PADDING - beside >= WAITING_BESIDE
     ? { top: window.top, bottom: screen.height - above, left: beside }
-    : { top: below, bottom: WAITING_PADDING, fromTop: true };
+    : null;
 }
