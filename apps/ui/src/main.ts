@@ -6,6 +6,7 @@ import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { onTick, startClock } from "./clock.ts";
 import { errorMessage, placeToasts, setText, toast } from "./dom.ts";
 import { Grid } from "./grid.ts";
+import { trackInputMode } from "./input-mode.ts";
 import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
@@ -145,6 +146,7 @@ class App {
   }
 }
 
+trackInputMode(".tile");
 const app = new App();
 app.connect();
 try {
