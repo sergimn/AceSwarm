@@ -243,8 +243,8 @@ a {
 
 /*
  * The tile under the mouse stands out, or the focused one while keys are used (see input-mode.ts):
- * only ever one. A tile opened with a click keeps focus once its stream is closed, for the keys to
- * go on from, but doesn't stand out.
+ * only ever one. A tile opened with a click keeps focus once its stream is closed, but doesn't
+ * stand out until a key is pressed.
  */
 [data-input="pointer"] .tile:hover,
 [data-input="keys"] .tile:focus {

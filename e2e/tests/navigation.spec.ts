@@ -109,6 +109,8 @@ test("shows the details of one tile only: the one under the mouse, or the one th
   await expect(player).toBeVisible();
   // As a person sees it: the player full screen, before they go back.
   await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  // The overlay with the Back button hides after a few seconds: moving the mouse brings it back.
+  await player.hover();
   await player.getByRole("button", { name: "Back" }).click();
   await expect(player).toBeHidden();
 
@@ -119,7 +121,13 @@ test("shows the details of one tile only: the one under the mouse, or the one th
   await page.locator(".tile", { hasText: "Channel 13" }).hover();
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 13,/)]);
 
-  // The keys go on from the tile that was open, and the tile under the mouse gives way.
+  // The first key only shows where the keys are, on the tile that was open, and the tile under the
+  // mouse gives way: Enter doesn't open a tile the person doesn't see as the one it acts on.
+  await page.keyboard.press("Enter");
+  await expect(player).toBeHidden();
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
+  // The keys then go on from it.
   await page.keyboard.press("ArrowLeft");
   await expect(focused(page)).toHaveAttribute("aria-label", /Channel 11/);
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 11,/)]);

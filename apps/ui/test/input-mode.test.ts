@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { modeAfterKey, pointerMoved } from "../src/input-mode.ts";
+import { keyOnlyShowsFocus, modeAfterKey, pointerMoved } from "../src/input-mode.ts";
 
 describe("modeAfterKey", () => {
   it("means keys for the keys that move focus or act on it", () => {
-    for (const key of ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Up", "Left", "Enter", "Tab"]) {
+    for (const key of ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Up", "Left", "Enter", " ", "Tab"]) {
       expect(modeAfterKey(key, false)).toBe("keys");
     }
   });
@@ -21,6 +21,29 @@ describe("modeAfterKey", () => {
     // Ctrl+Tab and Alt+Left are the browser's.
     expect(modeAfterKey("Tab", true)).toBeUndefined();
     expect(modeAfterKey("ArrowLeft", true)).toBeUndefined();
+  });
+});
+
+describe("keyOnlyShowsFocus", () => {
+  it("shows a focused tile that the pointer hid, instead of moving from it or opening it", () => {
+    for (const key of ["ArrowLeft", "ArrowDown", "Enter", " "]) {
+      expect(keyOnlyShowsFocus("pointer", key, true)).toBe(true);
+    }
+  });
+
+  it("lets Tab move on, as everywhere else", () => {
+    expect(keyOnlyShowsFocus("pointer", "Tab", true)).toBe(false);
+  });
+
+  it("acts at once where focus shows: with keys, or on an element that always shows it", () => {
+    expect(keyOnlyShowsFocus("keys", "ArrowLeft", true)).toBe(false);
+    expect(keyOnlyShowsFocus("keys", "Enter", true)).toBe(false);
+    expect(keyOnlyShowsFocus("pointer", "Enter", false)).toBe(false);
+  });
+
+  it("leaves the keys that don't mean keys alone", () => {
+    expect(keyOnlyShowsFocus("pointer", "Escape", true)).toBe(false);
+    expect(keyOnlyShowsFocus("pointer", "a", true)).toBe(false);
   });
 });
 

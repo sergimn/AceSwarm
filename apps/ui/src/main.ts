@@ -146,7 +146,7 @@ class App {
   }
 }
 
-trackInputMode();
+trackInputMode(".tile");
 const app = new App();
 app.connect();
 try {
