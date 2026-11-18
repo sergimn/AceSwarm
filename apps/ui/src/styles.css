@@ -903,25 +903,33 @@ p.form-error {
  * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
  * picture's left edge (black bars left out), a quarter of the way down it: the player sets
  * `--picture-left` and `--stats-top`. It holds nothing to press, so it never takes a click from
- * the controls.
+ * the controls. It is sized in em throughout, so that its font size scales the whole window:
+ * large enough to read from the sofa on a TV, and a bit smaller on a phone, where it would cover
+ * most of the picture.
  */
 .player-stats {
   position: absolute;
   top: var(--stats-top);
   left: calc(var(--picture-left, 0px) + 24px);
   max-width: min(24em, calc(100% - var(--picture-left, 0px) - 48px));
-  padding: 10px 14px;
+  padding: 0.7em 1em;
   border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 10px;
+  border-radius: 0.7em;
   background: rgb(13 17 23 / 70%);
-  font-size: 0.9em;
+  font-size: 1.35em;
   pointer-events: none;
+}
+
+@media (width <= 500px), (height <= 500px) {
+  .player-stats {
+    font-size: 1.125em;
+  }
 }
 
 .player-stats dl {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 3px 16px;
+  gap: 0.2em 1.1em;
   margin: 0;
 }
 
@@ -975,7 +983,7 @@ p.form-error {
 }
 
 .player-connection {
-  margin: 0 0 6px;
+  margin: 0 0 0.4em;
   color: var(--amber);
 }
 
