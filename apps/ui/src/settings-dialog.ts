@@ -3,7 +3,7 @@ import { api } from "./api.ts";
 import { dialogShell, errorMessage, h, setText, switchSetting, toast, type SwitchSetting } from "./dom.ts";
 import { sharedEnginesHint } from "./hints.ts";
 import type { Navigator } from "./navigation.ts";
-import type { PreviewMode } from "./previews.ts";
+import { effectivePreviewMode, THUMBNAILS_ONLY_TIP, type PreviewMode } from "./preview-mode.ts";
 
 const PREVIEW_LABELS: Record<PreviewMode, string> = { video: "Live video", thumbnails: "Thumbnails only" };
 
@@ -92,11 +92,18 @@ export class SettingsDialog {
   private readonly navigator: Navigator;
   private readonly dialog: HTMLDialogElement;
   private readonly previewButtons: Record<PreviewMode, HTMLButtonElement>;
+  /** Says why Live video is greyed out, under it, while the admin allows thumbnails only. */
+  private readonly thumbnailsOnlyTip: HTMLElement;
   private readonly sharedEngines: SettingSwitch;
   private readonly hotStandby: SettingSwitch;
+  /** This browser's choice. */
+  private previewChoice: PreviewMode;
+  /** The admin allows thumbnails only, as the last snapshot said. */
+  private thumbnailsOnly = false;
 
-  constructor(navigator: Navigator, previewMode: PreviewMode, onPreviewMode: (mode: PreviewMode) => void) {
+  constructor(navigator: Navigator, previewChoice: PreviewMode, onPreviewChoice: (mode: PreviewMode) => void) {
     this.navigator = navigator;
+    this.previewChoice = previewChoice;
     const shell = dialogShell("Settings", () => {
       this.navigator.back();
     });
@@ -104,13 +111,25 @@ export class SettingsDialog {
     const choose = (mode: PreviewMode): HTMLButtonElement => {
       const button = h("button", { className: "segment", text: PREVIEW_LABELS[mode], attrs: { type: "button" } });
       button.addEventListener("click", () => {
-        onPreviewMode(mode);
-        this.markPreviewMode(mode);
+        // While the admin allows thumbnails only, neither choice does anything: the browser's own
+        // choice stays as it was, for when the admin lifts it.
+        if (this.thumbnailsOnly) {
+          return;
+        }
+        this.previewChoice = mode;
+        onPreviewChoice(mode);
+        this.renderPreviews();
       });
       return button;
     };
     this.previewButtons = { video: choose("video"), thumbnails: choose("thumbnails") };
-    this.markPreviewMode(previewMode);
+    // Live video stays focusable when greyed out: a remote reaches it, and its focus shows the tip.
+    this.thumbnailsOnlyTip = h("span", {
+      className: "tip",
+      text: THUMBNAILS_ONLY_TIP,
+      attrs: { id: "thumbnails-only-tip", role: "tooltip", hidden: true },
+    });
+    this.renderPreviews();
     this.sharedEngines = new SettingSwitch(
       "shared-engines",
       "One engine per path",
@@ -136,7 +155,8 @@ export class SettingsDialog {
         className: "segments",
         attrs: { role: "group", "aria-labelledby": "tile-previews-label", "aria-describedby": "tile-previews-hint" },
       },
-      [this.previewButtons.video, this.previewButtons.thumbnails],
+      // The tip comes right after Live video: the styles show it while the mouse is on that or a remote focuses it.
+      [this.previewButtons.video, this.thumbnailsOnlyTip, this.previewButtons.thumbnails],
     );
     shell.body.append(
       h("div", { className: "setting" }, [previewText, previewChoices]),
@@ -161,6 +181,10 @@ export class SettingsDialog {
   }
 
   update(snapshot: Snapshot): void {
+    if (snapshot.tilePreviews.thumbnailsOnly !== this.thumbnailsOnly) {
+      this.thumbnailsOnly = snapshot.tilePreviews.thumbnailsOnly;
+      this.renderPreviews();
+    }
     this.sharedEngines.render(snapshot.sharedEngines.enabled, sharedEnginesHint(snapshot.sharedEngines));
     this.hotStandby.render(
       snapshot.hotStandby.enabled,
@@ -168,9 +192,20 @@ export class SettingsDialog {
     );
   }
 
-  private markPreviewMode(mode: PreviewMode): void {
+  /** Presses what the tiles show, and greys out Live video while the admin allows thumbnails only. */
+  private renderPreviews(): void {
+    const shown = effectivePreviewMode(this.previewChoice, this.thumbnailsOnly);
     for (const [key, button] of Object.entries(this.previewButtons)) {
-      button.setAttribute("aria-pressed", String(key === mode));
+      button.setAttribute("aria-pressed", String(key === shown));
+    }
+    const video = this.previewButtons.video;
+    this.thumbnailsOnlyTip.hidden = !this.thumbnailsOnly;
+    if (this.thumbnailsOnly) {
+      video.setAttribute("aria-disabled", "true");
+      video.setAttribute("aria-describedby", this.thumbnailsOnlyTip.id);
+    } else {
+      video.removeAttribute("aria-disabled");
+      video.removeAttribute("aria-describedby");
     }
   }
 }

@@ -32,14 +32,14 @@ flowchart TB
 
 ## Services
 
-| Service      | Privileges                                          | Role                                                                                                        |
-| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data`                                             |
-| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS and thumbnails; it also reads each [hot standby](#hot-standby) |
-| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats                                                |
-| cleanup      | non-root, read-only, no capabilities                | removes the engines when the stack goes down                                                                |
-| docker-proxy | socket proxy, no other access                       | lets the controller and the cleanup service reach only the container and image API                          |
-| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                                                                        |
+| Service      | Privileges                                          | Role                                                                                                                                       |
+| ------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| controller   | non-root, read-only, no capabilities                | UI, REST API, one supervisor per stream, persistence in `/data`                                                                            |
+| transcoder   | non-root, read-only, no capabilities                | one ffmpeg per stream: full HLS, preview HLS (none with `LOW_CPU_PREVIEWS`) and thumbnails; it also reads each [hot standby](#hot-standby) |
+| netgw        | root with `NET_ADMIN`, `NET_RAW`, `DAC_READ_SEARCH` | WireGuard, policy routing, firewall, path probes, peer stats                                                                               |
+| cleanup      | non-root, read-only, no capabilities                | removes the engines when the stack goes down                                                                                               |
+| docker-proxy | socket proxy, no other access                       | lets the controller and the cleanup service reach only the container and image API                                                         |
+| engine       | starts as root, then uid 1000 with no capabilities  | the Acestream engine                                                                                                                       |
 
 ## Streams
 

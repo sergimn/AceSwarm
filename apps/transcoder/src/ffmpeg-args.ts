@@ -1,5 +1,6 @@
 export type FullMode = "copy" | "transcode";
-export type PreviewMode = "video" | "keyframes";
+/** PREVIEW_MODE's two modes, or thumbnails (no preview) with LOW_CPU_PREVIEWS; see the transcoder's config. */
+export type PreviewMode = "video" | "keyframes" | "thumbnails";
 
 export interface FfmpegPlan {
   source: string;
@@ -49,7 +50,8 @@ function keyframeEvery(plan: FfmpegPlan): string[] {
  *
  * - full: original video when it is H.264 (no re-encode), otherwise H.264; audio to AAC so every
  *   browser can play it.
- * - preview: small H.264 rendition for the grid, no audio.
+ * - preview: small H.264 rendition for the grid, no audio. None in thumbnails mode, which saves
+ *   its encode: its playlist then stays empty.
  * - thumbnail.jpg: refreshed every few seconds, used as a poster.
  */
 export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
@@ -71,8 +73,12 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     "-rw_timeout",
     String(plan.inputTimeoutSeconds * 1_000_000),
   ];
-  if (plan.previewMode === "keyframes") {
-    // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame.
+  // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame. A full
+  // stream that is re-encoded needs every frame decoded, so thumbnails mode leaves that one alone.
+  // ffmpeg reports no progress until every output has a frame, so an H.264 broadcast without IDR
+  // frames never counts as playing in these modes. In thumbnails mode with a copied full stream,
+  // the frames counted are the copied ones: ffmpeg 7 and later count those, 6.x stays at 0.
+  if (plan.previewMode === "keyframes" || (plan.previewMode === "thumbnails" && plan.fullMode === "copy")) {
     input.push("-skip_frame", "nokey");
   }
   input.push("-i", plan.source);
@@ -151,5 +157,5 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     `${plan.directory}/thumbnail.jpg`,
   ];
 
-  return [...input, ...full, ...preview, ...thumbnail];
+  return [...input, ...full, ...(plan.previewMode === "thumbnails" ? [] : preview), ...thumbnail];
 }
