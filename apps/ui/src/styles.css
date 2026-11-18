@@ -98,10 +98,14 @@ a {
   flex-direction: column;
   align-items: center;
   gap: 12px;
+  /* Phone browsers count their toolbar in 100vh: 100dvh keeps Settings at the bottom in view. */
   height: 100vh;
+  height: 100dvh;
   padding: 20px 12px;
-  /* A screen too short for every button scrolls the rail instead of cutting Settings off. */
+  /* A screen too short for every button scrolls the rail instead of cutting Settings off, and the
+     remote's moves keep a button's focus ring clear of its edges. */
   overflow-y: auto;
+  scroll-padding-block: 20px;
   background: var(--surface);
   border-right: 1px solid var(--border);
 }

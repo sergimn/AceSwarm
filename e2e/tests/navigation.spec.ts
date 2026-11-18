@@ -138,11 +138,15 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
 
-  // The Streams dialog lists the streams and no longer holds these settings.
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(settings).toBeFocused();
-  await page.getByRole("button", { name: "Streams", exact: true }).click();
+  // Up the rail, Streams lists the streams and no longer holds these settings.
+  await page.keyboard.press("ArrowUp");
+  await expect(network).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByRole("button", { name: "Streams", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
   const streams = page.getByRole("dialog", { name: "Streams" });
   await expect(streams.locator(".row")).toHaveCount(3);
   await expect(streams.getByRole("switch")).toHaveCount(0);
@@ -151,7 +155,8 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   // The choice is this browser's, and outlasts the page.
   await page.reload();
   await expect(page.locator(".tile")).toHaveCount(3);
-  await settings.click();
+  await settings.focus();
+  await page.keyboard.press("Enter");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
   await expect(video).toHaveAttribute("aria-pressed", "false");
 });
