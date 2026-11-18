@@ -1,0 +1,46 @@
+# Throwaway diagnostics for the rootless Podman stop error on Ubuntu 26.04. Not for main.
+name: Diagnose Podman stop error
+
+on:
+  push:
+    branches: [claude/project-thread-rcjhoc]
+    paths: [.github/workflows/diag-podman-stop.yml, .github/diag/**]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Versions and AppArmor profiles (before Podman is installed)
+        run: .github/diag/podman-stop.sh info
+      - name: Set up rootless Podman as in the E2E
+        timeout-minutes: 10
+        run: e2e/podman.sh setup
+      - name: Versions and AppArmor profiles (after)
+        run: .github/diag/podman-stop.sh info
+      - name: Baseline, Podman CLI
+        timeout-minutes: 5
+        run: .github/diag/podman-stop.sh cli baseline
+      - name: Baseline, docker compose
+        timeout-minutes: 5
+        run: .github/diag/podman-stop.sh compose baseline
+      - name: Experiment, pasta profile may receive TERM and KILL
+        timeout-minutes: 8
+        run: |
+          .github/diag/podman-stop.sh override-on
+          .github/diag/podman-stop.sh cli override
+          .github/diag/podman-stop.sh compose override
+          .github/diag/podman-stop.sh override-off
+      - name: Experiment, slirp4netns instead of pasta
+        timeout-minutes: 8
+        run: |
+          .github/diag/podman-stop.sh slirp-on
+          .github/diag/podman-stop.sh cli slirp4netns
+          .github/diag/podman-stop.sh compose slirp4netns
+      - name: All AppArmor messages of the job
+        if: always()
+        run: sudo journalctl -k --no-pager -o short-precise | grep -i -E 'apparmor="(DENIED|ALLOWED)"' | tail -60
