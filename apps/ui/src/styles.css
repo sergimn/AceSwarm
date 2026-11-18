@@ -545,7 +545,6 @@ a {
   box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
   font-size: 0.85em;
   line-height: 1.35;
-  pointer-events: none;
   visibility: hidden;
   opacity: 0;
   transition:
@@ -553,8 +552,15 @@ a {
     visibility 0.15s;
 }
 
+/*
+ * The tip covers the next setting, so it takes the pointer itself (a press on it presses nothing
+ * under it), and it shows while the pointer is over the button or the tip. With a remote it shows
+ * while the button has focus; with a pointer focus left there by a click doesn't keep it up. A tap
+ * leaves the button hovered until the next one.
+ */
 [aria-disabled="true"]:hover + .tip,
-[aria-disabled="true"]:focus + .tip {
+.tip:hover,
+[data-input="keys"] [aria-disabled="true"]:focus + .tip {
   visibility: visible;
   opacity: 1;
 }

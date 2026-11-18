@@ -111,9 +111,9 @@ export class SettingsDialog {
     const choose = (mode: PreviewMode): HTMLButtonElement => {
       const button = h("button", { className: "segment", text: PREVIEW_LABELS[mode], attrs: { type: "button" } });
       button.addEventListener("click", () => {
-        if (button.getAttribute("aria-disabled") === "true") {
-          // A tap shows why it is greyed out, as the mouse over it or the remote's focus on it do.
-          button.focus();
+        // While the admin allows thumbnails only, neither choice does anything: the browser's own
+        // choice stays as it was, for when the admin lifts it.
+        if (this.thumbnailsOnly) {
           return;
         }
         this.previewChoice = mode;

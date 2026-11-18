@@ -59,7 +59,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 ### Raspberry Pi 5
 
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
-- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`. To save the most, set `LOW_CPU_PREVIEWS=true`: the tiles then only show thumbnails, and Live video is greyed out under **Settings**.
+- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`. To save the most, set `LOW_CPU_PREVIEWS=true`: the tiles then only show thumbnails, and **Live video** is greyed out under **Settings**.
 - Turn on **One engine per path** (under **Settings**) when you run several streams: they then share one engine instead of each starting its own.
 - With WireGuard profiles, [hot standby](#hot-standby) gives each stream an engine on every other path too, so streams × paths engines without **One engine per path**. On a Pi, turn that on, or set `STANDBY_MAX_PATHS=1`, or turn hot standby off.
 - An engine levels off at about its cache plus 150 MB, about 275 MB with the default settings. The Pi's arm64 engine behaved like the x86 one in testing, so an 8 GB Pi has room for several streams with their own engines. The dashboard shows how much each engine really uses.
@@ -178,7 +178,7 @@ flowchart LR
 
 - **controller:** the web UI and API. It runs one supervisor per stream, which creates the stream's engine, watches its health and recovers it.
 - **cleanup:** removes the engines when the whole stack goes down (`docker compose down` or `stop`). A controller restart leaves them running, so the streams play on.
-- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview and thumbnails.
+- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails.
 - **netgw:** the network gateway. Every engine routes through it. It owns the WireGuard tunnels, routes each engine through its path, probes the paths, and counts each engine's peers from connection tracking.
 - **engine:** the Acestream engine. It starts as root only to point its default route at the gateway, then drops to an unprivileged user with no capabilities.
 
