@@ -325,7 +325,8 @@ a {
   display: grid;
   gap: 4px;
   padding: 12px;
-  background: rgb(13 17 23 / 92%);
+  /* Opaque: the tile's name is under the last rows, and would show through. */
+  background: var(--bg);
   font-size: 0.85em;
   transform: translateY(100%);
   transition: transform 0.2s ease;
