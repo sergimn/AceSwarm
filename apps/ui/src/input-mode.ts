@@ -47,7 +47,7 @@ export function pointerMoved(last: ScreenPoint | undefined, next: ScreenPoint): 
 
 /**
  * Keeps the mode in `data-input` on `root`: "keys" until the pointer is used. `hidesFocus` matches
- * the elements whose focus doesn't show with a pointer.
+ * the elements whose focus doesn't show with a pointer, unless the pointer is on them.
  */
 export function trackInputMode(hidesFocus: string, root: HTMLElement = document.body): void {
   let mode: InputMode = "keys";
@@ -59,6 +59,7 @@ export function trackInputMode(hidesFocus: string, root: HTMLElement = document.
     }
   };
   set("keys");
+  let spaceTaken = false;
   // In the capture phase on the window, so that it runs before the page's own key handlers, which
   // leave alone a key it took.
   addEventListener(
@@ -69,10 +70,30 @@ export function trackInputMode(hidesFocus: string, root: HTMLElement = document.
         return;
       }
       const focused = document.activeElement;
-      if (keyOnlyShowsFocus(mode, event.key, focused instanceof Element && focused.matches(hidesFocus))) {
+      // A focused element under the mouse stands out anyway.
+      const hidden = focused instanceof HTMLElement && focused.matches(hidesFocus) && !focused.matches(":hover");
+      const taken = keyOnlyShowsFocus(mode, event.key, hidden);
+      if (event.key === " ") {
+        spaceTaken = taken;
+      }
+      if (taken && focused instanceof HTMLElement) {
         event.preventDefault();
+        // Where the person can see it, even when the page was scrolled away from it.
+        focused.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
       set(next);
+    },
+    true,
+  );
+  // Some browsers press a button when Space comes up, whatever its keydown did.
+  addEventListener(
+    "keyup",
+    (event) => {
+      if (event.key !== " " || !spaceTaken) {
+        return;
+      }
+      spaceTaken = false;
+      event.preventDefault();
     },
     true,
   );
