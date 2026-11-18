@@ -855,20 +855,21 @@ p.form-error {
 
 /*
  * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
- * picture's left edge and a quarter of the way down it; the player sets `--picture-*` to where the
- * picture is drawn, black bars left out, or to the whole screen while there is none.
+ * picture's left edge (black bars left out), a quarter of the way down it: the player sets
+ * `--picture-left` and `--stats-top`. It holds nothing to press, so it never takes a click from
+ * the controls.
  */
 .player-stats {
   position: absolute;
-  top: calc(var(--picture-top, 0px) + var(--picture-height, 100%) / 4);
+  top: var(--stats-top);
   left: calc(var(--picture-left, 0px) + 24px);
   max-width: min(24em, calc(100% - var(--picture-left, 0px) - 48px));
   padding: 10px 14px;
   border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 10px;
-  background: rgb(13 17 23 / 65%);
-  backdrop-filter: blur(4px);
+  background: rgb(13 17 23 / 70%);
   font-size: 0.9em;
+  pointer-events: none;
 }
 
 .player-stats dl {
@@ -904,13 +905,18 @@ p.form-error {
   vertical-align: 0.08em;
 }
 
+/* The controls paint above the stats window, should a very small screen leave no room between them. */
 .player-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
 .player-top {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;

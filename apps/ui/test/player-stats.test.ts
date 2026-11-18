@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus, StandbyView, StreamView } from "@aceswarm/shared/api-types";
-import { pictureRect, PLAYER_STATS, playerStats } from "../src/player-stats.ts";
+import { pictureRect, PLAYER_STATS, playerStats, statsTop } from "../src/player-stats.ts";
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
 const ago = (seconds: number): string => new Date(NOW - seconds * 1000).toISOString();
@@ -139,5 +139,22 @@ describe("pictureRect", () => {
       width: 0,
       height: 0,
     });
+  });
+});
+
+describe("statsTop", () => {
+  const picture = { left: 0, top: 90, width: 1280, height: 720 };
+  const room = { top: 83, bottom: 878 };
+
+  it("puts the window a quarter of the way down the picture", () => {
+    expect(statsTop(picture, 160, room)).toBe(270);
+  });
+
+  it("moves it up on a short screen, so that it ends above what is under it", () => {
+    expect(statsTop(picture, 160, { top: 60, bottom: 400 })).toBe(240);
+  });
+
+  it("never moves it above the title", () => {
+    expect(statsTop(picture, 500, { top: 60, bottom: 400 })).toBe(60);
   });
 });

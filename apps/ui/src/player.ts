@@ -6,10 +6,12 @@ import { errorMessage, h, icon, setText, toast } from "./dom.ts";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
 import { staleNotice, type PageTime } from "./liveness.ts";
 import type { Navigator } from "./navigation.ts";
-import { pictureRect, PLAYER_STATS, playerStats, type PlayerStatKey } from "./player-stats.ts";
+import { pictureRect, PLAYER_STATS, playerStats, statsTop, type PlayerStatKey } from "./player-stats.ts";
 import type { WatchReporter } from "./watch.ts";
 
 const OVERLAY_MS = 4000;
+/** The least room left between the stats window and the title above it, or the buttons below it. */
+const STATS_GAP = 12;
 
 /** Full screen playback of the full-quality HLS output, with sound. */
 export class Player {
@@ -20,6 +22,7 @@ export class Player {
    * The live stats, one to a line, in a window over the picture: it sits at the picture's left,
    * a quarter of the way down, whatever the stream's shape (see `placeStats`).
    */
+  private readonly stats: HTMLElement;
   private readonly statRows: { key: PlayerStatKey; row: HTMLElement; value: HTMLElement }[];
   /** Under the stats while the page hears nothing from the controller: they are old. */
   private readonly connection: HTMLElement;
@@ -45,6 +48,9 @@ export class Player {
    * included, whether or not the browser could enter full screen.
    */
   private readonly clock: HTMLElement;
+  /** The title and the clock, and Back and Restart: the stats window stays between them. */
+  private readonly topBar: HTMLElement;
+  private readonly actions: HTMLElement;
   private hls: Hls | undefined;
   private streamId: string | undefined;
   private overlayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -63,7 +69,7 @@ export class Player {
       return { key, row, value };
     });
     this.connection = h("p", { className: "player-connection", attrs: { hidden: true } });
-    const stats = h("div", { className: "player-stats" }, [
+    this.stats = h("div", { className: "player-stats" }, [
       h(
         "dl",
         {},
@@ -92,12 +98,12 @@ export class Player {
     });
     this.clock = h("time", { className: "player-clock" });
     startClock(this.clock);
-    const top = h("div", { className: "player-top" }, [this.title, this.clock]);
-    const actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
+    this.topBar = h("div", { className: "player-top" }, [this.title, this.clock]);
+    this.actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
       this.waiting,
-      h("div", { className: "player-overlay" }, [top, stats, actions]),
+      h("div", { className: "player-overlay" }, [this.topBar, this.stats, this.actions]),
     ]);
     this.root.addEventListener("pointermove", () => {
       this.showOverlay();
@@ -182,9 +188,13 @@ export class Player {
   /**
    * Puts the stats window at the left of the picture, a quarter of the way down it, wherever the
    * picture is drawn: a stream that isn't 16:9 leaves black bars, above and below or on the sides.
-   * While there is no picture (none loaded yet, or none shows), the whole screen counts.
+   * While there is no picture (none loaded yet, or none shows), the whole screen counts. On a short
+   * screen, the window moves up rather than cover Back and Restart, or why there is no picture.
    */
   private placeStats(): void {
+    if (this.root.hidden) {
+      return;
+    }
     const shown =
       !this.root.classList.contains("waiting-for-source") &&
       !this.root.classList.contains("disabled") &&
@@ -194,12 +204,19 @@ export class Player {
       { width: this.root.clientWidth, height: this.root.clientHeight },
       shown ? { width: this.video.videoWidth, height: this.video.videoHeight } : null,
     );
-    for (const [name, pixels] of Object.entries(picture)) {
-      const value = `${String(pixels)}px`;
-      if (this.root.style.getPropertyValue(`--picture-${name}`) !== value) {
-        this.root.style.setProperty(`--picture-${name}`, value);
-      }
+    setPixels(this.stats, "--picture-left", picture.left);
+    // The window, the controls and the waiting message all cover the player, so their offsets
+    // compare. Reading them lays the page out once, with the window's new width.
+    let bottom = this.actions.offsetTop;
+    const right = this.stats.offsetLeft + this.stats.offsetWidth;
+    if (!this.waiting.hidden && Math.min(this.waitingTitle.offsetLeft, this.waitingReason.offsetLeft) < right) {
+      bottom = Math.min(bottom, this.waitingTitle.offsetTop);
     }
+    const top = statsTop(picture, this.stats.offsetHeight, {
+      top: this.topBar.offsetTop + this.topBar.offsetHeight + STATS_GAP,
+      bottom: bottom - STATS_GAP,
+    });
+    setPixels(this.stats, "--stats-top", top);
   }
 
   /** While the page hears nothing, a line under the stats says so. */
@@ -314,5 +331,13 @@ export class Player {
       .catch((error: unknown) => {
         toast(errorMessage(error), "error");
       });
+  }
+}
+
+/** Sets a length in pixels on an element's style, leaving it alone when it already has it. */
+function setPixels(element: HTMLElement, property: string, pixels: number): void {
+  const value = `${String(pixels)}px`;
+  if (element.style.getPropertyValue(property) !== value) {
+    element.style.setProperty(property, value);
   }
 }

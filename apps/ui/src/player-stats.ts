@@ -78,3 +78,12 @@ export function pictureRect(box: Size, picture: Size | null): Rect {
   const height = wider ? (picture.height * box.width) / picture.width : box.height;
   return { left: (box.width - width) / 2, top: (box.height - height) / 2, width, height };
 }
+
+/**
+ * Where the stats window's top goes: a quarter of the way down the picture. On a screen too short
+ * for that, it moves up so that its bottom stays at `room.bottom` (above Back and Restart, or the
+ * message that says why there is no picture), but never above `room.top` (under the title).
+ */
+export function statsTop(picture: Rect, height: number, room: { top: number; bottom: number }): number {
+  return Math.max(room.top, Math.min(picture.top + picture.height / 4, room.bottom - height));
+}
