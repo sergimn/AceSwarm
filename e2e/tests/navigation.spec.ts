@@ -399,11 +399,15 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   await video.click({ force: true });
   await expect(video).toHaveAttribute("aria-pressed", "false");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
-  // The pointer can move onto the tip, which covers the next setting's switch at this size: a press
-  // there presses nothing under it. With the pointer gone, the tip goes, though the click left focus
-  // on Live video.
+  // The click left focus on Live video, but with the pointer gone the tip goes: it covers the next
+  // setting's switch at this size.
+  await page.mouse.move(0, 0);
+  await expect(video).toBeFocused();
+  await expect(tip).toBeHidden();
+  // The pointer can move onto the tip, and a press there presses nothing under it.
   const sharing = dialog.getByRole("switch", { name: "One engine per path" });
   const sharingWas = await sharing.getAttribute("aria-checked");
+  await video.hover();
   await tip.hover({ timeout: 5000 });
   await expect(tip).toBeVisible();
   const covered = overlap((await tip.boundingBox())!, (await sharing.boundingBox())!);
@@ -412,7 +416,8 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   await expect(sharing).toHaveAttribute("aria-checked", sharingWas!);
   await page.mouse.move(0, 0);
   await expect(tip).toBeHidden();
-  // The browser's own choice stays as it was, and no tile asked for a live preview.
+  // A press on the switch would have saved its setting (the switch only turns once that is done):
+  // nothing was saved. The browser's own choice stays as it was, and no tile asked for a live preview.
   expect(await choiceWrites()).toEqual([]);
   expect(await page.evaluate<string | null>('localStorage.getItem("aceswarm.previewMode")')).toBe("video");
   expect(saved).toEqual([]);
