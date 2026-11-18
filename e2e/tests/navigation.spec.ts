@@ -101,15 +101,22 @@ test("closes dialogs with Back and returns focus", async ({ page }) => {
 test("reaches Settings at the bottom of the rail with the remote, and the browser keeps the tile previews", async ({
   page,
 }) => {
-  await page.goto("/");
-  // Once the page has its streams it has also moved the focus to the first tile, as it does when
-  // it opens: from here on the focus is the test's.
-  await expect(page.locator(".tile")).toHaveCount(3);
   const network = page.getByRole("button", { name: "Network", exact: true });
   const settings = page.getByRole("button", { name: "Settings", exact: true });
-  await network.focus();
-  await page.keyboard.press("ArrowDown");
-  await expect(settings).toBeFocused();
+  /** From the first tile, which has the focus once the page opens, to Settings at the end of the rail. */
+  const toSettings = async (): Promise<void> => {
+    await expect(page.locator(".tile")).toHaveCount(3);
+    await expect(page.locator(".tile").first()).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.locator(".rail-button:focus")).toHaveCount(1);
+    // Three presses reach Settings from any button the tile leads to: Down stops there.
+    for (let press = 0; press < 3; press += 1) {
+      await page.keyboard.press("ArrowDown");
+    }
+    await expect(settings).toBeFocused();
+  };
+  await page.goto("/");
+  await toSettings();
   await page.keyboard.press("Enter");
 
   const dialog = page.getByRole("dialog", { name: "Settings" });
@@ -162,15 +169,20 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await page.keyboard.press("Escape");
   await expect(streams).toBeHidden();
 
-  // Right from Settings goes back to the streams, not to the footer's links beside it.
-  await settings.focus();
+  // Down at the end of the rail stays on Settings, and Right goes back to the streams: the
+  // footer's links beside it lead out of the app.
+  await page.keyboard.press("ArrowDown");
+  await expect(network).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(settings).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(settings).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(page.locator(".tile:focus")).toHaveCount(1);
 
   // The choice is this browser's, and outlasts the page.
   await page.reload();
-  await expect(page.locator(".tile")).toHaveCount(3);
-  await settings.focus();
+  await toSettings();
   await page.keyboard.press("Enter");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
   await expect(video).toHaveAttribute("aria-pressed", "false");

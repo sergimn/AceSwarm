@@ -21,14 +21,14 @@ interface OpenLayer extends Layer {
 }
 
 /**
- * A part of the page that left and right only reach when nothing else is that way, unless the focus
- * is in it already. The page's footer is one: Settings at the bottom of the rail sits beside its
- * links, and the way back to the streams from there is right, not a link that leaves the app.
+ * The end of the page, its footer: the focus only gets there from inside it, or up or down from
+ * what scrolls with it (the last tiles). Settings at the bottom of the sticky rail sits beside the
+ * footer's links, and OK on one of them leaves the app, so neither Right nor Down from it lands there.
  */
-const SIDEWAYS_LAST = "[data-nav-sideways-last]";
+const PAGE_END = "[data-nav-page-end]";
 
-function isSidewaysLast(element: HTMLElement): boolean {
-  return element.closest(SIDEWAYS_LAST) !== null;
+function inPageEnd(element: HTMLElement): boolean {
+  return element.closest(PAGE_END) !== null;
 }
 
 function toBox(element: Element): Box {
@@ -227,24 +227,21 @@ export class Navigator {
       items[0]?.focus();
       return;
     }
-    const others = items.filter((item) => item !== current);
+    const part = stickyPart(current, root);
+    const vertical = direction === "up" || direction === "down";
+    const others = items.filter(
+      (item) =>
+        item !== current && (!inPageEnd(item) || inPageEnd(current) || (vertical && stickyPart(item, root) === part)),
+    );
     // Up and down, along which pages and dialogs scroll, try the elements that scroll with the
     // focused one first. Otherwise, in a scrolled dialog, its sticky header would be nearer than
     // what scrolled out of view under it. Left and right compare everything as it is on screen, so
-    // the grid's left edge leads to the sticky rail beside it, but try what isn't in a
-    // `SIDEWAYS_LAST` part first.
+    // the grid's left edge leads to the sticky rail beside it.
     let next: HTMLElement | undefined;
-    if (direction === "up" || direction === "down") {
-      const part = stickyPart(current, root);
+    if (vertical) {
       next = nearest(
         current,
         others.filter((item) => stickyPart(item, root) === part),
-        direction,
-      );
-    } else if (!isSidewaysLast(current)) {
-      next = nearest(
-        current,
-        others.filter((item) => !isSidewaysLast(item)),
         direction,
       );
     }
