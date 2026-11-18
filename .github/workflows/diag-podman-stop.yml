@@ -15,32 +15,29 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Versions and AppArmor profiles (before Podman is installed)
-        run: .github/diag/podman-stop.sh info
       - name: Set up rootless Podman as in the E2E
         timeout-minutes: 10
         run: e2e/podman.sh setup
-      - name: Versions and AppArmor profiles (after)
+      - name: Versions and AppArmor profiles
         run: .github/diag/podman-stop.sh info
-      - name: Baseline, Podman CLI
-        timeout-minutes: 5
-        run: .github/diag/podman-stop.sh cli baseline
       - name: Baseline, docker compose
         timeout-minutes: 5
         run: .github/diag/podman-stop.sh compose baseline
-      - name: Experiment, pasta profile may receive TERM and KILL
+      - name: Experiment, pasta profile may receive TERM from podman
         timeout-minutes: 8
         run: |
           .github/diag/podman-stop.sh override-on
           .github/diag/podman-stop.sh cli override
           .github/diag/podman-stop.sh compose override
           .github/diag/podman-stop.sh override-off
-      - name: Experiment, slirp4netns instead of pasta
+      - name: Baseline again, with the packaged profile restored
+        timeout-minutes: 5
+        run: .github/diag/podman-stop.sh compose restored
+      - name: Experiment, pasta profile disabled
         timeout-minutes: 8
         run: |
-          .github/diag/podman-stop.sh slirp-on
-          .github/diag/podman-stop.sh cli slirp4netns
-          .github/diag/podman-stop.sh compose slirp4netns
+          .github/diag/podman-stop.sh disable-on
+          .github/diag/podman-stop.sh compose disabled
       - name: All AppArmor messages of the job
         if: always()
         run: sudo journalctl -k --no-pager -o short-precise | grep -i -E 'apparmor="(DENIED|ALLOWED)"' | tail -60

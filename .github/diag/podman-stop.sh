@@ -132,27 +132,28 @@ EOF
   podman volume prune -f >/dev/null 2>&1
 }
 
-# Experiment: let pasta's profile receive signals through its local include, if it has one.
+# Experiment: give Ubuntu's pasta profile a local include (it has none) holding the one rule the
+# denial asks for, as a host admin would.
 override_on() {
-  local profile
-  profile="$(grep -l -E '^\s*profile pasta' /etc/apparmor.d/* 2>/dev/null | head -1)"
-  hr "pasta profile file: ${profile:-none}"
-  [[ -n "$profile" ]] || return 1
-  local include
-  include="$(grep -o -E 'include if exists <local/[^>]+>' "$profile" | sed -E 's/.*<(local\/[^>]+)>.*/\1/' | head -1)"
-  echo "local include: ${include:-none}"
-  [[ -n "$include" ]] || return 1
-  echo "  signal (receive) set=(term, kill)," | sudo tee -a "/etc/apparmor.d/$include"
+  local profile=/etc/apparmor.d/usr.bin.pasta
+  sudo cp "$profile" "$RUNNER_TEMP/usr.bin.pasta.orig"
+  sudo sed -i 's|^}$|  include if exists <local/usr.bin.pasta>\n}|' "$profile"
+  echo "signal (receive) set=(term) peer=podman," | sudo tee /etc/apparmor.d/local/usr.bin.pasta
+  hr "$profile with the include"
+  tail -5 "$profile"
   sudo apparmor_parser -r "$profile" && echo "reloaded $profile"
-  echo "$profile" >"$RUNNER_TEMP/diag-profile"
-  echo "$include" >"$RUNNER_TEMP/diag-include"
 }
 override_off() {
-  local profile include
-  profile="$(cat "$RUNNER_TEMP/diag-profile" 2>/dev/null)" || return 0
-  include="$(cat "$RUNNER_TEMP/diag-include")"
-  sudo sed -i '/signal (receive) set=(term, kill),/d' "/etc/apparmor.d/$include"
-  sudo apparmor_parser -r "$profile" && echo "restored $profile"
+  sudo cp "$RUNNER_TEMP/usr.bin.pasta.orig" /etc/apparmor.d/usr.bin.pasta
+  sudo truncate -s 0 /etc/apparmor.d/local/usr.bin.pasta
+  sudo apparmor_parser -r /etc/apparmor.d/usr.bin.pasta && echo "restored the packaged profile"
+}
+
+# Experiment: no AppArmor profile for pasta at all.
+disable_on() {
+  sudo ln -sf /etc/apparmor.d/usr.bin.pasta /etc/apparmor.d/disable/usr.bin.pasta
+  sudo apparmor_parser -R /etc/apparmor.d/usr.bin.pasta && echo "unloaded the pasta profile"
+  sudo aa-status 2>&1 | grep -E 'pasta' || echo "no pasta profile loaded"
 }
 
 # Experiment: slirp4netns instead of pasta for the rootless netns.
@@ -171,8 +172,9 @@ case "${1:-}" in
   override-on) override_on ;;
   override-off) override_off ;;
   slirp-on) slirp_on ;;
+  disable-on) disable_on ;;
   *)
-    echo "usage: $0 info|cli TAG|compose TAG|override-on|override-off|slirp-on" >&2
+    echo "usage: $0 info|cli TAG|compose TAG|override-on|override-off|disable-on|slirp-on" >&2
     exit 2
     ;;
 esac
