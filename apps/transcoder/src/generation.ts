@@ -110,8 +110,11 @@ export class Generation {
     return now - this.flowingSince >= patienceMs;
   }
 
+  /** Whether the broadcast sends data now, as far as the session's live edge tells (see `LiveEdge`). */
   private edgeMoves(): boolean {
-    return this.watch?.edge.movedWithin(EDGE_FRESH_MS) ?? true;
+    // A session with no live position has output published as it comes, and nothing to tell either.
+    const edge = this.watch?.edge;
+    return edge === undefined || edge.state() === "none" || edge.movedWithin(EDGE_FRESH_MS);
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */

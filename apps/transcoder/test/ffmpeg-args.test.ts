@@ -45,6 +45,7 @@ describe("buildFfmpegArgs", () => {
 
   it("decodes only key frames in keyframes mode", () => {
     const args = buildFfmpegArgs({ ...PLAN, previewMode: "keyframes" });
+    expect(valueAfter(args, "-skip_frame")).toBe("nokey");
     expect(args.indexOf("-skip_frame")).toBeLessThan(args.indexOf("-i"));
     expect(args).toContain("scale=-2:270");
     expect(buildFfmpegArgs(PLAN)).toContain("fps=15,scale=-2:270");

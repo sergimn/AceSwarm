@@ -8,7 +8,8 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveEdge } from "../src/live-edge.ts";
-import { KEY_FRAMES_PATIENCE_MS, Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { KEY_FRAMES_PATIENCE_MS } from "../src/key-frames.ts";
+import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 
 const H264 = "  Stream #0:0[0x100]: Video: h264 (High), yuv420p(progressive), 1280x720, 25 fps\n";
 const MPEG2 = "  Stream #0:0[0x100]: Video: mpeg2video (Main), yuv420p(tv), 720x576, 25 fps\n";
@@ -24,6 +25,8 @@ function fakeFfmpeg(): ChildProcess {
     killed: false,
     kill: () => {
       Object.assign(child, { killed: true });
+      // ffmpeg 9 prints a last block as it is stopped, though it printed none before.
+      (child.stdout as PassThrough).write("frame=119\nfps=25\nprogress=end\n");
       return true;
     },
   });
@@ -134,15 +137,17 @@ describe("Pipeline decoding key frames only", () => {
     for (let step = 0; step <= 3; step += 1) {
       clock.now += step === 0 ? 0 : 1000;
       const last = 5000 + clock.now / 1000;
-      edges[run]?.edge.observe({ status: "dl", downloaded: 100 + step * 100, last, pos: last });
+      edges[run]?.edge.observe({ status: "dl", downloaded: clock.now, last, pos: last });
     }
   }
 
-  /** The live edge of the first run moves on, as the broadcast sends new data. */
+  /** The live edges move on, as the broadcast sends new data. */
   function moves(seconds: number): void {
     clock.now += seconds * 1000;
     const last = 5000 + clock.now / 1000;
-    edges[0]?.edge.observe({ status: "dl", downloaded: 1000, last, pos: last });
+    for (const { edge } of edges) {
+      edge.observe({ status: "dl", downloaded: clock.now, last, pos: last });
+    }
   }
 
   /** Waits until `count` ffmpeg runs started (a run starts after its directories exist). */
@@ -351,8 +356,6 @@ describe("Pipeline decoding key frames only", () => {
   it("gives up on a handover that timed out instead of starting it again", async () => {
     const instance = start();
     await instance.start("http://e1/play", false);
-    await opened();
-    await frames(50);
     await instance.start("http://e2/play", true);
     await opened(1);
     await instance.sync();
@@ -432,8 +435,90 @@ describe("Pipeline decoding key frames only", () => {
     expect(skipsFrames(runs[1])).toBe(true);
   });
 
-  it("waits 20 seconds, as the documentation says", () => {
-    expect(KEY_FRAMES_PATIENCE_MS).toBe(20_000);
+  it("takes no frame for a sign of key frames from the last block of a run that was stopped", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    await opened();
+    await instance.sync();
+    // A source replaced before it showed anything: ffmpeg prints a last block, with the frames it copied.
+    await instance.start("http://e2/play", false);
+    await opened(1);
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "restart", "all-frames"]);
+    expect(skipsFrames(runs[2])).toBe(false);
+  });
+
+  it("takes no frame for a sign of key frames from the last block of a source it stopped as stale", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    // The broadcast stops: the engine keeps answering, with the same live edge, until the source is stale.
+    clock.now += 61_000;
+    edges[0]?.edge.observe({ status: "dl", downloaded: clock.now, last: 5000, pos: 5000 });
+    await instance.sync();
+    expect(children[0]?.killed).toBe(true);
+    await nextTurn();
+
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    await opened(1);
+    live(1);
+    await instance.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000);
+    await instance.sync();
+    await runsStarted(3);
+    expect(skipsFrames(runs[2])).toBe(false);
+  });
+
+  it("counts a session without a live position, whose output is published as it comes", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    for (let poll = 0; poll < 10; poll += 1) {
+      edges[0]?.edge.observe({ status: "dl", downloaded: 100, last: undefined, pos: undefined });
+    }
+    expect(instance.status().liveEdge?.state).toBe("none");
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await runsStarted(2);
+  });
+
+  it("does not start the wait over for a short pause of the live edge", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    for (let step = 0; step < 6; step += 1) {
+      moves(5);
+      clock.now += 5000;
+      await instance.sync();
+    }
+    await runsStarted(2);
+  });
+
+  it("does not count a session whose live edge moves but is not verified as live yet", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    // The edge moves, but the session downloads nothing: it may serve an old window.
+    for (let step = 0; step < 12; step += 1) {
+      clock.now += 5000;
+      const last = 5000 + clock.now / 1000;
+      edges[0]?.edge.observe({ status: "dl", downloaded: 100, last, pos: last });
+      await instance.sync();
+    }
+    expect(instance.status().liveEdge?.state).toBe("waiting");
+    await noMoreRuns(1);
+  });
+
+  it("waits 30 seconds, as the documentation says", () => {
+    expect(KEY_FRAMES_PATIENCE_MS).toBe(30_000);
   });
 
   it("opens the source again when the run that decodes every frame fails before any video", async () => {
