@@ -2,7 +2,7 @@
 
 Ace Swarm collects your Acestream streams in one place. You watch them in a browser that works with a TV remote. It keeps them playing and shows how healthy each one is.
 
-- **A grid of live previews.** Select a tile to watch the stream full screen. Hover or focus a tile to see:
+- **A grid of live previews.** Select a tile to watch the stream full screen. Point at a tile with the mouse, or move to it with the remote, to see:
   - how fresh the picture is ("Now" while new frames arrive),
   - how many peers are actually sending data (and how many the engine says are connected),
   - where the peers sending data are from, as flags.
@@ -87,7 +87,7 @@ echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/90-ping
 sudo sysctl --system
 ```
 
-On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it. The containers are gone anyway.
+On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it ([Ubuntu bug 2154379](https://bugs.launchpad.net/ubuntu/+source/passt/+bug/2154379)). Compose then quits early: the last container stays behind (stopped), and so do the stack's networks and, with `-v`, its volumes. The next `docker compose up` still starts the stack.
 
 ## WireGuard
 

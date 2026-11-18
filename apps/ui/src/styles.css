@@ -252,16 +252,25 @@ a {
     box-shadow 0.15s ease;
 }
 
-.tile:hover,
-.tile:focus {
+/*
+ * The tile under the mouse stands out, or the focused one while keys are used (see input-mode.ts):
+ * only ever one. A tile opened with a click keeps focus once its stream is closed, but doesn't
+ * stand out until a key is pressed.
+ */
+[data-input="pointer"] .tile:hover,
+[data-input="keys"] .tile:focus {
   transform: scale(1.03);
   z-index: 1;
 }
 
-.tile:focus {
+[data-input="keys"] .tile:focus {
   box-shadow:
     var(--focus),
     0 12px 32px rgb(0 0 0 / 50%);
+}
+
+[data-input="pointer"] .tile:focus-visible {
+  box-shadow: none;
 }
 
 .tile-media {
@@ -336,14 +345,15 @@ a {
   display: grid;
   gap: 4px;
   padding: 12px;
-  background: rgb(13 17 23 / 92%);
+  /* Opaque: the tile's name is under the last rows, and would show through. */
+  background: var(--bg);
   font-size: 0.85em;
   transform: translateY(100%);
   transition: transform 0.2s ease;
 }
 
-.tile:hover .tile-stats,
-.tile:focus .tile-stats {
+[data-input="pointer"] .tile:hover .tile-stats,
+[data-input="keys"] .tile:focus .tile-stats {
   transform: translateY(0);
 }
 

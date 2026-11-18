@@ -30,6 +30,22 @@ function focused(page: Page) {
   return page.locator(":focus");
 }
 
+/**
+ * The labels of the tiles that show their details (Freshness, Peers...): those slide up over the
+ * picture, and stay below it, out of sight, on the others. Read once they stopped sliding, since a
+ * tile whose details are on their way up shows none yet.
+ */
+async function detailsShown(page: Page): Promise<string[]> {
+  return page.evaluate<string[]>(`(async () => {
+    const tiles = [...document.querySelectorAll(".tile")];
+    const offset = (tile) => new DOMMatrix(getComputedStyle(tile.querySelector(".tile-stats")).transform).f;
+    tiles.forEach(offset);
+    const slides = document.getAnimations().filter((animation) => animation instanceof CSSTransition);
+    await Promise.all(slides.map((slide) => slide.finished.catch(() => undefined)));
+    return tiles.filter((tile) => offset(tile) === 0).map((tile) => tile.getAttribute("aria-label"));
+  })()`);
+}
+
 test("moves between tiles with the arrow keys", async ({ page }) => {
   await page.goto("/");
   const tiles = page.locator(".tile");
@@ -57,6 +73,40 @@ test("reaches the rail from the grid on a large screen too", async ({ page }) =>
   await expect(page.locator(".rail-button:focus")).toHaveCount(1);
 });
 
+test("leaves full screen when Back comes before the browser went full screen", async ({ page }) => {
+  // A TV can take a while to go full screen, and OK then Back at once on its remote closes the
+  // player before it has. Here the browser goes full screen only once the player has closed.
+  await page.addInitScript(`{
+    const requestFullscreen = Element.prototype.requestFullscreen;
+    window.fullscreenRequests = [];
+    Element.prototype.requestFullscreen = function (options) {
+      const closed = new Promise((resolve) => {
+        const check = () => (this.hidden ? resolve() : setTimeout(check, 20));
+        check();
+      });
+      const request = closed.then(() => requestFullscreen.call(this, options));
+      window.fullscreenRequests.push(request.then(() => "entered", (error) => error.name));
+      return request;
+    };
+  }`);
+  await page.goto("/");
+  const tile = page.locator(".tile", { hasText: "Channel 12" });
+  await tile.focus();
+  await page.keyboard.press("Enter");
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(player).toBeHidden();
+
+  // The browser went full screen after all, with the closed player: the page leaves it at once.
+  expect(await page.evaluate<string[]>("Promise.all(window.fullscreenRequests)")).toEqual(["entered"]);
+  await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement === null")).toBe(true);
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  // The grid answers the remote again.
+  await page.keyboard.press("ArrowRight");
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 13/);
+});
+
 test("opens a stream full screen and goes back with the remote's Back key", async ({ page }) => {
   await page.goto("/");
   const tile = page.locator(".tile", { hasText: "Channel 12" });
@@ -82,6 +132,39 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   await page.keyboard.press("Escape");
   await expect(player).toBeHidden();
   await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  // With the remote, the tile it is on shows its details.
+  await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
+});
+
+test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".tile", { hasText: "Channel 12" }).click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  // As a person sees it: the player full screen, before they go back.
+  await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  // The overlay with the Back button hides after a few seconds: moving the mouse brings it back.
+  await player.hover();
+  await player.getByRole("button", { name: "Back" }).click();
+  await expect(player).toBeHidden();
+
+  // The tile keeps focus, for the remote to go on from, but with the mouse it shows no details:
+  // they would stay up, over its picture, and another tile under the mouse would show its own too.
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  await expect.poll(() => detailsShown(page)).toEqual([]);
+  await page.locator(".tile", { hasText: "Channel 13" }).hover();
+  await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 13,/)]);
+
+  // The first key only shows where the keys are, on the tile that was open, and the tile under the
+  // mouse gives way: Enter doesn't open a tile the person doesn't see as the one it acts on.
+  await page.keyboard.press("Enter");
+  await expect(player).toBeHidden();
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
+  // The keys then go on from it.
+  await page.keyboard.press("ArrowLeft");
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 11/);
+  await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 11,/)]);
 });
 
 test("closes dialogs with Back and returns focus", async ({ page }) => {
