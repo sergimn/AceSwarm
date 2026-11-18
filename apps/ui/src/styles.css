@@ -100,7 +100,7 @@ a {
   gap: 12px;
   height: 100vh;
   padding: 20px 12px;
-  /* A screen too short for every button scrolls the rail instead of cutting Options off. */
+  /* A screen too short for every button scrolls the rail instead of cutting Settings off. */
   overflow-y: auto;
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -138,7 +138,7 @@ a {
   box-shadow: var(--focus);
 }
 
-/* Options sits at the bottom of the rail, apart from the actions on streams and paths. */
+/* Settings sits at the bottom of the rail, apart from the actions on streams and paths. */
 .rail-end {
   margin-top: auto;
 }

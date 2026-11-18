@@ -98,7 +98,7 @@ test("closes dialogs with Back and returns focus", async ({ page }) => {
   await expect(network).toBeFocused();
 });
 
-test("reaches Options at the bottom of the rail with the remote, and the browser keeps the tile previews", async ({
+test("reaches Settings at the bottom of the rail with the remote, and the browser keeps the tile previews", async ({
   page,
 }) => {
   await page.goto("/");
@@ -106,13 +106,13 @@ test("reaches Options at the bottom of the rail with the remote, and the browser
   // it opens: from here on the focus is the test's.
   await expect(page.locator(".tile")).toHaveCount(3);
   const network = page.getByRole("button", { name: "Network", exact: true });
-  const options = page.getByRole("button", { name: "Options", exact: true });
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
   await network.focus();
   await page.keyboard.press("ArrowDown");
-  await expect(options).toBeFocused();
+  await expect(settings).toBeFocused();
   await page.keyboard.press("Enter");
 
-  const dialog = page.getByRole("dialog", { name: "Options" });
+  const dialog = page.getByRole("dialog", { name: "Settings" });
   const previews = dialog.getByRole("group", { name: "Tile previews" });
   const video = previews.getByRole("button", { name: "Live video" });
   const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
@@ -141,7 +141,7 @@ test("reaches Options at the bottom of the rail with the remote, and the browser
   // The Streams dialog lists the streams and no longer holds these settings.
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
-  await expect(options).toBeFocused();
+  await expect(settings).toBeFocused();
   await page.getByRole("button", { name: "Streams", exact: true }).click();
   const streams = page.getByRole("dialog", { name: "Streams" });
   await expect(streams.locator(".row")).toHaveCount(3);
@@ -151,7 +151,7 @@ test("reaches Options at the bottom of the rail with the remote, and the browser
   // The choice is this browser's, and outlasts the page.
   await page.reload();
   await expect(page.locator(".tile")).toHaveCount(3);
-  await options.click();
+  await settings.click();
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
   await expect(video).toHaveAttribute("aria-pressed", "false");
 });

@@ -10,10 +10,10 @@ import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
-import { OptionsDialog } from "./options-dialog.ts";
 import { formatSummary } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
+import { SettingsDialog } from "./settings-dialog.ts";
 import { WatchReporter } from "./watch.ts";
 
 const PREVIEW_MODE_KEY = "aceswarm.previewMode";
@@ -55,7 +55,7 @@ class App {
   private readonly streamForm = new AddStreamDialog(this.navigator);
   private readonly streamList = new ManageDialog(this.navigator);
   private readonly network = new NetworkDialog(this.navigator);
-  private readonly options = new OptionsDialog(this.navigator, this.previews.currentMode, (mode) => {
+  private readonly settings = new SettingsDialog(this.navigator, this.previews.currentMode, (mode) => {
     this.previews.setMode(mode);
     savePreviewMode(mode);
   });
@@ -81,8 +81,8 @@ class App {
     element("[data-action=network]").addEventListener("click", () => {
       this.network.open();
     });
-    element("[data-action=options]").addEventListener("click", () => {
-      this.options.open(this.snapshot);
+    element("[data-action=settings]").addEventListener("click", () => {
+      this.settings.open(this.snapshot);
     });
   }
 
@@ -112,7 +112,7 @@ class App {
     this.showConnection(time);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
-    this.options.update(snapshot);
+    this.settings.update(snapshot);
     this.summary.textContent = formatSummary(snapshot);
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {

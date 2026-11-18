@@ -84,11 +84,11 @@ async function saveSetting<K extends keyof Settings>(key: K, value: Settings[K])
 }
 
 /**
- * The Options at the bottom of the rail: how the tiles show their previews, which only this
+ * The Settings at the bottom of the rail: how the tiles show their previews, which only this
  * browser keeps, and the engine sharing and hot standby settings, which the controller keeps for
  * every screen.
  */
-export class OptionsDialog {
+export class SettingsDialog {
   private readonly navigator: Navigator;
   private readonly dialog: HTMLDialogElement;
   private readonly previewButtons: Record<PreviewMode, HTMLButtonElement>;
@@ -97,7 +97,7 @@ export class OptionsDialog {
 
   constructor(navigator: Navigator, previewMode: PreviewMode, onPreviewMode: (mode: PreviewMode) => void) {
     this.navigator = navigator;
-    const shell = dialogShell("Options", () => {
+    const shell = dialogShell("Settings", () => {
       this.navigator.back();
     });
     this.dialog = shell.dialog;
