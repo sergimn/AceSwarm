@@ -814,6 +814,16 @@ p.form-error {
   justify-content: center;
   padding: 32px;
   text-align: center;
+  transition: padding-top 0.25s ease;
+}
+
+/*
+ * While the controls show, the message moves below the stats window when they would meet (on a
+ * small screen, a TV browser's 960×540 included): the player sets `--waiting-top`. Once the
+ * controls fade, it is back in the middle.
+ */
+.player.show-overlay .player-waiting {
+  padding-top: var(--waiting-top, 32px);
 }
 
 .player-waiting[hidden] {
@@ -893,6 +903,11 @@ p.form-error {
   margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-line;
+}
+
+/* The tiles' grey for "Disabled" is too dim for small text here: the muted colour reads better. */
+.player-stat .state-stopped {
+  color: var(--muted);
 }
 
 .player-stat[data-stat="state"] dd::before {

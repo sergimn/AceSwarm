@@ -202,8 +202,8 @@ export class Player {
    * Puts the stats window at the left of the picture, a quarter of the way down it, wherever the
    * picture is drawn: a stream that isn't 16:9 leaves black bars, above and below or on the sides.
    * While there is no picture (none loaded yet, or none shows), the whole screen counts. On a short
-   * screen, the window moves up rather than cover Back and Restart, and the message that says why
-   * there is no picture moves down rather than hide behind the window.
+   * screen, the window moves up rather than cover Back and Restart, and while the window shows, the
+   * message that says why there is no picture moves down rather than hide behind it.
    */
   private placeStats(): void {
     if (this.root.hidden) {
@@ -227,9 +227,12 @@ export class Player {
       bottom: this.actions.offsetTop - STATS_GAP,
     });
     setPixels(this.stats, "--stats-top", top);
-    this.waiting.style.paddingTop = this.waitingCovered(top + height + STATS_GAP)
-      ? `${String(top + height + STATS_GAP)}px`
-      : "";
+    // The message makes that room only while the window shows (see the styles).
+    if (this.waitingCovered(top + height + STATS_GAP)) {
+      setPixels(this.waiting, "--waiting-top", top + height + STATS_GAP);
+    } else {
+      this.waiting.style.removeProperty("--waiting-top");
+    }
   }
 
   /**
