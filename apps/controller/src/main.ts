@@ -100,7 +100,7 @@ const orchestrator: Orchestrator = new Orchestrator({
   metrics,
   logger,
   maxKeptEngines: config.MAX_KEPT_ENGINES,
-  thumbnailsOnly: config.PREVIEW_THUMBNAILS_ONLY,
+  thumbnailsOnly: config.LOW_CPU_PREVIEWS,
   standby: {
     maxPaths: config.STANDBY_MAX_PATHS,
     failoverAfterMs: config.STANDBY_FAILOVER_SECONDS * 1000,
@@ -159,6 +159,6 @@ await runService(service, config.PORT, logger, async () => {
 });
 await started;
 logger.info(
-  { port: config.PORT, strategy: config.PATH_STRATEGY, thumbnailsOnly: config.PREVIEW_THUMBNAILS_ONLY },
+  { port: config.PORT, strategy: config.PATH_STRATEGY, lowCpuPreviews: config.LOW_CPU_PREVIEWS },
   "controller ready",
 );

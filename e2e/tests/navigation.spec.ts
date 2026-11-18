@@ -297,7 +297,7 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   page,
   request,
 }) => {
-  // The stack runs without PREVIEW_THUMBNAILS_ONLY, so browsers choose. Here the page gets the
+  // The stack runs without LOW_CPU_PREVIEWS, so browsers choose. Here the page gets the
   // snapshots a controller sends with it set, until the admin lifts it below.
   expect((await snapshot(request)).tilePreviews).toEqual({ thumbnailsOnly: false });
   const restricted = async (): Promise<Snapshot> => ({

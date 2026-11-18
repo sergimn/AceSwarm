@@ -30,7 +30,7 @@ export function savePreviewChoice(mode: PreviewMode, storage: StorageSource = br
 }
 
 /**
- * What the tiles show. The admin's thumbnails only (PREVIEW_THUMBNAILS_ONLY, which every snapshot
+ * What the tiles show. The admin's thumbnails only (LOW_CPU_PREVIEWS, which every snapshot
  * carries) wins over the browser's choice. That choice stays kept: the browser goes back to it
  * once the admin lifts the restriction.
  */

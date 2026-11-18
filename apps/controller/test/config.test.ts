@@ -83,12 +83,12 @@ describe("hot standby settings", () => {
 });
 
 describe("tile previews", () => {
-  it("leaves the choice to each browser unless the admin allows thumbnails only", () => {
-    expect(loadConfig({}).PREVIEW_THUMBNAILS_ONLY).toBe(false);
+  it("leaves the choice to each browser unless the admin turned on low CPU previews", () => {
+    expect(loadConfig({}).LOW_CPU_PREVIEWS).toBe(false);
     // compose.yaml passes "false" while the line in .env stays commented out.
-    expect(loadConfig({ PREVIEW_THUMBNAILS_ONLY: "false" }).PREVIEW_THUMBNAILS_ONLY).toBe(false);
+    expect(loadConfig({ LOW_CPU_PREVIEWS: "false" }).LOW_CPU_PREVIEWS).toBe(false);
     for (const value of ["true", "TRUE", "1", "yes", "on"]) {
-      expect(loadConfig({ PREVIEW_THUMBNAILS_ONLY: value }).PREVIEW_THUMBNAILS_ONLY, value).toBe(true);
+      expect(loadConfig({ LOW_CPU_PREVIEWS: value }).LOW_CPU_PREVIEWS, value).toBe(true);
     }
   });
 });

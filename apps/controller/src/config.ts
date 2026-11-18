@@ -122,7 +122,7 @@ const schema = z
      * The tiles only show thumbnails, on every screen: browsers can't choose Live video under
      * Settings. The transcoder reads the same setting and makes no live previews.
      */
-    PREVIEW_THUMBNAILS_ONLY: envBool(false),
+    LOW_CPU_PREVIEWS: envBool(false),
   })
   .superRefine((config, ctx) => {
     // An engine whose full cache doesn't fit under its limit is killed over and over, or sets off
