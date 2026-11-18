@@ -14,6 +14,7 @@ import { NetworkDialog } from "./network-dialog.ts";
 import { formatSummary } from "./paths.ts";
 import { Player } from "./player.ts";
 import { PreviewManager, type PreviewMode } from "./previews.ts";
+import { SettingsDialog } from "./settings-dialog.ts";
 import { WatchReporter } from "./watch.ts";
 
 const PREVIEW_MODE_KEY = "aceswarm.previewMode";
@@ -53,11 +54,12 @@ class App {
     this.openPlayer(id);
   });
   private readonly streamForm = new AddStreamDialog(this.navigator);
-  private readonly streamList = new ManageDialog(this.navigator, this.previews.currentMode, (mode) => {
+  private readonly streamList = new ManageDialog(this.navigator);
+  private readonly network = new NetworkDialog(this.navigator);
+  private readonly settings = new SettingsDialog(this.navigator, this.previews.currentMode, (mode) => {
     this.previews.setMode(mode);
     savePreviewMode(mode);
   });
-  private readonly network = new NetworkDialog(this.navigator);
   private readonly summary = element("#summary");
   private readonly connection = element("#connection");
   private readonly empty = element("#empty");
@@ -79,6 +81,9 @@ class App {
     });
     element("[data-action=network]").addEventListener("click", () => {
       this.network.open();
+    });
+    element("[data-action=settings]").addEventListener("click", () => {
+      this.settings.open(this.snapshot);
     });
   }
 
@@ -108,6 +113,7 @@ class App {
     this.showConnection(time);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
+    this.settings.update(snapshot);
     this.summary.textContent = formatSummary(snapshot);
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
