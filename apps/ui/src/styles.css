@@ -918,7 +918,7 @@ p.form-error {
   border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 0.7em;
   background: rgb(13 17 23 / 70%);
-  font-size: 1.8em;
+  font-size: 1.35em;
   pointer-events: none;
 }
 
