@@ -73,6 +73,40 @@ test("reaches the rail from the grid on a large screen too", async ({ page }) =>
   await expect(page.locator(".rail-button:focus")).toHaveCount(1);
 });
 
+test("leaves full screen when Back comes before the browser went full screen", async ({ page }) => {
+  // A TV can take a while to go full screen, and OK then Back at once on its remote closes the
+  // player before it has. Here the browser goes full screen only once the player has closed.
+  await page.addInitScript(`{
+    const requestFullscreen = Element.prototype.requestFullscreen;
+    window.fullscreenRequests = [];
+    Element.prototype.requestFullscreen = function (options) {
+      const closed = new Promise((resolve) => {
+        const check = () => (this.hidden ? resolve() : setTimeout(check, 20));
+        check();
+      });
+      const request = closed.then(() => requestFullscreen.call(this, options));
+      window.fullscreenRequests.push(request.then(() => "entered", (error) => error.name));
+      return request;
+    };
+  }`);
+  await page.goto("/");
+  const tile = page.locator(".tile", { hasText: "Channel 12" });
+  await tile.focus();
+  await page.keyboard.press("Enter");
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(player).toBeHidden();
+
+  // The browser went full screen after all, with the closed player: the page leaves it at once.
+  expect(await page.evaluate<string[]>("Promise.all(window.fullscreenRequests)")).toEqual(["entered"]);
+  await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement === null")).toBe(true);
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
+  // The grid answers the remote again.
+  await page.keyboard.press("ArrowRight");
+  await expect(focused(page)).toHaveAttribute("aria-label", /Channel 13/);
+});
+
 test("opens a stream full screen and goes back with the remote's Back key", async ({ page }) => {
   await page.goto("/");
   const tile = page.locator(".tile", { hasText: "Channel 12" });
