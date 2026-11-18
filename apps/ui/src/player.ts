@@ -24,7 +24,7 @@ export class Player {
    */
   private readonly stats: HTMLElement;
   private readonly statRows: { key: PlayerStatKey; row: HTMLElement; value: HTMLElement }[];
-  /** Under the stats while the page hears nothing from the controller: they are old. */
+  /** Above the stats while the page hears nothing from the controller: they are old. */
   private readonly connection: HTMLElement;
   /**
    * Shown instead of the picture while there is none to show: the stream waits for its broadcast
@@ -71,13 +71,15 @@ export class Player {
       return { key, row, value };
     });
     this.connection = h("p", { className: "player-connection", attrs: { hidden: true } });
+    // The line that says the stats are old comes first: on a small screen, the window's last
+    // lines can end up behind Back and Restart.
     this.stats = h("div", { className: "player-stats" }, [
+      this.connection,
       h(
         "dl",
         {},
         this.statRows.map(({ row }) => row),
       ),
-      this.connection,
     ]);
     this.waitingTitle = h("p", { className: "player-waiting-title" });
     this.waitingReason = h("p", { className: "player-waiting-reason" });
@@ -191,15 +193,17 @@ export class Player {
       // The state takes its colour, as on the tiles.
       value.className = key === "state" ? `state-${state}` : "";
     }
-    this.placeStats();
+    // The line that says the page hears nothing is part of the window, so it is set first.
     this.showStale(time);
+    this.placeStats();
   }
 
   /**
    * Puts the stats window at the left of the picture, a quarter of the way down it, wherever the
    * picture is drawn: a stream that isn't 16:9 leaves black bars, above and below or on the sides.
    * While there is no picture (none loaded yet, or none shows), the whole screen counts. On a short
-   * screen, the window moves up rather than cover Back and Restart, or why there is no picture.
+   * screen, the window moves up rather than cover Back and Restart, and the message that says why
+   * there is no picture moves down rather than hide behind the window.
    */
   private placeStats(): void {
     if (this.root.hidden) {
@@ -215,21 +219,36 @@ export class Player {
       shown ? { width: this.video.videoWidth, height: this.video.videoHeight } : null,
     );
     setPixels(this.stats, "--picture-left", picture.left);
-    // The window, the controls and the waiting message all cover the player, so their offsets
-    // compare. Reading them lays the page out once, with the window's new width.
-    let bottom = this.actions.offsetTop;
-    const right = this.stats.offsetLeft + this.stats.offsetWidth;
-    if (!this.waiting.hidden && Math.min(this.waitingTitle.offsetLeft, this.waitingReason.offsetLeft) < right) {
-      bottom = Math.min(bottom, this.waitingTitle.offsetTop);
-    }
-    const top = statsTop(picture, this.stats.offsetHeight, {
+    // The window, the controls and the message all cover the player, so their offsets compare.
+    // Reading them lays the page out once, with the window's new width.
+    const height = this.stats.offsetHeight;
+    const top = statsTop(picture, height, {
       top: this.topBar.offsetTop + this.topBar.offsetHeight + STATS_GAP,
-      bottom: bottom - STATS_GAP,
+      bottom: this.actions.offsetTop - STATS_GAP,
     });
     setPixels(this.stats, "--stats-top", top);
+    this.waiting.style.paddingTop = this.waitingCovered(top + height + STATS_GAP)
+      ? `${String(top + height + STATS_GAP)}px`
+      : "";
   }
 
-  /** While the page hears nothing, a line under the stats says so. */
+  /**
+   * Whether the stats window would cover the message that says why there is no picture, centred
+   * on the screen, whose top would then have to be at `below` at least.
+   */
+  private waitingCovered(below: number): boolean {
+    if (this.waiting.hidden) {
+      return false;
+    }
+    const message = [this.waitingTitle, this.waitingReason];
+    const left = Math.min(...message.map((line) => line.offsetLeft));
+    const height = this.waitingReason.offsetTop + this.waitingReason.offsetHeight - this.waitingTitle.offsetTop;
+    // Where the message is without the room made for it: in the middle of the screen.
+    const top = (this.root.clientHeight - height) / 2;
+    return left < this.stats.offsetLeft + this.stats.offsetWidth && top < below;
+  }
+
+  /** While the page hears nothing, a line above the stats says so. */
   private showStale(time: PageTime): void {
     this.connection.hidden = !time.stale;
     setText(this.connection, time.stale ? staleNotice(time) : "");
