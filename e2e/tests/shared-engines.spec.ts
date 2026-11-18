@@ -83,7 +83,7 @@ async function metrics(request: APIRequestContext): Promise<string> {
   return await response.text();
 }
 
-test("turning it on in the Streams dialog moves playing streams onto one engine", async ({ page, request }) => {
+test("turning it on in the Options dialog moves playing streams onto one engine", async ({ page, request }) => {
   const watched = await addStream(request, bc[0]!.infohash, "Watched");
   const bystander = await addStream(request, bc[1]!.infohash, "Bystander");
   run.watched = watched.id;
@@ -94,8 +94,8 @@ test("turning it on in the Streams dialog moves playing streams onto one engine"
   expect(engineContainers(watched.id)).toHaveLength(1);
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Streams", exact: true }).click();
-  const toggle = page.getByRole("dialog", { name: "Streams" }).getByRole("switch", { name: "One engine per path" });
+  await page.getByRole("button", { name: "Options", exact: true }).click();
+  const toggle = page.getByRole("dialog", { name: "Options" }).getByRole("switch", { name: "One engine per path" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-checked", "true");

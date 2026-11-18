@@ -100,6 +100,8 @@ a {
   gap: 12px;
   height: 100vh;
   padding: 20px 12px;
+  /* A screen too short for every button scrolls the rail instead of cutting Options off. */
+  overflow-y: auto;
   background: var(--surface);
   border-right: 1px solid var(--border);
 }
@@ -134,6 +136,11 @@ a {
 
 .rail-button:focus {
   box-shadow: var(--focus);
+}
+
+/* Options sits at the bottom of the rail, apart from the actions on streams and paths. */
+.rail-end {
+  margin-top: auto;
 }
 
 .content {
@@ -924,12 +931,18 @@ p.form-error {
     justify-content: center;
     height: auto;
     padding: 6px 16px;
+    overflow: visible;
     border-top: 1px solid var(--border);
     border-right: 0;
   }
 
   .brand {
     display: none;
+  }
+
+  /* In the bottom bar it is one more button beside the others. */
+  .rail-end {
+    margin-top: 0;
   }
 
   .content {

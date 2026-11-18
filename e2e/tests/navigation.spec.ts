@@ -98,6 +98,64 @@ test("closes dialogs with Back and returns focus", async ({ page }) => {
   await expect(network).toBeFocused();
 });
 
+test("reaches Options at the bottom of the rail with the remote, and the browser keeps the tile previews", async ({
+  page,
+}) => {
+  await page.goto("/");
+  // Once the page has its streams it has also moved the focus to the first tile, as it does when
+  // it opens: from here on the focus is the test's.
+  await expect(page.locator(".tile")).toHaveCount(3);
+  const network = page.getByRole("button", { name: "Network", exact: true });
+  const options = page.getByRole("button", { name: "Options", exact: true });
+  await network.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(options).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "Options" });
+  const previews = dialog.getByRole("group", { name: "Tile previews" });
+  const video = previews.getByRole("button", { name: "Live video" });
+  const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
+  const sharing = dialog.getByRole("switch", { name: "One engine per path" });
+  const standby = dialog.getByRole("switch", { name: "Hot standby on other paths" });
+  await expect(dialog).toBeVisible();
+  await expect(video).toHaveAttribute("aria-pressed", "true");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "false");
+  // `resetStack` turned both off.
+  await expect(sharing).toHaveAttribute("aria-checked", "false");
+  await expect(standby).toHaveAttribute("aria-checked", "false");
+  // The dialog opens on its close button. Down goes through the settings on the right, and only
+  // OK presses them.
+  await page.keyboard.press("ArrowDown");
+  await expect(thumbnails).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await page.keyboard.press("ArrowDown");
+  await expect(sharing).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(standby).toBeFocused();
+  await expect(sharing).toHaveAttribute("aria-checked", "false");
+  await expect(standby).toHaveAttribute("aria-checked", "false");
+
+  // The Streams dialog lists the streams and no longer holds these settings.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(options).toBeFocused();
+  await page.getByRole("button", { name: "Streams", exact: true }).click();
+  const streams = page.getByRole("dialog", { name: "Streams" });
+  await expect(streams.locator(".row")).toHaveCount(3);
+  await expect(streams.getByRole("switch")).toHaveCount(0);
+  await expect(streams.getByRole("button", { name: "Thumbnails only" })).toHaveCount(0);
+
+  // The choice is this browser's, and outlasts the page.
+  await page.reload();
+  await expect(page.locator(".tile")).toHaveCount(3);
+  await options.click();
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+});
+
 test("serves previews and thumbnails for the grid", async ({ request }) => {
   const stream = (await (await request.get("/api/streams")).json()) as {
     hls: { preview: string; thumbnail: string };

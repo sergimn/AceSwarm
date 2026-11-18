@@ -228,9 +228,9 @@ test("fails over to the direct path's shared engine when the VPN's engine stops 
 
 test("turning hot standby off removes the standbys", async ({ page, request }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Streams", exact: true }).click();
+  await page.getByRole("button", { name: "Options", exact: true }).click();
   const toggle = page
-    .getByRole("dialog", { name: "Streams" })
+    .getByRole("dialog", { name: "Options" })
     .getByRole("switch", { name: "Hot standby on other paths" });
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   await toggle.click();
