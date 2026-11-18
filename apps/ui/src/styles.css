@@ -821,6 +821,7 @@ p.form-error {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  /* WAITING_PADDING in player-stats.ts, and the fallbacks below. */
   padding: 32px;
   text-align: center;
   transition: padding 0.25s ease;
@@ -836,6 +837,11 @@ p.form-error {
   padding-top: var(--waiting-top, 32px);
   padding-bottom: var(--waiting-bottom, 32px);
   padding-left: var(--waiting-left, 32px);
+}
+
+/* No room for all of it: the message starts right under the window, title first. */
+.player.show-overlay .player-waiting.under-stats {
+  justify-content: flex-start;
 }
 
 .player-waiting[hidden] {

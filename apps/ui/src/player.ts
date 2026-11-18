@@ -13,6 +13,9 @@ const OVERLAY_MS = 4000;
 /** The least room left between the stats window and the title above it, or the buttons below it. */
 const STATS_GAP = 12;
 
+/** The custom properties that place the message that says why there is no picture. */
+const WAITING_SIDES = ["top", "bottom", "left"] as const;
+
 /** Full screen playback of the full-quality HLS output, with sound. */
 export class Player {
   private readonly root: HTMLElement;
@@ -236,6 +239,15 @@ export class Player {
    * takes that room only while the window shows (see the styles).
    */
   private placeWaiting(top: number, height: number): void {
+    const { style } = this.waiting;
+    // The message is measured where it sits with no room made for it: measured where the room put
+    // it, beside the window, it would seem clear of it, and the next update would move it back.
+    // Without the transition, so that it doesn't play from there and back.
+    style.transition = "none";
+    for (const side of WAITING_SIDES) {
+      style.removeProperty(`--waiting-${side}`);
+    }
+    this.waiting.classList.remove("under-stats");
     const message = [this.waitingTitle, this.waitingReason];
     const room = this.waiting.hidden
       ? null
@@ -249,14 +261,17 @@ export class Player {
           this.actions.offsetTop,
           STATS_GAP,
         );
-    for (const side of ["top", "bottom", "left"] as const) {
+    for (const side of WAITING_SIDES) {
       const pixels = room?.[side];
-      if (pixels === undefined) {
-        this.waiting.style.removeProperty(`--waiting-${side}`);
-      } else {
-        setPixels(this.waiting, `--waiting-${side}`, pixels);
+      if (pixels !== undefined) {
+        style.setProperty(`--waiting-${side}`, `${String(pixels)}px`);
       }
     }
+    this.waiting.classList.toggle("under-stats", room?.fromTop === true);
+    // The message is laid out where it goes before the transition comes back, which then only plays
+    // when the controls show or fade.
+    this.waiting.getBoundingClientRect();
+    style.removeProperty("transition");
   }
 
   /** While the page hears nothing, a line above the stats says so. */
