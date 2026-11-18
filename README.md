@@ -2,7 +2,7 @@
 
 Ace Swarm collects your Acestream streams in one place. You watch them in a browser that works with a TV remote. It keeps them playing and shows how healthy each one is.
 
-- **A grid of live previews.** Select a tile to watch the stream full screen. Hover or focus a tile to see:
+- **A grid of live previews.** Select a tile to watch the stream full screen. Point at a tile with the mouse, or move to it with the remote, to see:
   - how fresh the picture is ("Now" while new frames arrive),
   - how many peers are actually sending data (and how many the engine says are connected),
   - where the peers sending data are from, as flags.
