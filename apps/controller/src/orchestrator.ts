@@ -55,6 +55,8 @@ export interface OrchestratorDeps {
   maxKeptEngines?: number;
   /** Hot standbys on the other paths (see `StreamStandbys`). */
   standby?: StandbySettings;
+  /** The admin allows thumbnails only in the tiles (PREVIEW_THUMBNAILS_ONLY); off by default. */
+  thumbnailsOnly?: boolean;
   pathPollMs?: number;
   /** How long shutting down waits for each stream's step in progress (see `stop`). */
   stopWaitMs?: number;
@@ -197,6 +199,7 @@ export class Orchestrator {
         maxPaths: this.standby.maxPaths,
         failoverSeconds: Math.round(this.standby.failoverAfterMs / 1000),
       },
+      tilePreviews: { thumbnailsOnly: this.deps.thumbnailsOnly === true },
       viewerPingSeconds: Math.round(this.deps.viewers.pingMs / 1000),
     };
   }

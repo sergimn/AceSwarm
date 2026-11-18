@@ -1,4 +1,4 @@
-import { envInt, parseEnv } from "@aceswarm/shared/env";
+import { envBool, envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
 const schema = z.object({
@@ -20,6 +20,11 @@ const schema = z.object({
   PREVIEW_HEIGHT: envInt(360),
   PREVIEW_FPS: envInt(15),
   PREVIEW_BITRATE_KBPS: envInt(600),
+  /**
+   * The admin allows thumbnails only in the tiles (the controller reads it too): ffmpeg makes no
+   * live preview, only the full stream and the thumbnail.
+   */
+  PREVIEW_THUMBNAILS_ONLY: envBool(false),
   /** Height used when the source codec is not H.264 and the full stream has to be re-encoded. */
   FULL_TRANSCODE_MAX_HEIGHT: envInt(1080),
   AUDIO_BITRATE_KBPS: envInt(160),

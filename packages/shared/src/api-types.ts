@@ -187,8 +187,18 @@ export interface Snapshot {
   wireguardOnly: boolean;
   sharedEngines: SharedEnginesView;
   hotStandby: HotStandbyView;
+  tilePreviews: TilePreviewsView;
   /** How often players report the stream they show full screen. */
   viewerPingSeconds: number;
+}
+
+/** How the grid's tiles may show their streams, as the admin set it in `.env`. */
+export interface TilePreviewsView {
+  /**
+   * Tiles only show thumbnails (PREVIEW_THUMBNAILS_ONLY), whatever a browser chose under Settings,
+   * and the transcoder makes no live previews: the streams' `hls.preview` playlists stay empty.
+   */
+  thumbnailsOnly: boolean;
 }
 
 /** Settings the UI changes (`PATCH /api/settings`), kept in the controller's data volume. */

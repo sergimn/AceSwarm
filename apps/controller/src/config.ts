@@ -1,4 +1,4 @@
-import { envInt, parseEnv } from "@aceswarm/shared/env";
+import { envBool, envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
 
 /**
@@ -118,6 +118,11 @@ const schema = z
      * Players report at most every 5 s.
      */
     VIEWER_PING_SECONDS: z.coerce.number().int().min(5).default(60),
+    /**
+     * The tiles only show thumbnails, on every screen: browsers can't choose Live video under
+     * Settings. The transcoder reads the same setting and makes no live previews.
+     */
+    PREVIEW_THUMBNAILS_ONLY: envBool(false),
   })
   .superRefine((config, ctx) => {
     // An engine whose full cache doesn't fit under its limit is killed over and over, or sets off

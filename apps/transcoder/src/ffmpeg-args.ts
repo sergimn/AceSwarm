@@ -10,6 +10,8 @@ export interface FfmpegPlan {
   previewHeight: number;
   previewFps: number;
   previewBitrateKbps: number;
+  /** No preview output: the admin allows thumbnails only in the tiles (PREVIEW_THUMBNAILS_ONLY). */
+  thumbnailsOnly?: boolean;
   fullTranscodeMaxHeight: number;
   audioBitrateKbps: number;
   segmentSeconds: number;
@@ -49,7 +51,8 @@ function keyframeEvery(plan: FfmpegPlan): string[] {
  *
  * - full: original video when it is H.264 (no re-encode), otherwise H.264; audio to AAC so every
  *   browser can play it.
- * - preview: small H.264 rendition for the grid, no audio.
+ * - preview: small H.264 rendition for the grid, no audio. None with `thumbnailsOnly`, which saves
+ *   its encode: its playlist then stays empty.
  * - thumbnail.jpg: refreshed every few seconds, used as a poster.
  */
 export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
@@ -151,5 +154,5 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     `${plan.directory}/thumbnail.jpg`,
   ];
 
-  return [...input, ...full, ...preview, ...thumbnail];
+  return [...input, ...full, ...(plan.thumbnailsOnly === true ? [] : preview), ...thumbnail];
 }

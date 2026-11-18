@@ -22,6 +22,11 @@ function valueAfter(args: string[], flag: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
+/** The format of each output, in order. */
+function formats(args: string[]): string[] {
+  return args.filter((_, index) => args[index - 1] === "-f");
+}
+
 describe("buildFfmpegArgs", () => {
   it("reads the source once and writes full, preview and thumbnail outputs", () => {
     const args = buildFfmpegArgs(PLAN);
@@ -30,6 +35,21 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("/hls/s1/3/full/index.m3u8");
     expect(args).toContain("/hls/s1/3/preview/index.m3u8");
     expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
+  });
+
+  it("makes no preview while the admin allows thumbnails only, and keeps the full stream and thumbnail", () => {
+    const args = buildFfmpegArgs({ ...PLAN, thumbnailsOnly: true });
+    expect(args.join(" ")).not.toContain("/preview/");
+    expect(args).toContain("/hls/s1/3/full/index.m3u8");
+    expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
+    expect(formats(args)).toEqual(["hls", "image2"]);
+    expect(formats(buildFfmpegArgs(PLAN))).toEqual(["hls", "hls", "image2"]);
+    // The full stream is copied: no H.264 encode is left.
+    expect(args).not.toContain("libx264");
+    // A stream that isn't H.264 still gets its full stream encoded.
+    const transcode = buildFfmpegArgs({ ...PLAN, fullMode: "transcode", thumbnailsOnly: true });
+    expect(formats(transcode)).toEqual(["hls", "image2"]);
+    expect(transcode.filter((arg) => arg === "libx264")).toHaveLength(1);
   });
 
   it("waits for slow engines before giving up on the input", () => {

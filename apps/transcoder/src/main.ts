@@ -20,6 +20,7 @@ const manager = new PipelineManager(
       previewHeight: config.PREVIEW_HEIGHT,
       previewFps: config.PREVIEW_FPS,
       previewBitrateKbps: config.PREVIEW_BITRATE_KBPS,
+      thumbnailsOnly: config.PREVIEW_THUMBNAILS_ONLY,
       fullTranscodeMaxHeight: config.FULL_TRANSCODE_MAX_HEIGHT,
       audioBitrateKbps: config.AUDIO_BITRATE_KBPS,
       segmentSeconds: config.SEGMENT_SECONDS,
@@ -34,4 +35,7 @@ const manager = new PipelineManager(
 await manager.clean();
 registerRoutes(service, manager);
 await runService(service, config.PORT, logger, () => manager.stopAll());
-logger.info({ port: config.PORT, previewMode: config.PREVIEW_MODE }, "transcoder ready");
+logger.info(
+  { port: config.PORT, previewMode: config.PREVIEW_MODE, thumbnailsOnly: config.PREVIEW_THUMBNAILS_ONLY },
+  "transcoder ready",
+);

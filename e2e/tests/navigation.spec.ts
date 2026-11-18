@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { addStreamList, resetStack, waitForPlaying } from "./helpers.ts";
+import type { Snapshot } from "../../packages/shared/src/api-types.ts";
+import { addStreamList, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -290,6 +291,96 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await page.keyboard.press("Enter");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
   await expect(video).toHaveAttribute("aria-pressed", "false");
+});
+
+test("shows thumbnails only while the admin allows nothing else, whatever the browser chose", async ({
+  page,
+  request,
+}) => {
+  // The stack runs without PREVIEW_THUMBNAILS_ONLY, so browsers choose. Here the page gets the
+  // snapshots a controller sends with it set, until the admin lifts it below.
+  expect((await snapshot(request)).tilePreviews).toEqual({ thumbnailsOnly: false });
+  const restricted = async (): Promise<Snapshot> => ({
+    ...(await snapshot(request)),
+    tilePreviews: { thumbnailsOnly: true },
+  });
+  await page.route("**/api/snapshot", async (route) => {
+    await route.fulfill({ json: await restricted() });
+  });
+  await page.route("**/api/events", async (route) => {
+    // One snapshot, then the browser opens the stream again a second later, as after a dropped one.
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `retry: 1000\nevent: snapshot\ndata: ${JSON.stringify(await restricted())}\n\n`,
+    });
+  });
+  // This browser chose Live video before the admin restricted it.
+  await page.addInitScript(() => {
+    localStorage.setItem("aceswarm.previewMode", "video");
+  });
+  const previewLoads: string[] = [];
+  const saved: string[] = [];
+  page.on("request", (sent) => {
+    if (new URL(sent.url()).pathname.includes("/preview/")) {
+      previewLoads.push(sent.url());
+    }
+    if (sent.method() === "PATCH") {
+      saved.push(sent.url());
+    }
+  });
+  await page.goto("/");
+  await expect(page.locator(".tile")).toHaveCount(3);
+  await expect(page.locator(".tile").first()).toBeFocused();
+  // The test above reaches Settings with the remote; this one is about what it shows.
+  await page.getByRole("button", { name: "Settings", exact: true }).focus();
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  const previews = dialog.getByRole("group", { name: "Tile previews" });
+  const video = previews.getByRole("button", { name: "Live video" });
+  const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
+  const tip = dialog.getByRole("tooltip");
+  const why = "Your admin has restricted this feature to save resources. Contact them for any questions";
+  await expect(dialog).toBeVisible();
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await expect(video).toHaveAttribute("aria-disabled", "true");
+  await expect(video).toHaveAccessibleDescription(why);
+  await expect(tip).toBeHidden();
+
+  // The remote reaches the greyed out choice, and its focus shows why. OK there changes nothing.
+  await page.keyboard.press("ArrowDown");
+  await expect(thumbnails).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(video).toBeFocused();
+  await expect(tip).toBeVisible();
+  await expect(tip).toHaveText(why);
+  await page.keyboard.press("Enter");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await page.keyboard.press("ArrowRight");
+  await expect(thumbnails).toBeFocused();
+  await expect(tip).toBeHidden();
+
+  // The mouse over it shows why too, and a click changes nothing either.
+  await video.hover();
+  await expect(tip).toBeVisible();
+  // Playwright waits for a control marked aria-disabled to be enabled before it clicks; a person doesn't.
+  await video.click({ force: true });
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  // The browser's own choice stays as it was, and no tile asked for a live preview.
+  expect(await page.evaluate<string | null>('localStorage.getItem("aceswarm.previewMode")')).toBe("video");
+  expect(saved).toEqual([]);
+  expect(previewLoads).toEqual([]);
+
+  // Once the admin lifts it, the browser's choice is back, and the tiles play again.
+  await page.unroute("**/api/events");
+  await page.unroute("**/api/snapshot");
+  await expect(video).toHaveAttribute("aria-pressed", "true");
+  await expect(video).not.toHaveAttribute("aria-disabled");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "false");
+  await expect(tip).toBeHidden();
+  await expect.poll(() => previewLoads.length).toBeGreaterThan(0);
 });
 
 test("serves previews and thumbnails for the grid", async ({ request }) => {

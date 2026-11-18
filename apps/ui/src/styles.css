@@ -511,6 +511,7 @@ a {
 }
 
 .segments {
+  position: relative;
   display: inline-flex;
   gap: 6px;
 }
@@ -518,6 +519,44 @@ a {
 .segment[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* A choice the admin doesn't allow. It stays focusable, so remotes can reach it and show its tip. */
+.segment[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.segment[aria-disabled="true"]:hover {
+  border-color: var(--border);
+}
+
+/* Under the choices: why the one before it is greyed out, while the mouse is over it or it has the focus. */
+.tip {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  font-size: 0.85em;
+  line-height: 1.35;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity 0.15s,
+    visibility 0.15s;
+}
+
+[aria-disabled="true"]:hover + .tip,
+[aria-disabled="true"]:focus + .tip {
+  visibility: visible;
+  opacity: 1;
 }
 
 .setting-text {

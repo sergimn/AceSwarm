@@ -81,3 +81,14 @@ describe("hot standby settings", () => {
     expect(() => loadConfig({ STANDBY_FAILOVER_SECONDS: "0" })).toThrow();
   });
 });
+
+describe("tile previews", () => {
+  it("leaves the choice to each browser unless the admin allows thumbnails only", () => {
+    expect(loadConfig({}).PREVIEW_THUMBNAILS_ONLY).toBe(false);
+    // compose.yaml passes "false" while the line in .env stays commented out.
+    expect(loadConfig({ PREVIEW_THUMBNAILS_ONLY: "false" }).PREVIEW_THUMBNAILS_ONLY).toBe(false);
+    for (const value of ["true", "TRUE", "1", "yes", "on"]) {
+      expect(loadConfig({ PREVIEW_THUMBNAILS_ONLY: value }).PREVIEW_THUMBNAILS_ONLY, value).toBe(true);
+    }
+  });
+});
