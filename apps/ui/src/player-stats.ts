@@ -87,3 +87,46 @@ export function pictureRect(box: Size, picture: Size | null): Rect {
 export function statsTop(picture: Rect, height: number, room: { top: number; bottom: number }): number {
   return Math.max(room.top, Math.min(picture.top + picture.height / 4, room.bottom - height));
 }
+
+/** The padding around the message that says why there is no picture, as in the styles. */
+const WAITING_PADDING = 32;
+
+/** The narrowest column beside the stats window that the message moves into. */
+const WAITING_BESIDE = 160;
+
+/** The space the message that says why there is no picture is centred in, as its padding. */
+export interface WaitingRoom {
+  top: number;
+  bottom: number;
+  /** Only when the message moves beside the window. */
+  left?: number;
+}
+
+/**
+ * Where the message that says why there is no picture goes while the stats window shows. Null
+ * when the message, centred on the screen, is clear of the window and can stay there. Otherwise it
+ * moves between the window and the controls. When that space is too small for it (a phone held
+ * sideways), it moves beside the window, where it can wrap, and only on a screen too narrow for
+ * that does it start right under the window: its title stays in sight, and its last line can
+ * reach the controls.
+ */
+export function waitingRoom(
+  screen: Size,
+  message: { left: number; height: number },
+  window: { top: number; right: number; bottom: number },
+  controlsTop: number,
+  gap: number,
+): WaitingRoom | null {
+  const below = window.bottom + gap;
+  if (message.left >= window.right || (screen.height - message.height) / 2 >= below) {
+    return null;
+  }
+  const above = controlsTop - gap;
+  if (above - below >= message.height) {
+    return { top: below, bottom: screen.height - above };
+  }
+  const beside = window.right + 2 * gap;
+  return screen.width - WAITING_PADDING - beside >= WAITING_BESIDE
+    ? { top: window.top, bottom: screen.height - above, left: beside }
+    : { top: below, bottom: Math.max(0, screen.height - Math.max(above, below + message.height)) };
+}

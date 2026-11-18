@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus, StandbyView, StreamView } from "@aceswarm/shared/api-types";
-import { pictureRect, PLAYER_STATS, playerStats, statsTop } from "../src/player-stats.ts";
+import { pictureRect, PLAYER_STATS, playerStats, statsTop, waitingRoom } from "../src/player-stats.ts";
 
 const NOW = Date.parse("2026-11-18T12:00:00Z");
 const ago = (seconds: number): string => new Date(NOW - seconds * 1000).toISOString();
@@ -156,5 +156,44 @@ describe("statsTop", () => {
 
   it("never moves it above the title", () => {
     expect(statsTop(picture, 500, { top: 60, bottom: 400 })).toBe(60);
+  });
+});
+
+describe("waitingRoom", () => {
+  // A TV browser's 960×540: the window ends 313 px down, the controls start at 482.
+  const message = { left: 258, height: 58 };
+  const window = { top: 135, right: 326, bottom: 313 };
+
+  it("leaves the message in the middle of the screen when the window is clear of it", () => {
+    expect(
+      waitingRoom(
+        { width: 1280, height: 720 },
+        { left: 484, height: 58 },
+        { top: 180, right: 304, bottom: 359 },
+        662,
+        12,
+      ),
+    ).toBeNull();
+    expect(waitingRoom({ width: 1920, height: 1080 }, message, window, 1022, 12)).toBeNull();
+  });
+
+  it("puts it between the window and the controls when the window would cover it", () => {
+    expect(waitingRoom({ width: 960, height: 540 }, message, window, 482, 12)).toEqual({ top: 325, bottom: 70 });
+  });
+
+  it("puts it beside the window when there is no room below", () => {
+    // 640×360: the window ends 268 px down, the controls start at 302.
+    const short = { top: 90, right: 326, bottom: 268 };
+    expect(waitingRoom({ width: 640, height: 360 }, message, short, 302, 12)).toEqual({
+      top: 90,
+      bottom: 70,
+      left: 350,
+    });
+  });
+
+  it("keeps its title clear of the window when there is no room beside it either", () => {
+    const short = { top: 83, right: 326, bottom: 261 };
+    expect(waitingRoom({ width: 500, height: 320 }, message, short, 262, 12)).toEqual({ top: 273, bottom: 0 });
+    expect(waitingRoom({ width: 500, height: 400 }, message, short, 342, 12)).toEqual({ top: 273, bottom: 69 });
   });
 });

@@ -6,7 +6,7 @@ import { errorMessage, h, icon, setText, toast } from "./dom.ts";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
 import { staleNotice, type PageTime } from "./liveness.ts";
 import type { Navigator } from "./navigation.ts";
-import { pictureRect, PLAYER_STATS, playerStats, statsTop, type PlayerStatKey } from "./player-stats.ts";
+import { pictureRect, PLAYER_STATS, playerStats, statsTop, waitingRoom, type PlayerStatKey } from "./player-stats.ts";
 import type { WatchReporter } from "./watch.ts";
 
 const OVERLAY_MS = 4000;
@@ -190,7 +190,7 @@ export class Player {
       const text = values[key];
       row.hidden = text === undefined;
       setText(value, text ?? "");
-      // The state takes its colour, as on the tiles.
+      // The state takes its colour, as on the tiles (Disabled reads lighter here: see the styles).
       value.className = key === "state" ? `state-${state}` : "";
     }
     // The line that says the page hears nothing is part of the window, so it is set first.
@@ -203,7 +203,7 @@ export class Player {
    * picture is drawn: a stream that isn't 16:9 leaves black bars, above and below or on the sides.
    * While there is no picture (none loaded yet, or none shows), the whole screen counts. On a short
    * screen, the window moves up rather than cover Back and Restart, and while the window shows, the
-   * message that says why there is no picture moves down rather than hide behind it.
+   * message that says why there is no picture moves out from under it.
    */
   private placeStats(): void {
     if (this.root.hidden) {
@@ -227,28 +227,36 @@ export class Player {
       bottom: this.actions.offsetTop - STATS_GAP,
     });
     setPixels(this.stats, "--stats-top", top);
-    // The message makes that room only while the window shows (see the styles).
-    if (this.waitingCovered(top + height + STATS_GAP)) {
-      setPixels(this.waiting, "--waiting-top", top + height + STATS_GAP);
-    } else {
-      this.waiting.style.removeProperty("--waiting-top");
-    }
+    this.placeWaiting(top, height);
   }
 
   /**
-   * Whether the stats window would cover the message that says why there is no picture, centred
-   * on the screen, whose top would then have to be at `below` at least.
+   * Moves the message that says why there is no picture out from under the stats window (whose top
+   * and height are given), when the window would cover it in the middle of the screen. The message
+   * takes that room only while the window shows (see the styles).
    */
-  private waitingCovered(below: number): boolean {
-    if (this.waiting.hidden) {
-      return false;
-    }
+  private placeWaiting(top: number, height: number): void {
     const message = [this.waitingTitle, this.waitingReason];
-    const left = Math.min(...message.map((line) => line.offsetLeft));
-    const height = this.waitingReason.offsetTop + this.waitingReason.offsetHeight - this.waitingTitle.offsetTop;
-    // Where the message is without the room made for it: in the middle of the screen.
-    const top = (this.root.clientHeight - height) / 2;
-    return left < this.stats.offsetLeft + this.stats.offsetWidth && top < below;
+    const room = this.waiting.hidden
+      ? null
+      : waitingRoom(
+          { width: this.root.clientWidth, height: this.root.clientHeight },
+          {
+            left: Math.min(...message.map((line) => line.offsetLeft)),
+            height: this.waitingReason.offsetTop + this.waitingReason.offsetHeight - this.waitingTitle.offsetTop,
+          },
+          { top, right: this.stats.offsetLeft + this.stats.offsetWidth, bottom: top + height },
+          this.actions.offsetTop,
+          STATS_GAP,
+        );
+    for (const side of ["top", "bottom", "left"] as const) {
+      const pixels = room?.[side];
+      if (pixels === undefined) {
+        this.waiting.style.removeProperty(`--waiting-${side}`);
+      } else {
+        setPixels(this.waiting, `--waiting-${side}`, pixels);
+      }
+    }
   }
 
   /** While the page hears nothing, a line above the stats says so. */

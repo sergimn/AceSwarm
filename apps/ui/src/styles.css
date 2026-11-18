@@ -823,16 +823,19 @@ p.form-error {
   justify-content: center;
   padding: 32px;
   text-align: center;
-  transition: padding-top 0.25s ease;
+  transition: padding 0.25s ease;
 }
 
 /*
- * While the controls show, the message moves below the stats window when they would meet (on a
- * small screen, a TV browser's 960×540 included): the player sets `--waiting-top`. Once the
+ * While the controls show, the message moves out from under the stats window when the window would
+ * cover it (on a small screen, a TV browser's 960×540 included): below it, or beside it on a short
+ * screen. The player sets `--waiting-top`, `--waiting-bottom` and `--waiting-left`. Once the
  * controls fade, it is back in the middle.
  */
 .player.show-overlay .player-waiting {
   padding-top: var(--waiting-top, 32px);
+  padding-bottom: var(--waiting-bottom, 32px);
+  padding-left: var(--waiting-left, 32px);
 }
 
 .player-waiting[hidden] {
