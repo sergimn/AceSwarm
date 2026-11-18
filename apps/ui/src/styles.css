@@ -853,9 +853,55 @@ p.form-error {
   font-size: 1.6em;
 }
 
-.player-details {
-  margin: 6px 0 0;
+/*
+ * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
+ * picture's left edge and a quarter of the way down it; the player sets `--picture-*` to where the
+ * picture is drawn, black bars left out, or to the whole screen while there is none.
+ */
+.player-stats {
+  position: absolute;
+  top: calc(var(--picture-top, 0px) + var(--picture-height, 100%) / 4);
+  left: calc(var(--picture-left, 0px) + 24px);
+  max-width: min(24em, calc(100% - var(--picture-left, 0px) - 48px));
+  padding: 10px 14px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 10px;
+  background: rgb(13 17 23 / 65%);
+  backdrop-filter: blur(4px);
+  font-size: 0.9em;
+}
+
+.player-stats dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 16px;
+  margin: 0;
+}
+
+/* The rows only group a label with its value, for the tests and for hiding: the grid lines them up. */
+.player-stat {
+  display: contents;
+}
+
+.player-stat dt {
   color: var(--muted);
+}
+
+.player-stat dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+.player-stat[data-stat="state"] dd::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-right: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.08em;
 }
 
 .player-actions {

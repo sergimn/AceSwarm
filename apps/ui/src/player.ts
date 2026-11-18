@@ -3,18 +3,10 @@ import Hls from "hls.js/light";
 import { api } from "./api.ts";
 import { startClock } from "./clock.ts";
 import { errorMessage, h, icon, setText, toast } from "./dom.ts";
-import {
-  formatFreshness,
-  formatPeers,
-  formatSpeed,
-  formatStandbys,
-  pathLabel,
-  shownState,
-  STATE_LABELS,
-} from "./format.ts";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
 import { staleNotice, type PageTime } from "./liveness.ts";
 import type { Navigator } from "./navigation.ts";
+import { pictureRect, PLAYER_STATS, playerStats, type PlayerStatKey } from "./player-stats.ts";
 import type { WatchReporter } from "./watch.ts";
 
 const OVERLAY_MS = 4000;
@@ -24,8 +16,12 @@ export class Player {
   private readonly root: HTMLElement;
   private readonly video: HTMLVideoElement;
   private readonly title: HTMLElement;
-  private readonly details: HTMLElement;
-  /** Under the details while the page hears nothing from the controller: they are old. */
+  /**
+   * The live stats, one to a line, in a window over the picture: it sits at the picture's left,
+   * a quarter of the way down, whatever the stream's shape (see `placeStats`).
+   */
+  private readonly statRows: { key: PlayerStatKey; row: HTMLElement; value: HTMLElement }[];
+  /** Under the stats while the page hears nothing from the controller: they are old. */
   private readonly connection: HTMLElement;
   /**
    * Shown instead of the picture while there is none to show: the stream waits for its broadcast
@@ -58,8 +54,23 @@ export class Player {
     this.watch = watch;
     this.video = h("video", { className: "player-video", attrs: { playsinline: true, autoplay: true } });
     this.title = h("h2", { className: "player-title" });
-    this.details = h("p", { className: "player-details" });
+    this.statRows = (Object.keys(PLAYER_STATS) as PlayerStatKey[]).map((key) => {
+      const value = h("dd");
+      const row = h("div", { className: "player-stat", attrs: { "data-stat": key } }, [
+        h("dt", { text: PLAYER_STATS[key] }),
+        value,
+      ]);
+      return { key, row, value };
+    });
     this.connection = h("p", { className: "player-connection", attrs: { hidden: true } });
+    const stats = h("div", { className: "player-stats" }, [
+      h(
+        "dl",
+        {},
+        this.statRows.map(({ row }) => row),
+      ),
+      this.connection,
+    ]);
     this.waitingTitle = h("p", { className: "player-waiting-title" });
     this.waitingReason = h("p", { className: "player-waiting-reason" });
     this.waiting = h("div", { className: "player-waiting", attrs: { hidden: true, role: "status" } }, [
@@ -81,17 +92,25 @@ export class Player {
     });
     this.clock = h("time", { className: "player-clock" });
     startClock(this.clock);
-    const info = h("div", { className: "player-info" }, [this.title, this.details, this.connection]);
-    const top = h("div", { className: "player-top" }, [info, this.clock]);
+    const top = h("div", { className: "player-top" }, [this.title, this.clock]);
     const actions = h("div", { className: "player-actions" }, [backButton, restartButton]);
     this.root = h("div", { className: "player", attrs: { hidden: true, role: "dialog", "aria-label": "Player" } }, [
       this.video,
       this.waiting,
-      h("div", { className: "player-overlay" }, [top, actions]),
+      h("div", { className: "player-overlay" }, [top, stats, actions]),
     ]);
     this.root.addEventListener("pointermove", () => {
       this.showOverlay();
     });
+    // The picture changes size with the window (full screen included) and with the stream.
+    window.addEventListener("resize", () => {
+      this.placeStats();
+    });
+    for (const event of ["loadedmetadata", "resize", "emptied"]) {
+      this.video.addEventListener(event, () => {
+        this.placeStats();
+      });
+    }
     document.body.append(this.root);
     document.addEventListener("fullscreenchange", () => {
       if (document.fullscreenElement === null && this.streamId !== undefined) {
@@ -135,7 +154,7 @@ export class Player {
     }
     this.follow(stream);
     setText(this.title, stream.name);
-    const state = shownState(stream);
+    const { state, values } = playerStats(stream, snapshot.paths, time);
     const disabled = state === "stopped";
     // Its broadcast sends nothing new: the last picture would be old, so it doesn't show.
     const waiting = state === "stale-source";
@@ -149,22 +168,41 @@ export class Player {
     if (this.restartLabel.data !== restartText) {
       this.restartLabel.data = restartText;
     }
-    // A page that hears nothing doesn't know that the stream still plays, so it doesn't say "Now".
-    const last = `Last frame: ${formatFreshness(stream.lastFrameAt, time.now, state === "playing" && !time.stale)}`;
-    // A disabled stream has no engine: no peers, no speed, no path.
-    const running = disabled
-      ? []
-      : [
-          `Peers: ${formatPeers(stream.peers, state, stream.engine?.shared === true)}`,
-          formatSpeed(stream.downloadKBps),
-          pathLabel(stream.path, snapshot.paths),
-          ...(stream.standbys.length > 0 ? [`Standby: ${formatStandbys(stream.standbys, snapshot.paths)}`] : []),
-        ];
-    setText(this.details, [STATE_LABELS[state], last, ...running].join("  ·  "));
+    for (const { key, row, value } of this.statRows) {
+      const text = values[key];
+      row.hidden = text === undefined;
+      setText(value, text ?? "");
+      // The state takes its colour, as on the tiles.
+      value.className = key === "state" ? `state-${state}` : "";
+    }
+    this.placeStats();
     this.showStale(time);
   }
 
-  /** While the page hears nothing, a line under the details says so. */
+  /**
+   * Puts the stats window at the left of the picture, a quarter of the way down it, wherever the
+   * picture is drawn: a stream that isn't 16:9 leaves black bars, above and below or on the sides.
+   * While there is no picture (none loaded yet, or none shows), the whole screen counts.
+   */
+  private placeStats(): void {
+    const shown =
+      !this.root.classList.contains("waiting-for-source") &&
+      !this.root.classList.contains("disabled") &&
+      this.video.videoWidth > 0 &&
+      this.video.videoHeight > 0;
+    const picture = pictureRect(
+      { width: this.root.clientWidth, height: this.root.clientHeight },
+      shown ? { width: this.video.videoWidth, height: this.video.videoHeight } : null,
+    );
+    for (const [name, pixels] of Object.entries(picture)) {
+      const value = `${String(pixels)}px`;
+      if (this.root.style.getPropertyValue(`--picture-${name}`) !== value) {
+        this.root.style.setProperty(`--picture-${name}`, value);
+      }
+    }
+  }
+
+  /** While the page hears nothing, a line under the stats says so. */
   private showStale(time: PageTime): void {
     this.connection.hidden = !time.stale;
     setText(this.connection, time.stale ? staleNotice(time) : "");

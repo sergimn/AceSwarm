@@ -66,7 +66,9 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   const player = page.getByRole("dialog", { name: "Player" });
   await expect(player).toBeVisible();
   await expect(player.locator(".player-title")).toHaveText("Channel 12");
-  await expect(player.locator(".player-details")).toContainText("Live");
+  // The live stats are in a window over the picture, one to a line.
+  await expect(player.locator('.player-stat[data-stat="state"] dd')).toHaveText("Live");
+  await expect(player.locator(".player-stats")).toBeVisible();
 
   // Chromium builds without H.264 can't decode the stream; Google Chrome (PW_CHANNEL=chrome) can.
   // The specs run in Node without DOM types, so browser-side code is passed as strings.
@@ -78,6 +80,22 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
       .poll(() => page.evaluate<number>(`document.querySelector(".player video").currentTime`), { timeout: 60_000 })
       .toBeGreaterThan(1);
   }
+
+  // The window sits 24 px in from the picture's left edge and a quarter of the way down it, black
+  // bars left out. Without a picture to show (Chromium can't decode H.264), the whole screen counts.
+  const statsOffset = `(() => {
+    const player = document.querySelector(".player");
+    const video = player.querySelector("video");
+    const stats = player.querySelector(".player-stats").getBoundingClientRect();
+    const shown = video.videoWidth > 0 && !player.matches(".waiting-for-source, .disabled");
+    const scale = shown ? Math.min(player.clientWidth / video.videoWidth, player.clientHeight / video.videoHeight) : 1;
+    const width = shown ? video.videoWidth * scale : player.clientWidth;
+    const height = shown ? video.videoHeight * scale : player.clientHeight;
+    const left = (player.clientWidth - width) / 2;
+    const top = (player.clientHeight - height) / 2;
+    return [Math.round(stats.left - left), Math.round(stats.top - top - height / 4)];
+  })()`;
+  await expect.poll(() => page.evaluate<number[]>(statsOffset)).toEqual([24, 0]);
 
   await page.keyboard.press("Escape");
   await expect(player).toBeHidden();
