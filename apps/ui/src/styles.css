@@ -825,18 +825,43 @@ p.form-error {
   visibility: hidden;
 }
 
-.player-waiting {
+.player-waiting,
+.player-waiting-probe {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  /* WAITING_PADDING in player-stats.ts, and the fallbacks below. */
   padding: 32px;
   text-align: center;
 }
 
-.player-waiting[hidden] {
+.player-waiting {
+  transition: padding 0.25s ease;
+}
+
+/* An unseen copy of the message, always in the middle, that the player measures (see player.ts). */
+.player-waiting-probe {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/*
+ * While the controls show, the message moves out from under the stats window when the window would
+ * cover it (on a small screen, a TV browser's 960×540 included): below it, or beside it on a short
+ * screen. The player sets `--waiting-top`, `--waiting-bottom` and `--waiting-left`. Once the
+ * controls fade, it is back in the middle.
+ */
+.player.show-overlay .player-waiting {
+  padding-top: var(--waiting-top, 32px);
+  padding-bottom: var(--waiting-bottom, 32px);
+  padding-left: var(--waiting-left, 32px);
+}
+
+.player-waiting[hidden],
+.player-waiting-probe[hidden] {
   display: none;
 }
 
@@ -874,18 +899,75 @@ p.form-error {
   font-size: 1.6em;
 }
 
-.player-details {
-  margin: 6px 0 0;
+/*
+ * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
+ * picture's left edge (black bars left out), a quarter of the way down it: the player sets
+ * `--picture-left` and `--stats-top`. It holds nothing to press, so it never takes a click from
+ * the controls.
+ */
+.player-stats {
+  position: absolute;
+  top: var(--stats-top);
+  left: calc(var(--picture-left, 0px) + 24px);
+  max-width: min(24em, calc(100% - var(--picture-left, 0px) - 48px));
+  padding: 10px 14px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 10px;
+  background: rgb(13 17 23 / 70%);
+  font-size: 0.9em;
+  pointer-events: none;
+}
+
+.player-stats dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 16px;
+  margin: 0;
+}
+
+/* The rows only group a label with its value, for the tests and for hiding: the grid lines them up. */
+.player-stat {
+  display: contents;
+}
+
+.player-stat dt {
   color: var(--muted);
 }
 
+.player-stat dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+/* The tiles' grey for "Disabled" is too dim for small text here: the muted colour reads better. */
+.player-stat .state-stopped {
+  color: var(--muted);
+}
+
+.player-stat[data-stat="state"] dd::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-right: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.08em;
+}
+
+/* The controls paint above the stats window, should a very small screen leave no room between them. */
 .player-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
 .player-top {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -893,7 +975,7 @@ p.form-error {
 }
 
 .player-connection {
-  margin: 6px 0 0;
+  margin: 0 0 6px;
   color: var(--amber);
 }
 
