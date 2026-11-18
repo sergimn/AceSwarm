@@ -87,7 +87,7 @@ echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/90-ping
 sudo sysctl --system
 ```
 
-On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it. The containers are gone anyway.
+On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it ([Ubuntu bug 2154379](https://bugs.launchpad.net/ubuntu/+source/passt/+bug/2154379)). Compose then quits early: the last container stays behind (stopped), and so do the stack's networks and, with `-v`, its volumes. The next `docker compose up` still starts the stack.
 
 ## WireGuard
 
