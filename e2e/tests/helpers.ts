@@ -292,6 +292,15 @@ export function fetchFromEngine(engine: string, url: string): { ok: boolean; out
 }
 
 /**
+ * One series' value in the controller's metrics text, by its name and its first labels (such as
+ * `stream="…"`); undefined when it has none. The registry adds a service label of its own.
+ */
+export function metricValue(text: string, name: string, labels: string): number | undefined {
+  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(text);
+  return match === null ? undefined : Number(match[1]);
+}
+
+/**
  * The stream's recoveries that brought video back, by the step that counted
  * (aceswarm_stream_recoveries_succeeded_total, which the dashboard's "Recoveries per hour" and
  * "Recoveries in range" add up). Every step has a count from the stream's start, 0 at first.

@@ -230,3 +230,86 @@ test("a disabled stream has no up value, so it is neither an outage nor in the a
   current = { ...stream, enabled: false };
   expect(await up()).toBeUndefined();
 });
+
+test("exports how long the broadcast is quiet from the stream's quiet time, not from the session's own edge", async () => {
+  const registry = new Registry();
+  const ago = (ms: number): string => new Date(Date.now() - ms).toISOString();
+  const waiting: StreamView = {
+    id: "s1",
+    aceId: "a".repeat(40),
+    aceIdKind: "infohash",
+    name: "One",
+    enabled: true,
+    createdAt: "2026-11-06T10:00:00.000Z",
+    state: "stale-source",
+    stateSince: "2026-11-06T10:00:00.000Z",
+    message: null,
+    lastFrameAt: ago(150_000),
+    // A retry opened a session 13 s ago, whose edge was first seen then. The broadcast sent its
+    // last new data more than two minutes ago.
+    liveEdge: {
+      state: "waiting",
+      edgeAt: ago(147_000),
+      advancedAt: ago(13_000),
+      quietSince: ago(127_000),
+      behindSeconds: 0,
+    },
+    peers: { connected: null, active: null, uploading: null, countries: [] },
+    downloadKBps: null,
+    uploadKBps: null,
+    path: "direct",
+    recoveries: 3,
+    viewers: 0,
+    hls: { preview: "", full: "", thumbnail: "" },
+    engine: null,
+    standbys: [],
+  };
+  let current = waiting;
+  new ControllerMetrics(registry, () => ({ streams: [current], paths: [] }));
+  const seconds = async (metric: string): Promise<number | undefined> => {
+    const match = new RegExp(String.raw`^${metric}\{stream="s1"\} (\S+)$`, "m").exec(await registry.metrics());
+    return match === null ? undefined : Number(match[1]);
+  };
+  const quiet = async (): Promise<number | undefined> => seconds("aceswarm_stream_source_quiet_seconds");
+
+  // The retry's own edge started over; how long the broadcast is quiet did not.
+  expect(await quiet()).toBeGreaterThanOrEqual(127);
+  expect(await quiet()).toBeLessThan(137);
+  expect(await seconds("aceswarm_stream_live_edge_unchanged_seconds")).toBeGreaterThanOrEqual(13);
+  expect(await seconds("aceswarm_stream_live_edge_unchanged_seconds")).toBeLessThan(23);
+
+  // The next retry's session has no live position yet, and still says since when.
+  current = {
+    ...waiting,
+    liveEdge: { state: "waiting", edgeAt: null, advancedAt: null, quietSince: ago(187_000), behindSeconds: null },
+  };
+  expect(await quiet()).toBeGreaterThanOrEqual(187);
+  expect(await seconds("aceswarm_stream_live_edge_unchanged_seconds")).toBeUndefined();
+
+  // While the stream plays, the edge of its live session keeps moving: about 0.
+  const live = ago(1000);
+  current = {
+    ...waiting,
+    state: "playing",
+    liveEdge: { state: "live", edgeAt: live, advancedAt: live, quietSince: live, behindSeconds: 4 },
+  };
+  expect(await quiet()).toBeGreaterThanOrEqual(1);
+  expect(await quiet()).toBeLessThan(11);
+  // The transcoder's clock a little ahead of ours is no negative time.
+  const ahead = new Date(Date.now() + 5000).toISOString();
+  current = {
+    ...current,
+    liveEdge: { state: "live", edgeAt: ahead, advancedAt: ahead, quietSince: ahead, behindSeconds: 4 },
+  };
+  expect(await quiet()).toBe(0);
+
+  // Nothing known: the stream's first session before its first live position, a source without
+  // one, and a stream without a session.
+  current = {
+    ...waiting,
+    liveEdge: { state: "none", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null },
+  };
+  expect(await quiet()).toBeUndefined();
+  current = { ...waiting, enabled: false, state: "stopped", path: null, liveEdge: null };
+  expect(await quiet()).toBeUndefined();
+});

@@ -6,6 +6,7 @@ import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
 import { Generation, killProcess, lastErrorLine, modifiedAt, VARIANTS, type Variant } from "./generation.ts";
+import { KeyFrames, REOPENS_AFTER_FALLBACK } from "./key-frames.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
@@ -19,7 +20,7 @@ import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 
-export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode">;
+export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode" | "allFrames">;
 
 export interface PipelineSettings {
   hlsDir: string;
@@ -81,6 +82,8 @@ export class Pipeline {
   private pending: Generation | undefined;
   private nextNumber = 1;
   private forceTranscode = false;
+  /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
+  private readonly keyFrames = new KeyFrames();
   /**
    * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
    * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
@@ -194,7 +197,7 @@ export class Pipeline {
       lastFrameAt:
         generation.publishedFrameAt === undefined ? null : new Date(generation.publishedFrameAt).toISOString(),
       frames: generation.frames,
-      fps: generation.fps ?? null,
+      fps: generation.frameRate(),
       videoCodec: generation.videoCodec ?? null,
       mode: generation.mode,
       exitCode: generation.exitCode,
@@ -264,7 +267,7 @@ export class Pipeline {
       this.reopen(active);
       return;
     }
-    if (!(await this.openGate(active)) || active !== this.active) {
+    if (this.fallBackToAllFrames(active) || !(await this.openGate(active)) || active !== this.active) {
       return;
     }
     for (const variant of VARIANTS) {
@@ -372,6 +375,8 @@ export class Pipeline {
       if (this.mayReopenNow(pending)) {
         this.reopen(pending);
       }
+    } else if (!timedOut && this.fallBackToAllFrames(pending)) {
+      // Its ffmpeg starts again, and the handover goes on with that run.
     } else if (pending.state === "exited" || timedOut) {
       const stderr = pending.stderrTail.slice(-5);
       this.logger.warn({ generation: pending.number, error: pending.error, stderr }, "handover failed");
@@ -393,21 +398,42 @@ export class Pipeline {
       generation.reopens - 1,
       generation.stat,
     );
-    next.handoverSince = generation.handoverSince;
-    if (generation === this.pending) {
-      this.pending = next;
-    } else {
-      this.active = next;
-    }
-    this.retire(generation);
     this.logger.info(
       { generation: generation.number, stderr: generation.stderrTail.slice(-5), reopensLeft: next.reopens },
       "ffmpeg failed before any video; opening the source again",
     );
-    void this.run(next, "reopen").catch((error: unknown) => {
+    this.swap(generation, next, "reopen");
+  }
+
+  /**
+   * Starts `next`, a new run on the source of `generation`, in its place: it stops, and a handover
+   * it was part of goes on with `next`. Nothing waits, so no other sync starts a second one.
+   */
+  private swap(generation: Generation, next: Generation, reason: string): void {
+    next.handoverSince = generation.handoverSince;
+    this[generation === this.pending ? "pending" : "active"] = next;
+    this.retire(generation);
+    void this.run(next, reason).catch((error: unknown) => {
       next.state = "exited";
       next.error = error instanceof Error ? error.message : String(error);
     });
+  }
+
+  /**
+   * Starts a run that decodes every frame in place of one that decodes key frames only, when that
+   * one read the source for `KEY_FRAMES_PATIENCE_MS` without a single frame coming of it: the
+   * broadcast has no key frames ffmpeg can use (see `decodesKeyFramesOnly`), so the previews and
+   * thumbnails never start. The full stream is copied and plays, but with no frame counted the
+   * controller takes the stream for dead. Every later run of the stream decodes every frame too.
+   */
+  private fallBackToAllFrames(generation: Generation): boolean {
+    if (!this.keyFrames.fallBack(generation, this.planOf(generation), this.now())) {
+      return false;
+    }
+    this.logger.warn({ generation: generation.number }, "key frames only decoding gave no frame; decoding every frame");
+    const { source, inputTimeoutSeconds, stat } = generation;
+    this.swap(generation, this.prepare(source, inputTimeoutSeconds, REOPENS_AFTER_FALLBACK, stat), "all-frames");
+    return true;
   }
 
   private promote(pending: Generation): void {
@@ -450,6 +476,7 @@ export class Pipeline {
       stat,
       directory,
       mode,
+      allFrames: this.keyFrames.allFrames,
       startedAt: this.now(),
       inputTimeoutSeconds,
     });
@@ -480,22 +507,22 @@ export class Pipeline {
     return newest === undefined ? undefined : { ...newest, quietSince };
   }
 
+  /** What the generation's ffmpeg does. */
+  private planOf(generation: Generation): FfmpegPlan {
+    const { source, directory, mode: fullMode, allFrames, inputTimeoutSeconds } = generation;
+    return { ...this.settings.plan, source, directory, fullMode, allFrames, inputTimeoutSeconds };
+  }
+
   /** Starts the generation's ffmpeg, unless it was retired or the pipeline stopped meanwhile. */
   private async run(generation: Generation, reason: string): Promise<void> {
-    const { number, source, directory, inputTimeoutSeconds } = generation;
+    const { number, directory, inputTimeoutSeconds } = generation;
     await mkdir(join(directory, "full"), { recursive: true });
     await mkdir(join(directory, "preview"), { recursive: true });
     if (generation.retired || this.stopped) {
       generation.state = "exited";
       return;
     }
-    const args = buildFfmpegArgs({
-      ...this.settings.plan,
-      source,
-      directory,
-      fullMode: generation.mode,
-      inputTimeoutSeconds,
-    });
+    const args = buildFfmpegArgs(this.planOf(generation));
     this.logger.info({ generation: number, mode: generation.mode, reason, inputTimeoutSeconds }, "starting ffmpeg");
     this.events.generationStarted(this.id, reason);
 
@@ -507,8 +534,13 @@ export class Pipeline {
       for (const block of progress.push(chunk)) {
         if (block.frame !== undefined && block.frame > generation.frames) {
           generation.frames = block.frame;
+          this.keyFrames.progressed(block, this.planOf(generation));
           generation.lastFrameAt = this.now();
-          generation.state = "running";
+          if (generation.state !== "exited") {
+            // A block it printed as it ended can be read after its exit: its frames count, but
+            // it must not look like it runs again.
+            generation.state = "running";
+          }
           if (generation.publishing() && generation.published) {
             generation.publishedFrameAt = generation.lastFrameAt;
           }
@@ -581,6 +613,7 @@ export class Pipeline {
   /** Stops a generation and removes its files once players can no longer reference them. */
   private retire(generation: Generation): void {
     generation.retired = true;
+    this.keyFrames.ended(generation);
     this.lastEdge = this.newestEdge(generation);
     generation.watch?.stop();
     killProcess(generation.process);
