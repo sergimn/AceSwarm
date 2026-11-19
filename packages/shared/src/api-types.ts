@@ -272,6 +272,8 @@ export interface LiveEdgeView {
    * the edge of a live session of the stream moved, or while none was live, when the stream's first
    * session saw an edge. Unlike `advancedAt`, it goes on when a new session opens: one whose peers
    * know of a slightly later end of the old window starts its own edge from now, not the broadcast.
+   * A new session has it from the stream's earlier ones before it has an edge of its own.
+   * Null for a session without a live position (`none`): it says nothing about the broadcast.
    */
   quietSince: string | null;
   /** How far behind its live edge the engine serves the stream, in seconds. */

@@ -562,6 +562,13 @@ describe("Pipeline with a source's live edge", () => {
     // old window than the stream's session did, and its edge never moves again.
     clock.now += 600_000;
     await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    // Before the new session has a live position of its own, it already says since when.
+    expect(instance.status().liveEdge).toMatchObject({
+      state: "waiting",
+      edgeAt: null,
+      advancedAt: null,
+      quietSince: iso(lastNewData),
+    });
     stat(1, 5006, 100);
     clock.now += 61_000;
     await instance.sync();
