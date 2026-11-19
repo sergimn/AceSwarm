@@ -3,6 +3,7 @@ import {
   addStream,
   docker,
   engineContainers,
+  metricValue,
   recoveriesSucceeded,
   resetStack,
   streamById,
@@ -93,6 +94,14 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     .poll(async () => (await streamById(request, stream.id))?.liveEdge?.state, { timeout: 30_000 })
     .toBe("live");
   const playlist = stream.hls.full;
+  // How long the broadcast sent nothing new, as the dashboard's "Broadcast quiet for" shows it.
+  const quietFor = async (): Promise<number | undefined> => {
+    const response = await request.get("/metrics");
+    expect(response.ok()).toBe(true);
+    return metricValue(await response.text(), "aceswarm_stream_source_quiet_seconds", `stream="${stream.id}"`);
+  };
+  // While it plays, its live edge keeps moving: less than the stale threshold (30 s here).
+  await expect.poll(quietFor, { timeout: 30_000 }).toBeLessThan(30);
   // The recoveries that had worked by the time it waits for the broadcast.
   let recovered: Record<string, number>;
 
@@ -115,6 +124,10 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     expect(waiting?.state).toBe("stale-source");
     expect(waiting?.message).toContain("broadcast");
     expect(waiting?.lastFrameAt).toBe(quiet);
+    // The broadcast has been quiet for the stale threshold at least (30 s here).
+    const quietAtFirst = await quietFor();
+    expect(quietAtFirst).toBeGreaterThanOrEqual(30);
+    let quietSoFar = quietAtFirst!;
     recovered = await recoveriesSucceeded(request, stream.id);
 
     // While it waits, new sessions bring the old window: none of it is published, and it doesn't
@@ -127,10 +140,17 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
       expect(current?.lastFrameAt).toBe(quiet);
       expect((await request.get(playlist)).status()).toBe(404);
       expect((await request.get(stream.hls.thumbnail)).status()).toBe(404);
+      // How long the broadcast is quiet keeps counting: a try's new session, whose own live edge
+      // is first seen when it opens, doesn't start it over, and it has a value all the time.
+      const quietNow = await quietFor();
+      expect(quietNow).toBeGreaterThanOrEqual(quietSoFar);
+      quietSoFar = quietNow!;
     }
     const tries = (await streamById(request, stream.id))!.recoveries - waiting!.recoveries;
     expect(tries).toBeGreaterThanOrEqual(1);
     expect(tries).toBeLessThanOrEqual(4);
+    // It grew through those tries by about the time they took.
+    expect(quietSoFar).toBeGreaterThanOrEqual(quietAtFirst! + 25);
     // Tries that bring no video are attempts: none of them counts as a recovery that worked.
     expect(await recoveriesSucceeded(request, stream.id)).toEqual(recovered);
   } finally {

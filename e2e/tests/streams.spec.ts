@@ -4,6 +4,7 @@ import {
   compose,
   docker,
   engineContainers,
+  metricValue,
   resetStack,
   snapshot,
   streamById,
@@ -390,12 +391,6 @@ test("keeps streams and their detected kind across a controller restart", async 
     await waitForPlaying(request, stream.id);
   }
 });
-
-/** One series' value in the controller's metrics text; the registry adds a service label of its own. */
-function metricValue(text: string, name: string, labels: string): number | undefined {
-  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(text);
-  return match === null ? undefined : Number(match[1]);
-}
 
 test("disables a stream, says how long ago it had video, and plays it again once enabled", async ({
   page,

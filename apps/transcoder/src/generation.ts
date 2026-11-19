@@ -171,6 +171,14 @@ export class Generation {
   }
 
   /**
+   * The frame rate its ffmpeg last reported, while that runs. None once it exited or was stopped
+   * for a stale source: the last value it printed says nothing about a stream that has no ffmpeg.
+   */
+  frameRate(): number | null {
+    return this.state === "exited" || this.staleStopped ? null : (this.fps ?? null);
+  }
+
+  /**
    * Notes whether the broadcast's data comes at `now`: ffmpeg opened the source (it knows its
    * video), the run may publish, and the live edge moved lately (a source without a stat URL has
    * nothing to tell, and counts). It notes when the data began to come, together with how long it

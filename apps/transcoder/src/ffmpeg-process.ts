@@ -78,7 +78,11 @@ export function attachFfmpeg(generation: Generation, child: ChildProcess, hooks:
         generation.frames = block.frame;
         hooks.onFrames(block);
         generation.lastFrameAt = hooks.now();
-        generation.state = "running";
+        if (generation.state !== "exited") {
+          // A block it printed as it ended can be read after its exit: its frames count, but it
+          // must not look like it runs again.
+          generation.state = "running";
+        }
         if (generation.publishing() && generation.published) {
           generation.publishedFrameAt = generation.lastFrameAt;
         }
