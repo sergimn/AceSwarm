@@ -67,7 +67,8 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  *   window sees its edge rise faster than time passes, and then stop.
  * - live: the edge moved within `staleAfterMs`, and the engine serves close to it.
  * - stale: the edge did not move for `staleAfterMs` (counted from when it was first seen), or the
- *   engine serves more than `staleAfterMs` behind it.
+ *   engine serves more than `staleAfterMs` behind it. `staleBecause` tells the two apart for the
+ *   controller: only the first is the broadcast's doing.
  * - none: the session has no live position (see `noLiveAfterPolls`).
  */
 export class LiveEdge {
@@ -183,12 +184,31 @@ export class LiveEdge {
     if (this.edge === undefined) {
       return this.hasNoLivePos ? "none" : "waiting";
     }
-    const now = this.now();
-    const staleAfterMs = this.settings.staleAfterMs;
-    if (now - (this.edgeSince ?? now) > staleAfterMs || this.behindMs() > staleAfterMs) {
+    if (this.staleBecause() !== null) {
       return "stale";
     }
     return this.verified ? "live" : "waiting";
+  }
+
+  /**
+   * Why the session is stale, when it is (see `LiveEdgeView.staleBecause`). One that serves far
+   * behind its edge is only the engine's fault ("behind") while the broadcast is known to send new
+   * data: a live session of the stream saw its edge move within `staleAfterMs`. Otherwise it is a
+   * session on the old window of a broadcast that stopped, which a new engine can't help.
+   */
+  private staleBecause(): "quiet" | "behind" | null {
+    if (this.edge === undefined) {
+      return null;
+    }
+    const now = this.now();
+    const staleAfterMs = this.settings.staleAfterMs;
+    if (now - (this.edgeSince ?? now) > staleAfterMs) {
+      return "quiet";
+    }
+    if (this.behindMs() <= staleAfterMs) {
+      return null;
+    }
+    return now - (this.quietSince ?? -Infinity) <= staleAfterMs ? "behind" : "quiet";
   }
 
   /** Whether the edge moved within the last `ms`: the broadcast sends new data now. */
@@ -210,6 +230,7 @@ export class LiveEdge {
     const quietSince = state === "none" ? undefined : this.quietSince;
     return {
       state,
+      staleBecause: this.staleBecause(),
       edgeAt: this.edge === undefined ? null : new Date(this.edge * 1000).toISOString(),
       advancedAt: this.edgeSince === undefined ? null : new Date(this.edgeSince).toISOString(),
       quietSince: quietSince === undefined ? null : new Date(quietSince).toISOString(),

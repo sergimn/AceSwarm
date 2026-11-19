@@ -41,6 +41,24 @@ describe("SourceWait", () => {
     expect(wait.state("stalled")).toBe("stalled");
   });
 
+  it("is over once the broadcast is back, though the engine serves it too far behind", () => {
+    const wait = waiting();
+    const lagging: LiveEdgeView = { ...edge("stale", 5048), staleBecause: "behind", behindSeconds: 103 };
+    // Nothing to end while it doesn't wait.
+    expect(wait.back(lagging)).toBe(false);
+    wait.begin("stale", edge("stale", 5000));
+    // The one early try was used by the session that turned out to lag.
+    expect(wait.moved(edge("live", 5040))).toBe(true);
+    expect(wait.moved(lagging)).toBe(false);
+    expect(wait.back(lagging)).toBe(true);
+    expect(wait.waiting).toBe(false);
+    expect(wait.waits(USUAL)).toBe(USUAL);
+    expect(wait.state("recovering")).toBe("recovering");
+    // A wait that begins after it starts fresh: it may try early again.
+    wait.begin("stale", edge("stale", 5100));
+    expect(wait.moved(edge("live", 5103))).toBe(true);
+  });
+
   it("never waits less than its first wait, even with a shorter usual maximum", () => {
     const wait = new SourceWait(createLogger("test", "silent"), { baseDelayMs: 1000, maxDelayMs: 4000 }, 10_000);
     wait.begin("stale", null);

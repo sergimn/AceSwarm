@@ -50,6 +50,20 @@ export class SourceWait {
   }
 
   /**
+   * The broadcast sends new data again, though the session brings no video: its engine serves the
+   * broadcast too far behind its live edge (`LiveEdgeView.staleBecause` is "behind"). The wait is
+   * over, and what is left is the engine's to fix. Returns whether it was waiting.
+   */
+  back(liveEdge: LiveEdgeView | null | undefined): boolean {
+    if (!this.stale) {
+      return false;
+    }
+    this.logger.info({ liveEdge }, "the broadcast sends new data again, but the engine serves it too far behind");
+    this.end();
+    return true;
+  }
+
+  /**
    * Whether to try now rather than when the next step is due: the live edge of the session it
    * waits on moved again (the engine may notice the broadcast is back before the next try). At
    * most once between two steps that came when due (see `due`), so an edge that moves while the

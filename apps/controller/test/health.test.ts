@@ -1,4 +1,4 @@
-import type { PipelineStatus } from "@aceswarm/shared/api-types";
+import type { LiveEdgeView, PipelineStatus } from "@aceswarm/shared/api-types";
 import { describe, expect, it } from "vitest";
 import { duration, evaluateHealth, type HealthInputs } from "../src/health.ts";
 
@@ -74,7 +74,7 @@ describe("evaluateHealth", () => {
   });
 });
 
-function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): PipelineStatus["liveEdge"] {
+function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): LiveEdgeView {
   return {
     state: "stale",
     edgeAt: new Date(advancedAt).toISOString(),
@@ -83,6 +83,36 @@ function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): 
     behindSeconds,
   };
 }
+
+describe("a source whose engine serves a broadcast that goes on too far behind", () => {
+  // The edge moved 2 s ago and the broadcast sent new data then: only the engine is 103 s late.
+  const lagging = { ...stale(NOW - 2000, 103), staleBecause: "behind" as const };
+
+  it("is stalled, not a stale source: the broadcast is there, and a new engine fixes it", () => {
+    const stopped = pipeline({ state: "exited", error: "stopped reading", liveEdge: lagging });
+    expect(evaluateHealth(inputs({ pipeline: stopped }))).toEqual({
+      state: "stalled",
+      healthy: false,
+      reason: "the engine serves the broadcast 103s late",
+      lagging: true,
+    });
+  });
+
+  it("is a stale source when the transcoder says the broadcast is quiet, or doesn't say why", () => {
+    for (const staleBecause of ["quiet", null, undefined] as const) {
+      const liveEdge = {
+        ...stale(NOW - 2000, 103, NOW - 660_000),
+        ...(staleBecause !== undefined && { staleBecause }),
+      };
+      const health = evaluateHealth(inputs({ pipeline: pipeline({ liveEdge }) }));
+      expect(health).toEqual({
+        state: "stale-source",
+        healthy: false,
+        reason: "no new data from the broadcast for 11m",
+      });
+    }
+  });
+});
 
 describe("a source whose live edge stopped", () => {
   it("is a stale source, before any other reading of the pipeline", () => {

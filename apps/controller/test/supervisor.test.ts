@@ -1870,6 +1870,99 @@ describe("a broadcast that sends nothing new (stale source)", () => {
   });
 });
 
+/** A session the transcoder stopped reading because its engine serves a broadcast that goes on 103 s late. */
+function lagging(now: number): LiveEdgeView {
+  return {
+    state: "stale",
+    staleBecause: "behind",
+    edgeAt: new Date(now - 2000).toISOString(),
+    advancedAt: new Date(now - 1000).toISOString(),
+    quietSince: new Date(now - 1000).toISOString(),
+    behindSeconds: 103,
+  };
+}
+
+describe("an engine that serves a broadcast that goes on too far behind (lagging)", () => {
+  test("is replaced at once when a wait for the broadcast ends on it, also after the wait's early try", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    // The broadcast stops: the stream waits for it.
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("stale-source");
+    expect(fake.restarted).toHaveLength(1);
+
+    // The live edge moves again: the wait's one early try opens a new engine.
+    fake.clock.now += settings.startupGraceMs + 1000;
+    const moved = new Date(fake.clock.now).toISOString();
+    liveEdge.value = { state: "waiting", edgeAt: moved, advancedAt: moved, quietSince: moved, behindSeconds: 0 };
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(2);
+    expect(fake.instance.view().state).toBe("stale-source");
+
+    // That engine serves the broadcast 103 s late, and the transcoder stopped reading it. The wait's
+    // next try is half a minute away and its early try is used: the engine is replaced now.
+    fake.clock.now += 3000;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(3);
+    expect(fake.instance.view()).toMatchObject({
+      state: "recovering",
+      message: "the engine serves the broadcast 103s late; restart engine",
+    });
+
+    // Every next engine lags too: they are not replaced back to back, the usual waits double.
+    const states = new Set<string>();
+    const actions: number[] = [];
+    for (let second = 1; second <= 40; second += 1) {
+      fake.clock.now += 1000;
+      liveEdge.value = lagging(fake.clock.now);
+      const before = fake.restarted.length;
+      await fake.instance.tick();
+      states.add(fake.instance.view().state);
+      if (fake.restarted.length > before) {
+        actions.push(second);
+      }
+    }
+    expect(actions).toEqual([1, 3, 7, 15, 31]);
+    expect(states.has("stale-source")).toBe(false);
+    expect(fake.instance.view().message).toMatch(/^the engine serves the broadcast 103s late; retrying in \d+s$/);
+
+    // The broadcast stops again: the stream waits for it again, with the longer waits.
+    fake.clock.now += 1000;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(8);
+    expect(fake.instance.view()).toMatchObject({ state: "stale-source" });
+    expect(fake.instance.view().message).toMatch(/trying a new engine in \d+s$/);
+  });
+
+  test("is replaced at once when a stream that played falls behind, and counts as a recovery", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("playing");
+    const recoveries = fake.instance.view().recoveries;
+
+    video.on = false;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    // A new engine, not a new session on the one that lags.
+    expect(fake.restarted).toHaveLength(1);
+    expect(fake.instance.view()).toMatchObject({
+      state: "recovering",
+      message: "the engine serves the broadcast 103s late; restart engine",
+      recoveries: recoveries + 1,
+    });
+  });
+});
+
 describe("sharing one engine per path", () => {
   const sharedEngine: EngineHandle = {
     ...engine,
@@ -1990,6 +2083,18 @@ describe("sharing one engine per path", () => {
     await stallAndRecover(fake, 3);
     expect(pool.reports).toEqual([]);
     expect(fake.instance.view().state).toBe("stale-source");
+  });
+
+  test("blames the shared engine for serving a broadcast that goes on too far behind", async () => {
+    const pool = sharedEngines();
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true }, viewers: 1, liveEdge });
+    await fake.instance.tick();
+    liveEdge.value = lagging(fake.clock.now);
+    await stallAndRecover(fake, 1);
+    expect(pool.reports).toHaveLength(1);
+    expect(pool.reports[0]).toMatchObject({ wantsRestart: true });
+    expect(fake.instance.view().state).not.toBe("stale-source");
   });
 
   test("doesn't blame the shared engine while its path is down", async () => {
