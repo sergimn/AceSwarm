@@ -271,7 +271,8 @@ export class ControllerMetrics {
       help:
         "Seconds since the stream's broadcast last sent new data, by our clock: since the live edge of a live session " +
         "of the stream last moved (while none was live yet, since its first session saw a live edge). " +
-        "It goes on through retries, whose new sessions start their own edge over, and is near 0 while the stream plays",
+        "It goes on through retries, whose new sessions start their own edge over, and is near 0 while the stream plays. " +
+        "No value while the stream's session shows no live position",
       labelNames: ["stream"],
       registers,
     });

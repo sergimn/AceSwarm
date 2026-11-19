@@ -22,14 +22,19 @@ function withoutAddresses(error: string): string {
 }
 
 /**
- * What a standby's reader says is wrong with its session: its error, or that the broadcast is stale.
- * The last answer's: it stays while the transcoder can't be reached.
+ * What a standby's reader says is wrong with its session: its error, or why its source is stale
+ * (see `LiveEdgeView.staleBecause`). The last answer's: it stays while the transcoder can't be reached.
  */
 export function readerNote(reader: StandbyReaderStatus): string | undefined {
   if (reader.error !== null) {
     return withoutAddresses(reader.error);
   }
-  return reader.liveEdge?.state === "stale" ? "its broadcast sends no new data" : undefined;
+  if (reader.liveEdge?.state !== "stale") {
+    return undefined;
+  }
+  return reader.liveEdge.staleBecause === "behind"
+    ? "its engine serves the broadcast too far behind"
+    : "its broadcast sends no new data";
 }
 
 export function standbyView(standby: StandbyEngine, hotWithinMs: number): StandbyView {

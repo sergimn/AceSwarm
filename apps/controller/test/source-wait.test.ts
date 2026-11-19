@@ -41,6 +41,66 @@ describe("SourceWait", () => {
     expect(wait.state("stalled")).toBe("stalled");
   });
 
+  it("is over once the broadcast is back, though the engine serves it too far behind", () => {
+    const wait = waiting();
+    const lagging: LiveEdgeView = { ...edge("stale", 5048), staleBecause: "behind", behindSeconds: 103 };
+    // Nothing to end while it doesn't wait.
+    expect(wait.back(lagging)).toBeUndefined();
+    const ladder = { failures: 0, lastActionAt: undefined };
+    wait.begin("stale", edge("stale", 5000), ladder);
+    // The one early try was used by the session that turned out to lag.
+    expect(wait.moved(edge("live", 5040))).toBe(true);
+    expect(wait.moved(lagging)).toBe(false);
+    expect(wait.back(lagging)).toBe(ladder);
+    expect(wait.waiting).toBe(false);
+    expect(wait.waits(USUAL)).toBe(USUAL);
+    expect(wait.state("recovering")).toBe("recovering");
+    // A wait that begins after it starts fresh: it may try early again.
+    wait.begin("stale", edge("stale", 5100));
+    expect(wait.moved(edge("live", 5103))).toBe(true);
+  });
+
+  it("gives back the ladder of when it began, not one that starts over or that its own tries moved", () => {
+    const wait = waiting();
+    const lagging: LiveEdgeView = { ...edge("stale", 5048), staleBecause: "behind", behindSeconds: 103 };
+    // Three engines lagged already when the transcoder could no longer tell that the broadcast goes on.
+    const before = { failures: 3, lastActionAt: 40_000 };
+    wait.begin("stale", edge("stale", 5000), before);
+    // The wait goes on, with a ladder its tries moved: that one is not kept.
+    wait.begin("stale", edge("stale", 5000), { failures: 4, lastActionAt: 75_000 });
+    expect(wait.back(lagging)).toBe(before);
+    // It is forgotten with the wait.
+    wait.begin("stale", edge("stale", 5100));
+    expect(wait.back(lagging)).toBeUndefined();
+    expect(wait.waiting).toBe(false);
+  });
+
+  it("goes on from the ladder of a restart by hand, which started the ladder over", () => {
+    const wait = waiting();
+    const lagging: LiveEdgeView = { ...edge("stale", 5048), staleBecause: "behind", behindSeconds: 103 };
+    wait.begin("stale", edge("stale", 5000), { failures: 3, lastActionAt: 40_000 });
+    expect(wait.moved(edge("live", 5040))).toBe(true);
+    const restarted = { failures: 1, lastActionAt: 90_000 };
+    wait.byHand(restarted);
+    // The next step may come early again, as after a step that came when due.
+    expect(wait.moved(edge("live", 5050))).toBe(true);
+    // The wait's tries after the restart moved the ladder on: they don't count either.
+    wait.begin("stale", edge("stale", 5050), { failures: 6, lastActionAt: 900_000 });
+    expect(wait.back(lagging)).toBe(restarted);
+    expect(wait.waiting).toBe(false);
+  });
+
+  it("keeps no ladder from a restart by hand while it doesn't wait", () => {
+    const wait = waiting();
+    const lagging: LiveEdgeView = { ...edge("stale", 5048), staleBecause: "behind", behindSeconds: 103 };
+    wait.byHand({ failures: 1, lastActionAt: 90_000 });
+    expect(wait.back(lagging)).toBeUndefined();
+    // A wait that begins later starts from the ladder it is given then.
+    const ladder = { failures: 2, lastActionAt: 120_000 };
+    wait.begin("stale", edge("stale", 5000), ladder);
+    expect(wait.back(lagging)).toBe(ladder);
+  });
+
   it("never waits less than its first wait, even with a shorter usual maximum", () => {
     const wait = new SourceWait(createLogger("test", "silent"), { baseDelayMs: 1000, maxDelayMs: 4000 }, 10_000);
     wait.begin("stale", null);

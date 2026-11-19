@@ -771,7 +771,7 @@
         "overrides": []
       },
       "options": {},
-      "description": "Seconds since each stream's broadcast last sent new data: since the live edge of a live session of the stream last moved (the newest data of the broadcast its engine knows of). It is about 0 while the stream plays. Past STALE_SOURCE_SECONDS (60 by default) the broadcast counts as stopped: the stream shows 'Waiting for source', nothing old is published, and it tries a new session from time to time. Those tries don't start the line over: it keeps growing until a session sees new data. A stream that never had a live session counts from when its first session saw a live edge (aceswarm_stream_source_quiet_seconds)."
+      "description": "Seconds since each stream's broadcast last sent new data: since the live edge of a live session of the stream last moved (the newest data of the broadcast its engine knows of). It is about 0 while the stream plays. Past STALE_SOURCE_SECONDS (60 by default) the broadcast counts as stopped: the stream shows 'Waiting for source', nothing old is published, and it tries a new session from time to time. Those tries don't start the line over: it keeps growing until a session sees new data. A stream that never had a live session counts from when its first session saw a live edge. No value while the stream's session shows no live position: its output is played as it comes (aceswarm_stream_source_quiet_seconds)."
     },
     {
       "type": "timeseries",

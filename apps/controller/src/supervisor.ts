@@ -3,7 +3,7 @@ import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession, EngineStats } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
-import { duration, evaluateHealth } from "./health.ts";
+import { duration, evaluateHealth, type Health } from "./health.ts";
 import { sleep } from "./playback.ts";
 import { leaveDisallowedPath } from "./policy-move.ts";
 import { nextRecovery, type RecoveryAction, type RecoveryPolicy, type RecoveryState } from "./recovery.ts";
@@ -250,7 +250,7 @@ export class StreamSupervisor {
     } else if (health.state === "starting" || health.state === "buffering") {
       this.setState(this.sourceWait.state(health.state), this.sourceWait.starting(health.reason));
     } else {
-      await this.recover(health.reason, health.state === "stale-source");
+      await this.recover(health);
     }
   }
 
@@ -280,8 +280,8 @@ export class StreamSupervisor {
     }
     // Someone stepped in: it acts now, and the ladder's waits start over from this step.
     this.recovery = { failures: 0, lastActionAt: undefined };
-    this.sourceWait.due();
     await this.runAction("restart-engine", "manual restart", this.state !== "playing");
+    this.sourceWait.byHand(this.recovery);
   }
 
   /**
@@ -296,6 +296,7 @@ export class StreamSupervisor {
     this.forceRestart = false;
     this.logger.info("manual restart; the stream has no session, starting it now");
     this.recovery = { failures: 0, lastActionAt: undefined };
+    this.sourceWait.byHand(this.recovery);
   }
 
   private readonly setState = (state: StreamState, message: string | null): void => {
@@ -433,16 +434,24 @@ export class StreamSupervisor {
   }
 
   /**
-   * Walks the recovery ladder. With a `staleSource` (its broadcast sends nothing new, see
+   * Walks the recovery ladder. With a stale source (its broadcast sends nothing new, see
    * `evaluateHealth`), the transcoder already stopped reading it and publishes none of it, and the
    * steps wait longer: each new session or engine is a try to find the broadcast moving again,
    * which only it coming back can make work. A hot standby still takes over, since a standby only
    * counts as hot while its own live edge moves: the broadcast is fine there.
+   *
+   * With a lagging engine the broadcast is there: a wait for it is over, and the ladder goes on
+   * from where it was when the wait began, or after a restart by hand since (see `SourceWait.back`).
+   * For a stream that played until the wait, the engine is replaced now, not when the wait's next
+   * try was due. Should the next engines lag too, the ladder's usual waits, which double, keep
+   * them from going back to back.
    */
-  private async recover(why: string, staleSource = false): Promise<void> {
-    let reason = why;
-    if (staleSource) {
-      this.sourceWait.begin(reason, this.pipeline?.liveEdge);
+  private async recover(health: Health): Promise<void> {
+    let { reason } = health;
+    if (health.state === "stale-source") {
+      this.sourceWait.begin(reason, this.pipeline?.liveEdge, this.recovery);
+    } else if (health.lagging === true) {
+      this.recovery = this.sourceWait.back(this.pipeline?.liveEdge) ?? this.recovery;
     }
     const waiting = this.sourceWait.waiting;
     // A hot standby takes over at once, before the ladder: it already pulls the stream.
@@ -453,7 +462,9 @@ export class StreamSupervisor {
       await this.failover.failOver(`${reason}; failing over to a standby`);
       return;
     }
-    const decision = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), this.canSwitchPath(), waiting);
+    // Either kind of stale source wants a new engine: the one it has keeps what it serves.
+    const freshEngine = waiting || health.lagging === true;
+    const decision = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), this.canSwitchPath(), freshEngine);
     const wait = this.sourceWait.until(decision.notBefore, this.now(), this.pipeline?.liveEdge);
     if (wait > 0) {
       this.setState(this.sourceWait.state("stalled"), `${reason}; ${this.sourceWait.next} in ${duration(wait)}`);

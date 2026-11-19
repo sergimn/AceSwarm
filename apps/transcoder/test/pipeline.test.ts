@@ -208,10 +208,11 @@ describe("Pipeline", () => {
     // ffmpeg ends: what it printed last is not the frame rate of a stream that has none running.
     exit(children[0], 1);
     expect(instance.status()).toMatchObject({ state: "exited", fps: null });
-    // A block it printed as it ended, read after its exit, changes nothing: no ffmpeg runs.
+    // A block it printed as it ended, read after its exit, still counts its frames, but leaves
+    // the state as it is: no ffmpeg runs.
     (children[0]?.stdout as PassThrough).write("frame=4380\nfps=870.1\nprogress=end\n");
     await nextTurn();
-    expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, fps: null });
+    expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, fps: null, frames: 4380 });
 
     // The next run has none until it reports its own.
     await instance.start("http://engine-1/play", false);
@@ -604,6 +605,24 @@ describe("Pipeline with a source's live edge", () => {
     clock.now += 61_000;
     await instance.sync();
     expect(instance.status().liveEdge).toMatchObject({ state: "stale", quietSince: iso(lastNewData) });
+  });
+
+  it("knows that the broadcast goes on from the last session that saw new data, whichever had the newest edge", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 9000);
+    // The next session is far behind it, as after the broadcaster's clock jumped back, and moves on its own.
+    clock.now += 100_000;
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    live(1, 5000);
+
+    // Ten seconds later a new engine serves 103 s behind the edge. The first session has the
+    // newest edge, and saw new data long ago, but the second one's is what says the broadcast goes on.
+    clock.now += 10_000;
+    await instance.start("http://e3/play", false, 0, "http://e3/stat");
+    edges[2]?.edge.observe({ status: "dl", downloaded: 100, last: 5020, pos: 4917 });
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "stale", staleBecause: "behind", behindSeconds: 103 });
   });
 
   it("does not hand over to a source whose live edge does not move, and gives up once it is stale", async () => {
