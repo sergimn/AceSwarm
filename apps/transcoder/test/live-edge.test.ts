@@ -289,6 +289,26 @@ describe("when the broadcast last had new data (quietSince)", () => {
   });
 });
 
+describe("LiveEdge.movedWithin", () => {
+  it("says whether the edge moved within the time given, counting the limit itself", () => {
+    const { edge, clock } = edgeWithClock();
+    // No edge seen yet.
+    expect(edge.movedWithin(60_000)).toBe(false);
+    edge.observe(sample(5000, 100));
+    expect(edge.movedWithin(0)).toBe(true);
+    clock.now += 10_000;
+    expect(edge.movedWithin(10_000)).toBe(true);
+    expect(edge.movedWithin(9999)).toBe(false);
+    // The same edge again is no move.
+    edge.observe(sample(5000, 200));
+    expect(edge.movedWithin(10_000)).toBe(true);
+    clock.now += 1;
+    expect(edge.movedWithin(10_000)).toBe(false);
+    edge.observe(sample(5011, 300));
+    expect(edge.movedWithin(0)).toBe(true);
+  });
+});
+
 describe("parseLiveSample", () => {
   it("reads the engine's livepos, whose numbers are strings", () => {
     const body = {

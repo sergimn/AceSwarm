@@ -1,7 +1,6 @@
 import Hls, { type HlsConfig } from "hls.js/light";
 import { OUTAGE_TOLERANT_LOADING } from "./hls-config.ts";
-
-export type PreviewMode = "video" | "thumbnails";
+import type { PreviewMode } from "./preview-mode.ts";
 
 const PREVIEW_CONFIG: Partial<HlsConfig> = {
   ...OUTAGE_TOLERANT_LOADING,

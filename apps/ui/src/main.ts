@@ -6,16 +6,18 @@ import { api, subscribeSnapshots, type ConnectionStatus } from "./api.ts";
 import { onTick, startClock } from "./clock.ts";
 import { errorMessage, placeToasts, setText, toast } from "./dom.ts";
 import { Grid } from "./grid.ts";
+import { trackInputMode } from "./input-mode.ts";
 import { connectionLabel, PageClock, type PageTime } from "./liveness.ts";
 import { ManageDialog } from "./manage-dialog.ts";
 import { Navigator } from "./navigation.ts";
 import { NetworkDialog } from "./network-dialog.ts";
 import { formatSummary } from "./paths.ts";
 import { Player } from "./player.ts";
-import { PreviewManager, type PreviewMode } from "./previews.ts";
+import { effectivePreviewMode, loadPreviewChoice, savePreviewChoice } from "./preview-mode.ts";
+import { PreviewManager } from "./previews.ts";
+import { SettingsDialog } from "./settings-dialog.ts";
 import { WatchReporter } from "./watch.ts";
 
-const PREVIEW_MODE_KEY = "aceswarm.previewMode";
 const MAX_PREVIEWS = 12;
 
 function element(selector: string): HTMLElement {
@@ -26,37 +28,28 @@ function element(selector: string): HTMLElement {
   return found;
 }
 
-function loadPreviewMode(): PreviewMode {
-  try {
-    return localStorage.getItem(PREVIEW_MODE_KEY) === "thumbnails" ? "thumbnails" : "video";
-  } catch {
-    return "video";
-  }
-}
-
-function savePreviewMode(mode: PreviewMode): void {
-  try {
-    localStorage.setItem(PREVIEW_MODE_KEY, mode);
-  } catch {
-    // Storage can be unavailable (private mode); the setting then lasts for this visit.
-  }
-}
-
 /** Wires the grid, the player and the dialogs to the live snapshot. */
 class App {
   private readonly navigator = new Navigator(element("#app"), placeToasts);
-  private readonly previews = new PreviewManager(loadPreviewMode(), MAX_PREVIEWS);
+  /** This browser's choice under Settings. */
+  private previewChoice = loadPreviewChoice();
+  /** The admin allows thumbnails only, as the last snapshot said: the tiles then ignore the choice. */
+  private thumbnailsOnly = false;
+  // No tile plays before the first snapshot, which says whether the admin allows Live video.
+  private readonly previews = new PreviewManager(this.previewChoice, MAX_PREVIEWS);
   private readonly watch = new WatchReporter();
   private readonly player = new Player(this.navigator, this.watch);
   private readonly grid = new Grid(element("#grid"), this.previews, (id) => {
     this.openPlayer(id);
   });
   private readonly streamForm = new AddStreamDialog(this.navigator);
-  private readonly streamList = new ManageDialog(this.navigator, this.previews.currentMode, (mode) => {
-    this.previews.setMode(mode);
-    savePreviewMode(mode);
-  });
+  private readonly streamList = new ManageDialog(this.navigator);
   private readonly network = new NetworkDialog(this.navigator);
+  private readonly settings = new SettingsDialog(this.navigator, this.previewChoice, (mode) => {
+    this.previewChoice = mode;
+    savePreviewChoice(mode);
+    this.showPreviews();
+  });
   private readonly summary = element("#summary");
   private readonly connection = element("#connection");
   private readonly empty = element("#empty");
@@ -78,6 +71,9 @@ class App {
     });
     element("[data-action=network]").addEventListener("click", () => {
       this.network.open();
+    });
+    element("[data-action=settings]").addEventListener("click", () => {
+      this.settings.open(this.snapshot);
     });
   }
 
@@ -102,11 +98,15 @@ class App {
     const time = this.pageClock.read();
     this.snapshot = snapshot;
     this.watch.setInterval(snapshot.viewerPingSeconds);
+    // Before the grid: a new tile must not start a live preview the admin doesn't allow.
+    this.thumbnailsOnly = snapshot.tilePreviews.thumbnailsOnly;
+    this.showPreviews();
     this.grid.render(snapshot, time);
     this.player.update(snapshot, time);
     this.showConnection(time);
     this.streamList.update(snapshot);
     this.network.update(snapshot);
+    this.settings.update(snapshot);
     this.summary.textContent = formatSummary(snapshot);
     this.empty.hidden = snapshot.streams.length > 0;
     if (this.focusedOnce || this.navigator.depth > 0) {
@@ -114,6 +114,14 @@ class App {
     }
     this.focusedOnce = true;
     (this.grid.firstTile() ?? element("[data-action=add]")).focus();
+  }
+
+  /** Plays the tiles' live previews, or shows their thumbnails only. */
+  private showPreviews(): void {
+    const mode = effectivePreviewMode(this.previewChoice, this.thumbnailsOnly);
+    if (mode !== this.previews.currentMode) {
+      this.previews.setMode(mode);
+    }
   }
 
   /** Every second: what is shown ages, and a page that hears nothing says so. */
@@ -145,6 +153,7 @@ class App {
   }
 }
 
+trackInputMode(".tile");
 const app = new App();
 app.connect();
 try {

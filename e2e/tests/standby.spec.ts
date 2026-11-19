@@ -5,6 +5,7 @@ import {
   docker,
   engineContainers,
   gatewayAssignments,
+  recoveriesSucceeded,
   reportedEngines,
   resetStack,
   sharedEngineContainers,
@@ -145,6 +146,7 @@ test("fails over to the standby within seconds when the engine it plays from sto
   expect(standbyEngine).toBeTruthy();
   expect(before.engine?.name).toBeTruthy();
   const engines = engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"));
+  const recovered = await recoveriesSucceeded(request, run.streamId);
 
   pauseEngine(before.engine!.name);
   const pausedAt = Date.now();
@@ -165,6 +167,10 @@ test("fails over to the standby within seconds when the engine it plays from sto
   const after = await stream(request);
   expect(after.engine?.name).toBe(standbyEngine);
   expect(after.recoveries).toBe(before.recoveries + 1);
+  // The failover brought the video back, so it counts as a recovery that worked once the stream plays.
+  await expect
+    .poll(async () => recoveriesSucceeded(request, run.streamId))
+    .toEqual({ ...recovered, failover: (recovered["failover"] ?? 0) + 1 });
   // No engine started: the one it left becomes the standby on the direct path.
   expect(engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"))).toEqual(engines);
   await expect.poll(async () => (await stream(request)).standbys.map(({ path }) => path)).toEqual(["direct"]);
@@ -222,9 +228,9 @@ test("fails over to the direct path's shared engine when the VPN's engine stops 
 
 test("turning hot standby off removes the standbys", async ({ page, request }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Streams", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   const toggle = page
-    .getByRole("dialog", { name: "Streams" })
+    .getByRole("dialog", { name: "Settings" })
     .getByRole("switch", { name: "Hot standby on other paths" });
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   await toggle.click();

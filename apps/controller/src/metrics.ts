@@ -100,6 +100,7 @@ function setEngineGauges(gauges: EngineGauges, engines: EngineMemory[]): void {
  */
 export class ControllerMetrics {
   readonly recoveries: Counter<"stream" | "action">;
+  readonly recoveriesSucceeded: Counter<"stream" | "action">;
   readonly pathSwitches: Counter<"stream" | "from" | "to">;
   readonly engineStarts: Counter<"stream">;
   readonly engineOomKills: Counter<"stream">;
@@ -114,7 +115,15 @@ export class ControllerMetrics {
     const registers = [registry];
     this.recoveries = new Counter({
       name: "aceswarm_stream_recoveries_total",
-      help: "Recovery actions taken per stream",
+      help: "Recovery steps taken per stream, whether or not they brought video back",
+      labelNames: ["stream", "action"],
+      registers,
+    });
+    this.recoveriesSucceeded = new Counter({
+      name: "aceswarm_stream_recoveries_succeeded_total",
+      help:
+        "Recoveries that brought video back: one each time a stream plays again after recovery steps, " +
+        "under the last step that changed where it plays from",
       labelNames: ["stream", "action"],
       registers,
     });

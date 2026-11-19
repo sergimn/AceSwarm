@@ -4,6 +4,7 @@ import {
   compose,
   docker,
   engineContainers,
+  metricValue,
   resetStack,
   snapshot,
   streamById,
@@ -78,7 +79,7 @@ test("shows ages by the controller's clock when the browser's clock is wrong", a
   // The player's "Last frame" is measured on the same clock.
   await tile.click();
   const player = page.getByRole("dialog", { name: "Player" });
-  await expect(player.locator(".player-details")).toContainText("Last frame: Now");
+  await expect(player.locator('.player-stat[data-stat="last-frame"] dd')).toHaveText("Now");
   await player.getByRole("button", { name: "Back" }).click();
   await expect(player).toBeHidden();
 });
@@ -391,12 +392,6 @@ test("keeps streams and their detected kind across a controller restart", async 
   }
 });
 
-/** One series' value in the controller's metrics text; the registry adds a service label of its own. */
-function metricValue(text: string, name: string, labels: string): number | undefined {
-  const match = new RegExp(String.raw`^${name}\{${labels}[^}]*\} (\S+)$`, "m").exec(text);
-  return match === null ? undefined : Number(match[1]);
-}
-
 test("disables a stream, says how long ago it had video, and plays it again once enabled", async ({
   page,
   request,
@@ -484,7 +479,11 @@ test("disables a stream, says how long ago it had video, and plays it again once
   await tile.click();
   const player = page.getByRole("dialog", { name: "Player" });
   await expect(player.locator(".player-waiting")).toContainText("This stream is disabled");
-  await expect(player.locator(".player-details")).toContainText(/^Disabled\s+·\s+Last frame: \d+[sm] ago$/);
+  // A disabled stream has no engine: its state and the age of its last video are all there is to say.
+  const playerStat = (key: string) => player.locator(`.player-stat[data-stat="${key}"] dd`);
+  await expect(playerStat("state")).toHaveText("Disabled");
+  await expect(playerStat("last-frame")).toHaveText(/^\d+[sm] ago$/);
+  await expect(player.locator(".player-stat:visible")).toHaveCount(2);
   await expect(player.getByRole("button", { name: "Enable stream" })).toBeVisible();
   expect((await streamById(request, id))?.viewers).toBe(0);
   await page.keyboard.press("Escape");
