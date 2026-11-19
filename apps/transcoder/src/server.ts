@@ -136,10 +136,11 @@ export class PipelineManager {
     const decoding = new Gauge({
       name: "aceswarm_pipeline_decoding",
       help:
-        "How the stream's ffmpeg decodes the broadcast (1 for the current way, 0 for the others): " +
+        "How the stream's ffmpeg run decodes the broadcast, or its last run while none runs (1 for that way, 0 for the others): " +
         "key-frames (key frames only, which gave a frame), key-frames-waiting (key frames only, no frame yet), " +
-        "all-frames-fallback (every frame, because key frames only gave none: a broadcast without IDR frames), " +
-        "all-frames (every frame, as PREVIEW_MODE=video or a re-encoded full stream need). No value before its first run",
+        "all-frames-fallback (every frame, because key frames only gave none in time, as for a broadcast without IDR frames), " +
+        "all-frames (every frame, as PREVIEW_MODE=video, or a re-encoded full stream with LOW_CPU_PREVIEWS, need). " +
+        "No value before its first run",
       labelNames: ["stream", "decoding"],
       registers,
     });

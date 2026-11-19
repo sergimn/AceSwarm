@@ -851,7 +851,7 @@
                   "color": "yellow"
                 },
                 "3": {
-                  "text": "Switched to every frame (no IDR frames)",
+                  "text": "Switched to every frame",
                   "color": "orange"
                 },
                 "4": {
@@ -872,7 +872,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "How each stream's ffmpeg decodes the broadcast, which is most of the CPU a stream costs (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes, and with LOW_CPU_PREVIEWS while the full stream is copied, it decodes key frames only. That needs IDR frames (or frames with a recovery point), which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame, so the stream decodes every frame from then on, with less CPU saved. It stays so until the stream stops or the transcoder restarts, which then wait again. Every frame (blue): the settings want every frame: PREVIEW_MODE=video, or a full stream that is re-encoded. No value while the stream has no pipeline."
+      "description": "How each stream's ffmpeg decodes the broadcast (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes, and with LOW_CPU_PREVIEWS while the full stream is copied, it decodes key frames only, which saves CPU. That needs key frames ffmpeg can use: IDR frames, or frames with a recovery point, which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame in time (no key frames ffmpeg can use, or key frames more than about 12 s apart), so the stream decodes every frame from then on, which saves less CPU. It stays so until the stream stops or the transcoder restarts; then it waits again. Every frame (blue): the settings want every frame: PREVIEW_MODE=video, or a re-encoded full stream with LOW_CPU_PREVIEWS. While no ffmpeg runs for a stream, it shows how its last one decoded; no value while the stream has no pipeline."
     },
     {
       "type": "row",
@@ -1841,7 +1841,7 @@
           "expr": "sum by (from, to) (increase(aceswarm_stream_path_switches_total{stream=~\"$stream\"}[1h]))",
           "range": true,
           "instant": false,
-          "legendFormat": "{{from}} \u2192 {{to}}",
+          "legendFormat": "{{from}} → {{to}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",

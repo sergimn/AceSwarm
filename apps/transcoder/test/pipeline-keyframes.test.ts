@@ -657,6 +657,25 @@ describe("Pipeline decoding key frames only", () => {
     expect(instance.decoding()).toBe("all-frames");
   });
 
+  it("says a stream that switched decodes every frame as the settings want once its full stream is re-encoded", async () => {
+    const instance = start("thumbnails");
+    await instance.start("http://e1/play", false);
+    await opened();
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await runsStarted(2);
+    expect(instance.decoding()).toBe("all-frames-fallback");
+
+    // A new source with MPEG-2 video: thumbnails mode decodes every frame of a re-encoded full
+    // stream anyway, whether or not the stream switched.
+    await instance.start("http://e2/play", false);
+    await opened(2, MPEG2);
+    await runsStarted(4);
+    expect(runs[3]).toContain("libx264");
+    expect(instance.decoding()).toBe("all-frames");
+  });
+
   it("counts the data that came for runs the controller started again, for a broadcast whose data starts late", async () => {
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");
