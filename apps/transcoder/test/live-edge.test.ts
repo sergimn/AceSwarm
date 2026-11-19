@@ -287,6 +287,22 @@ describe("when the broadcast last had new data (quietSince)", () => {
   it("is null until an edge was seen", () => {
     expect(edgeWithClock().edge.view().quietSince).toBeNull();
   });
+
+  it("is null for a session without a live position, and goes on in the session after it", () => {
+    const first = edgeWithClock();
+    feed(first.edge, first.clock, [5000, 5001, 5002, 5003]);
+    const lastMove = first.clock.now;
+    // The next session's stats never answer: it has no live position, and what it sends is played.
+    const second = edgeWithClock(first.edge.snapshot(), lastMove + 5000);
+    for (let poll = 0; poll < SETTINGS.noLiveAfterPolls; poll++) {
+      second.edge.failed();
+    }
+    expect(second.edge.publishable()).toBe(true);
+    expect(second.edge.view()).toMatchObject({ state: "none", quietSince: null });
+    // The stream's quiet time is kept for a later session that has a live position again.
+    const third = edgeWithClock(second.edge.snapshot(), lastMove + 60_000);
+    expect(third.edge.view().quietSince).toBe(iso(lastMove));
+  });
 });
 
 describe("LiveEdge.movedWithin", () => {

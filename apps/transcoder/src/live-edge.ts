@@ -203,11 +203,16 @@ export class LiveEdge {
   }
 
   view(): LiveEdgeView {
+    const state = this.state();
+    // A session without a live position says nothing about the broadcast, and its output is
+    // published: the quiet time of the sessions before it is kept for the next one (`snapshot`),
+    // not shown as this one's.
+    const quietSince = state === "none" ? undefined : this.quietSince;
     return {
-      state: this.state(),
+      state,
       edgeAt: this.edge === undefined ? null : new Date(this.edge * 1000).toISOString(),
       advancedAt: this.edgeSince === undefined ? null : new Date(this.edgeSince).toISOString(),
-      quietSince: this.quietSince === undefined ? null : new Date(this.quietSince).toISOString(),
+      quietSince: quietSince === undefined ? null : new Date(quietSince).toISOString(),
       behindSeconds: this.edge === undefined || this.pos === undefined ? null : Math.max(0, this.edge - this.pos),
     };
   }
