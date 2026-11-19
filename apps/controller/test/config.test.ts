@@ -81,3 +81,14 @@ describe("hot standby settings", () => {
     expect(() => loadConfig({ STANDBY_FAILOVER_SECONDS: "0" })).toThrow();
   });
 });
+
+describe("tile previews", () => {
+  it("leaves the choice to each browser unless the admin turned on low CPU previews", () => {
+    expect(loadConfig({}).LOW_CPU_PREVIEWS).toBe(false);
+    // compose.yaml passes "false" while the line in .env stays commented out.
+    expect(loadConfig({ LOW_CPU_PREVIEWS: "false" }).LOW_CPU_PREVIEWS).toBe(false);
+    for (const value of ["true", "TRUE", "1", "yes", "on"]) {
+      expect(loadConfig({ LOW_CPU_PREVIEWS: value }).LOW_CPU_PREVIEWS, value).toBe(true);
+    }
+  });
+});

@@ -55,6 +55,7 @@ const COPYABLE_CODECS = new Set(["h264"]);
 const OLD_GENERATION_TTL_MS = 60_000;
 /** How long after a run that failed before any video ffmpeg opens its source again (see `start`). */
 const REOPEN_DELAY_MS = 1000;
+
 /**
  * The ffmpeg work of one stream. A new source starts a new generation in its own directory;
  * players see a single continuous playlist because {@link VirtualPlaylist} stitches generations.

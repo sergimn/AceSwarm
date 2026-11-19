@@ -1,5 +1,6 @@
-import { envInt, parseEnv } from "@aceswarm/shared/env";
+import { envBool, envInt, parseEnv } from "@aceswarm/shared/env";
 import { z } from "zod";
+import type { PreviewMode } from "./ffmpeg-args.ts";
 
 const schema = z.object({
   PORT: envInt(8081),
@@ -18,6 +19,13 @@ const schema = z.object({
    * key frames ffmpeg can use is decoded in full after a while (see `decodesKeyFramesOnly`).
    */
   PREVIEW_MODE: z.enum(["video", "keyframes"]).default("video"),
+  /**
+   * The admin allows thumbnails only in the tiles (the controller reads it too), whatever
+   * PREVIEW_MODE says: ffmpeg makes no live preview, and decodes key frames only while it copies
+   * the full stream (every frame, for a stream whose broadcast has no key frames it can use; see
+   * `decodesKeyFramesOnly`). The cheapest.
+   */
+  LOW_CPU_PREVIEWS: envBool(false),
   PREVIEW_HEIGHT: envInt(360),
   PREVIEW_FPS: envInt(15),
   PREVIEW_BITRATE_KBPS: envInt(600),
@@ -46,4 +54,9 @@ export type Config = z.infer<typeof schema>;
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   return parseEnv(schema, env);
+}
+
+/** How ffmpeg previews the streams: LOW_CPU_PREVIEWS wins over PREVIEW_MODE. */
+export function previewMode(config: Pick<Config, "PREVIEW_MODE" | "LOW_CPU_PREVIEWS">): PreviewMode {
+  return config.LOW_CPU_PREVIEWS ? "thumbnails" : config.PREVIEW_MODE;
 }

@@ -22,6 +22,11 @@ function valueAfter(args: string[], flag: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
+/** The format of each output, in order. */
+function formats(args: string[]): string[] {
+  return args.filter((_, index) => args[index - 1] === "-f");
+}
+
 describe("buildFfmpegArgs", () => {
   it("reads the source once and writes full, preview and thumbnail outputs", () => {
     const args = buildFfmpegArgs(PLAN);
@@ -30,6 +35,29 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("/hls/s1/3/full/index.m3u8");
     expect(args).toContain("/hls/s1/3/preview/index.m3u8");
     expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
+    // Live previews decode every frame, whether the full stream is copied or re-encoded.
+    expect(args).not.toContain("-skip_frame");
+    expect(buildFfmpegArgs({ ...PLAN, fullMode: "transcode" })).not.toContain("-skip_frame");
+  });
+
+  it("makes no preview in thumbnails mode, and decodes key frames only while the full stream is copied", () => {
+    const args = buildFfmpegArgs({ ...PLAN, previewMode: "thumbnails" });
+    expect(args.join(" ")).not.toContain("/preview/");
+    expect(args).toContain("/hls/s1/3/full/index.m3u8");
+    expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
+    expect(formats(args)).toEqual(["hls", "image2"]);
+    expect(formats(buildFfmpegArgs(PLAN))).toEqual(["hls", "hls", "image2"]);
+    // The full stream is copied, so no H.264 encode is left, and only the thumbnail decodes.
+    expect(args).not.toContain("libx264");
+    expect(valueAfter(args, "-skip_frame")).toBe("nokey");
+    expect(args.indexOf("-skip_frame")).toBeLessThan(args.indexOf("-i"));
+  });
+
+  it("decodes every frame in thumbnails mode for a full stream that is re-encoded", () => {
+    const args = buildFfmpegArgs({ ...PLAN, fullMode: "transcode", previewMode: "thumbnails" });
+    expect(formats(args)).toEqual(["hls", "image2"]);
+    expect(args.filter((arg) => arg === "libx264")).toHaveLength(1);
+    expect(args).not.toContain("-skip_frame");
   });
 
   it("waits for slow engines before giving up on the input", () => {

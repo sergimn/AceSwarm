@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { addStreamList, resetStack, waitForPlaying } from "./helpers.ts";
+import type { Snapshot } from "../../packages/shared/src/api-types.ts";
+import { addStreamList, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -24,6 +25,22 @@ test.beforeAll(async ({ request }) => {
     expect(renamed.ok(), await renamed.text()).toBe(true);
   }
 });
+
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The middle of the part two boxes share, if they share any. */
+function overlap(a: Box, b: Box): { x: number; y: number } | undefined {
+  const left = Math.max(a.x, b.x);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const top = Math.max(a.y, b.y);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return left < right && top < bottom ? { x: (left + right) / 2, y: (top + bottom) / 2 } : undefined;
+}
 
 /** The focused element, checked by its accessible label (tiles are labelled "<name>, <state>"). */
 function focused(page: Page) {
@@ -290,6 +307,145 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await page.keyboard.press("Enter");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
   await expect(video).toHaveAttribute("aria-pressed", "false");
+});
+
+test("shows thumbnails only while the admin allows nothing else, whatever the browser chose", async ({
+  page,
+  request,
+}) => {
+  // The stack runs without LOW_CPU_PREVIEWS, so browsers choose. Here the page gets the
+  // snapshots a controller sends with it set while `thumbnailsOnly` says so.
+  expect((await snapshot(request)).tilePreviews).toEqual({ thumbnailsOnly: false });
+  let thumbnailsOnly = true;
+  const current = async (): Promise<Snapshot> => ({
+    ...(await snapshot(request)),
+    tilePreviews: { thumbnailsOnly },
+  });
+  await page.route("**/api/snapshot", async (route) => {
+    await route.fulfill({ json: await current() });
+  });
+  await page.route("**/api/events", async (route) => {
+    // One snapshot, then the browser opens the stream again a second later, as after a dropped one.
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `retry: 1000\nevent: snapshot\ndata: ${JSON.stringify(await current())}\n\n`,
+    });
+  });
+  // This browser chose Live video before the admin restricted it. Every later write of its choice
+  // is kept in `choiceWrites`, even one that writes the same choice again.
+  await page.addInitScript(() => {
+    localStorage.setItem("aceswarm.previewMode", "video");
+    const writes: string[] = [];
+    Object.assign(globalThis, { choiceWrites: writes });
+    const setItem: unknown = Reflect.get(Storage.prototype, "setItem");
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string): void {
+      if (key === "aceswarm.previewMode") {
+        writes.push(value);
+      }
+      Reflect.apply(setItem as Storage["setItem"], this, [key, value]);
+    };
+  });
+  const choiceWrites = (): Promise<string[]> => page.evaluate<string[]>("choiceWrites");
+  const previewLoads: string[] = [];
+  const saved: string[] = [];
+  page.on("request", (sent) => {
+    if (new URL(sent.url()).pathname.includes("/preview/")) {
+      previewLoads.push(sent.url());
+    }
+    if (sent.method() === "PATCH") {
+      saved.push(sent.url());
+    }
+  });
+  await page.goto("/");
+  await expect(page.locator(".tile")).toHaveCount(3);
+  await expect(page.locator(".tile").first()).toBeFocused();
+  // The test above reaches Settings with the remote; this one is about what it shows.
+  await page.getByRole("button", { name: "Settings", exact: true }).focus();
+  await page.keyboard.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  const previews = dialog.getByRole("group", { name: "Tile previews" });
+  const video = previews.getByRole("button", { name: "Live video" });
+  const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
+  const tip = dialog.getByRole("tooltip");
+  const why = "Your admin has restricted this feature to save resources. Contact them for any questions";
+  await expect(dialog).toBeVisible();
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await expect(video).toHaveAttribute("aria-disabled", "true");
+  await expect(video).toHaveCSS("opacity", "0.5");
+  await expect(video).toHaveAccessibleDescription(why);
+  await expect(tip).toBeHidden();
+
+  // The remote reaches the greyed out choice, and its focus shows why. OK on either choice changes
+  // nothing.
+  await page.keyboard.press("ArrowDown");
+  await expect(thumbnails).toBeFocused();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("ArrowLeft");
+  await expect(video).toBeFocused();
+  await expect(tip).toBeVisible();
+  await expect(tip).toHaveText(why);
+  await page.keyboard.press("Enter");
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await page.keyboard.press("ArrowRight");
+  await expect(thumbnails).toBeFocused();
+  await expect(tip).toBeHidden();
+
+  // The mouse over it shows why too, and a click changes nothing either.
+  await video.hover();
+  await expect(tip).toBeVisible();
+  // Playwright waits for a control marked aria-disabled to be enabled before it clicks; a person doesn't.
+  await video.click({ force: true });
+  await expect(video).toHaveAttribute("aria-pressed", "false");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  // The click left focus on Live video, but with the pointer gone the tip goes: it covers the next
+  // setting's switch at this size.
+  await page.mouse.move(0, 0);
+  await expect(video).toBeFocused();
+  await expect(tip).toBeHidden();
+  // The pointer can move onto the tip, and a press there presses nothing under it.
+  const sharing = dialog.getByRole("switch", { name: "One engine per path" });
+  const sharingWas = await sharing.getAttribute("aria-checked");
+  await video.hover();
+  await tip.hover({ timeout: 5000 });
+  await expect(tip).toBeVisible();
+  const covered = overlap((await tip.boundingBox())!, (await sharing.boundingBox())!);
+  expect(covered, "the tip covers the switch").toBeDefined();
+  await page.mouse.click(covered!.x, covered!.y);
+  await expect(sharing).toHaveAttribute("aria-checked", sharingWas!);
+  await page.mouse.move(0, 0);
+  await expect(tip).toBeHidden();
+  // A press on the switch would have saved its setting (the switch only turns once that is done):
+  // nothing was saved. The browser's own choice stays as it was, and no tile asked for a live preview.
+  expect(await choiceWrites()).toEqual([]);
+  expect(await page.evaluate<string | null>('localStorage.getItem("aceswarm.previewMode")')).toBe("video");
+  expect(saved).toEqual([]);
+  expect(previewLoads).toEqual([]);
+
+  // Once the admin lifts it, the browser's choice is back, and the tiles play again.
+  thumbnailsOnly = false;
+  await expect(video).toHaveAttribute("aria-pressed", "true");
+  await expect(video).not.toHaveAttribute("aria-disabled");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "false");
+  await expect(tip).toBeHidden();
+  await expect.poll(() => previewLoads.length).toBeGreaterThan(0);
+
+  // The admin restricts it again while the page is open: Live video greys out in the open dialog,
+  // and the tiles stop their previews.
+  thumbnailsOnly = true;
+  await expect(video).toHaveAttribute("aria-disabled", "true");
+  await expect(thumbnails).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".tile video[src]")).toHaveCount(0);
+  const loaded = previewLoads.length;
+  // With Live video, each tile would have asked for its preview again by now: it tries again within
+  // twice RETRY_MS of apps/ui/src/previews.ts, 10 s.
+  await page.waitForTimeout(11_000);
+  expect(previewLoads).toHaveLength(loaded);
+  expect(await choiceWrites()).toEqual([]);
+  expect(saved).toEqual([]);
+  // The page asks for snapshots until it closes, after the test's own request context is gone.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
 test("serves previews and thumbnails for the grid", async ({ request }) => {

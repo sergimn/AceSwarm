@@ -48,6 +48,11 @@ function skipsFrames(args: string[] | undefined): boolean {
   return args?.includes("-skip_frame") === true;
 }
 
+/** How long a run waits for its source's data, as ffmpeg gets it (microseconds). */
+function inputTimeout(args: string[] = []): string | undefined {
+  return args[args.indexOf("-rw_timeout") + 1];
+}
+
 /** The filter of a run's preview output: the one whose scale is to the preview's height. */
 function previewFilter(args: string[] | undefined): string | undefined {
   return args?.find((arg) => arg.includes("scale=-2:270"));
@@ -79,7 +84,7 @@ describe("Pipeline decoding key frames only", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(previewMode: "video" | "keyframes" = "keyframes"): Pipeline {
+  function start(previewMode: "video" | "keyframes" | "thumbnails" = "keyframes"): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -312,8 +317,11 @@ describe("Pipeline decoding key frames only", () => {
     expect(children[0]?.killed).toBe(false);
     expect(skipsFrames(runs[2])).toBe(false);
     expect(reasons).toEqual(["start", "handover", "all-frames"]);
-    // The handover goes on with that run.
+    // The handover goes on with that run, and the time a handover has to get its data.
     expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
+    expect(inputTimeout(runs[0])).toBe("60000000");
+    expect(inputTimeout(runs[1])).toBe("120000000");
+    expect(inputTimeout(runs[2])).toBe("120000000");
   });
 
   it("does not take a slow handover's source for a broadcast without key frames once frames came", async () => {
@@ -517,8 +525,94 @@ describe("Pipeline decoding key frames only", () => {
     await noMoreRuns(1);
   });
 
-  it("waits 30 seconds, as the documentation says", () => {
-    expect(KEY_FRAMES_PATIENCE_MS).toBe(30_000);
+  it("swaps a handover's run that began before the change at once, though the run that replaced the active one has frames", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
+    await opened(1);
+    moves(15);
+    live(1);
+    await instance.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 18);
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "handover", "all-frames"]);
+
+    // The run that decodes every frame shows a picture. That says nothing of key frames only decoding.
+    await opened(2);
+    await frames(25, 2);
+    await instance.sync();
+    await runsStarted(4);
+    expect(reasons).toEqual(["start", "handover", "all-frames", "all-frames"]);
+    expect(skipsFrames(runs[3])).toBe(false);
+  });
+
+  it("counts a live edge that moved 10 seconds ago, not one that moved a moment longer ago", async () => {
+    // The data comes for the patience, with the last move of the edge exactly that long before.
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 10);
+    clock.now += 10_000;
+    await instance.sync();
+    await runsStarted(2);
+    await instance.stop();
+
+    // A moment longer, and the data stopped for a while: the wait starts over.
+    runs.length = 0;
+    children.length = 0;
+    edges.length = 0;
+    const other = start();
+    await other.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await other.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 10);
+    clock.now += 10_001;
+    await other.sync();
+    await noMoreRuns(1);
+  });
+
+  it("decodes every frame in thumbnails mode too, which makes no preview", async () => {
+    const instance = start("thumbnails");
+    await instance.start("http://e1/play", false);
+    expect(skipsFrames(runs[0])).toBe(true);
+    expect(runs[0]?.some((arg) => arg.includes("/preview/"))).toBe(false);
+    await opened();
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS - 1000;
+    await instance.sync();
+    await noMoreRuns(1);
+    clock.now += 1000;
+    await instance.sync();
+    await runsStarted(2);
+    expect(skipsFrames(runs[1])).toBe(false);
+    // Still no preview, only the thumbnail needs the frames.
+    expect(runs[1]?.some((arg) => arg.includes("/preview/"))).toBe(false);
+    expect(runs[1]?.some((arg) => arg.endsWith("/thumbnail.jpg"))).toBe(true);
+    expect(reasons).toEqual(["start", "all-frames"]);
+    await opened(1);
+    await frames(25, 1);
+    expect(instance.status()).toMatchObject({ state: "running", frames: 25 });
+  });
+
+  it("starts nothing again in thumbnails mode when the full stream is re-encoded, which skips no frames", async () => {
+    const instance = start("thumbnails");
+    await instance.start("http://e1/play", false);
+    await opened(0, MPEG2);
+    await runsStarted(2);
+    expect(runs[1]).toContain("libx264");
+    expect(skipsFrames(runs[1])).toBe(false);
+    await opened(1, MPEG2);
+    await instance.sync();
+    clock.now += 10 * KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await noMoreRuns(2);
   });
 
   it("opens the source again when the run that decodes every frame fails before any video", async () => {

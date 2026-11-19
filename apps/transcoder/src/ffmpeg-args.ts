@@ -1,5 +1,6 @@
 export type FullMode = "copy" | "transcode";
-export type PreviewMode = "video" | "keyframes";
+/** PREVIEW_MODE's two modes, or thumbnails (no preview) with LOW_CPU_PREVIEWS; see the transcoder's config. */
+export type PreviewMode = "video" | "keyframes" | "thumbnails";
 
 export interface FfmpegPlan {
   source: string;
@@ -26,16 +27,19 @@ export interface FfmpegPlan {
 
 /**
  * Whether ffmpeg decodes key frames only (`-skip_frame nokey`), which previews the stream for a
- * fraction of the CPU. It only affects decoding, so the copied full stream keeps every frame.
+ * fraction of the CPU: with `PREVIEW_MODE=keyframes`, and with `LOW_CPU_PREVIEWS` (thumbnails mode)
+ * while the full stream is copied (a re-encoded one needs every frame). It only affects decoding,
+ * so the copied full stream keeps every frame.
  *
  * It needs the broadcast to have key frames that ffmpeg takes for one: IDR frames, or frames with
  * a recovery point (SEI). A broadcast without them (an open GOP whose I frames are no recovery
  * points, or one that refreshes the picture bit by bit instead, as with x264's intra refresh) has
- * none to decode, so ffmpeg writes no preview and thumbnail, and in ffmpeg 9 no progress at all
+ * none to decode, so ffmpeg writes no preview or thumbnail, and in ffmpeg 9 no progress at all
  * before every output has started. The pipeline then starts the stream again with `allFrames`.
  */
 export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "fullMode" | "allFrames">): boolean {
-  return plan.previewMode === "keyframes" && plan.allFrames !== true;
+  const keyFrames = plan.previewMode === "keyframes" || (plan.previewMode === "thumbnails" && plan.fullMode === "copy");
+  return keyFrames && plan.allFrames !== true;
 }
 
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
@@ -68,7 +72,8 @@ function keyframeEvery(plan: FfmpegPlan): string[] {
  *
  * - full: original video when it is H.264 (no re-encode), otherwise H.264; audio to AAC so every
  *   browser can play it.
- * - preview: small H.264 rendition for the grid, no audio.
+ * - preview: small H.264 rendition for the grid, no audio. None in thumbnails mode, which saves
+ *   its encode: its playlist then stays empty.
  * - thumbnail.jpg: refreshed every few seconds, used as a poster.
  */
 export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
@@ -91,7 +96,9 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     String(plan.inputTimeoutSeconds * 1_000_000),
   ];
   if (decodesKeyFramesOnly(plan)) {
-    // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame.
+    // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame. In
+    // thumbnails mode with a copied full stream, ffmpeg 7 and later count the copied frames, 6.x
+    // counts 0.
     input.push("-skip_frame", "nokey");
   }
   input.push("-i", plan.source);
@@ -170,5 +177,5 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     `${plan.directory}/thumbnail.jpg`,
   ];
 
-  return [...input, ...full, ...preview, ...thumbnail];
+  return [...input, ...full, ...(plan.previewMode === "thumbnails" ? [] : preview), ...thumbnail];
 }
