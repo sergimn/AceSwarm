@@ -197,7 +197,7 @@ export class Pipeline {
       lastFrameAt:
         generation.publishedFrameAt === undefined ? null : new Date(generation.publishedFrameAt).toISOString(),
       frames: generation.frames,
-      fps: generation.fps ?? null,
+      fps: generation.frameRate(),
       videoCodec: generation.videoCodec ?? null,
       mode: generation.mode,
       exitCode: generation.exitCode,
@@ -536,7 +536,11 @@ export class Pipeline {
           generation.frames = block.frame;
           this.keyFrames.progressed(block, this.planOf(generation));
           generation.lastFrameAt = this.now();
-          generation.state = "running";
+          if (generation.state !== "exited") {
+            // A block it printed as it ended can be read after its exit: its frames count, but
+            // it must not look like it runs again.
+            generation.state = "running";
+          }
           if (generation.publishing() && generation.published) {
             generation.publishedFrameAt = generation.lastFrameAt;
           }

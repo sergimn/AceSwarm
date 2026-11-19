@@ -74,30 +74,9 @@ export class PipelineManager {
       labelNames: ["stream", "result"],
       registers,
     });
-    const running = new Gauge({
-      name: "aceswarm_pipeline_running",
-      help: "1 while the stream's ffmpeg is producing video",
-      labelNames: ["stream"],
-      registers,
-    });
-    const fps = new Gauge({
-      name: "aceswarm_pipeline_fps",
-      help: "Frames per second processed by ffmpeg",
-      labelNames: ["stream"],
-      registers,
-    });
-    const lastFrame = new Gauge({
-      name: "aceswarm_pipeline_last_frame_timestamp_seconds",
-      help: "Unix time of the last video frame of the stream that players could get",
-      labelNames: ["stream"],
-      registers,
-    });
-    const standbyReaders = new Gauge({
-      name: "aceswarm_standby_readers",
-      help: "Standby sessions on other paths the transcoder reads to keep them hot, by state",
-      labelNames: ["stream", "state"],
-      registers,
-    });
+    // The client calls collect() on every scrape; one gauge refreshes all of them. It is registered
+    // before the gauges it fills, because a scrape reads each metric in turn: the ones before it
+    // would show the previous scrape's values.
     const total: Gauge = new Gauge({
       name: "aceswarm_pipelines",
       help: "Number of pipelines",
@@ -123,6 +102,32 @@ export class PipelineManager {
         }
         total.set(this.pipelines.size);
       },
+    });
+    const running = new Gauge({
+      name: "aceswarm_pipeline_running",
+      help: "1 while the stream's ffmpeg is producing video",
+      labelNames: ["stream"],
+      registers,
+    });
+    const fps = new Gauge({
+      name: "aceswarm_pipeline_fps",
+      help:
+        "Frames per second the stream's ffmpeg processes, as it reports it: its average since it started. " +
+        "No value while no ffmpeg runs for the stream",
+      labelNames: ["stream"],
+      registers,
+    });
+    const lastFrame = new Gauge({
+      name: "aceswarm_pipeline_last_frame_timestamp_seconds",
+      help: "Unix time of the last video frame of the stream that players could get",
+      labelNames: ["stream"],
+      registers,
+    });
+    const standbyReaders = new Gauge({
+      name: "aceswarm_standby_readers",
+      help: "Standby sessions on other paths the transcoder reads to keep them hot, by state",
+      labelNames: ["stream", "state"],
+      registers,
     });
   }
 

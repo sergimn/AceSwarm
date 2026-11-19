@@ -196,6 +196,31 @@ describe("Pipeline", () => {
     expect(instance.status().pendingSource).toBeNull();
   });
 
+  it("reports ffmpeg's frame rate only while ffmpeg runs", async () => {
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    expect(instance.status().fps).toBeNull();
+    // It starts on a window the engine has buffered, which it reads faster than real time.
+    (children[0]?.stdout as PassThrough).write("frame=4370\nfps=873.95\nprogress=continue\n");
+    await nextTurn();
+    expect(instance.status()).toMatchObject({ state: "running", fps: 873.95 });
+
+    // ffmpeg ends: what it printed last is not the frame rate of a stream that has none running.
+    exit(children[0], 1);
+    expect(instance.status()).toMatchObject({ state: "exited", fps: null });
+    // A block it printed as it ended, read after its exit, changes nothing: no ffmpeg runs.
+    (children[0]?.stdout as PassThrough).write("frame=4380\nfps=870.1\nprogress=end\n");
+    await nextTurn();
+    expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, fps: null });
+
+    // The next run has none until it reports its own.
+    await instance.start("http://engine-1/play", false);
+    expect(instance.status().fps).toBeNull();
+    (children[1]?.stdout as PassThrough).write("frame=12\nfps=25\nprogress=continue\n");
+    await nextTurn();
+    expect(instance.status().fps).toBe(25);
+  });
+
   it("says a restart that failed before any video is still starting until ffmpeg opens it again", async () => {
     const clock = { now: 1000 };
     const instance = start(120, () => clock.now);
@@ -455,6 +480,23 @@ describe("Pipeline with a source's live edge", () => {
     await instance.sync();
     expect(instance.status().liveEdge).toMatchObject({ state: "live", edgeAt: new Date(5_004_000).toISOString() });
     expect(await playlist(instance)).toBeUndefined();
+  });
+
+  it("reports no frame rate once it stopped reading a stale source", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 5000);
+    frames(50);
+    await nextTurn();
+    expect(instance.status().fps).toBe(25);
+
+    clock.now += 61_000;
+    await instance.sync();
+    expect(children[0]?.killed).toBe(true);
+    // ffmpeg may still print its progress while it ends: that is no frame rate to report any more.
+    frames(60);
+    await nextTurn();
+    expect(instance.status()).toMatchObject({ liveEdge: { state: "stale" }, fps: null });
   });
 
   it("finds a new session that only has the same old window stale at once", async () => {
