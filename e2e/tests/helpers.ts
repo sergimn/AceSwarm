@@ -96,12 +96,37 @@ export async function resetStack(request: APIRequestContext): Promise<void> {
  * network interface on the host, and the browser aborts the requests it has in flight when the
  * host's interfaces change (`net::ERR_NETWORK_CHANGED`): a spec whose first request, or
  * `page.goto`, lands in the middle of that fails for a reason that has nothing to do with it.
- * With no stream left, any engine still there is on its way out.
+ * With no stream left, the controller removes every engine that is still there, so one that stays
+ * fails the reset, by name, instead of some later spec's first request.
+ *
+ * The stack must have no engine in two reads a second apart. The browser hears of an interface
+ * change a moment after it happens, and a step the controller was in the middle of, for a stream
+ * that was deleted, can create its engine just after the first empty read.
+ *
+ * The limit is above the longest teardown the controller waits for: a stream that was moving to
+ * another engine when it was deleted finishes the move first (up to the 90 s an engine has to get
+ * ready), and then its engines go.
  */
-async function waitForEnginesRemoved(timeout = 90_000): Promise<void> {
-  await expect
-    .poll(() => stackEngines(), { timeout, intervals: [500], message: "engines left after the streams were removed" })
-    .toEqual([]);
+async function waitForEnginesRemoved(timeout = 180_000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let emptyReads = 0;
+  for (;;) {
+    let engines: string[];
+    try {
+      engines = stackEngines();
+    } catch (error) {
+      // The controller is removing containers while this runs: a failed listing is tried again.
+      engines = [`could not list the engines: ${error instanceof Error ? error.message : String(error)}`];
+    }
+    emptyReads = engines.length === 0 ? emptyReads + 1 : 0;
+    if (emptyReads >= 2) {
+      return;
+    }
+    expect(Date.now(), `engines left after the streams were removed: ${engines.join(", ") || "none"}`).toBeLessThan(
+      deadline,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 export interface NetworkDialog {
