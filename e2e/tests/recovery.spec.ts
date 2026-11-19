@@ -1,10 +1,20 @@
 import { expect, test } from "@playwright/test";
-import { addStream, docker, engineContainers, resetStack, streamById, waitForPlaying } from "./helpers.ts";
+import {
+  addStream,
+  docker,
+  engineContainers,
+  recoveriesSucceeded,
+  resetStack,
+  streamById,
+  waitForPlaying,
+} from "./helpers.ts";
 import { broadcasts, newestSegment, setBroadcastInput, setDirectPathBlocked, type Broadcast } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
 
 const bc: Broadcast[] = [];
+
+const total = (counts: Record<string, number>): number => Object.values(counts).reduce((sum, count) => sum + count, 0);
 
 test.beforeAll(async ({ request }) => {
   setDirectPathBlocked(false);
@@ -28,6 +38,7 @@ test("recovers a stream whose swarm stalls", async ({ request }) => {
   const stream = await addStream(request, bc[0]!.infohash, "Flaky");
   const before = await waitForPlaying(request, stream.id);
   expect(before.standbys).toEqual([]);
+  const recovered = total(await recoveriesSucceeded(request, stream.id));
   setDirectPathBlocked(true);
   try {
     await expect
@@ -43,6 +54,8 @@ test("recovers a stream whose swarm stalls", async ({ request }) => {
   expect(playing.path).toBe("direct");
   expect(playing.standbys).toEqual([]);
   expect(engineContainers(stream.id)).toHaveLength(1);
+  // Now that video is back, the recovery counts as one that worked (the dashboard's "Recoveries per hour").
+  expect(total(await recoveriesSucceeded(request, stream.id))).toBeGreaterThan(recovered);
 });
 
 test("restarting one engine leaves the other streams alone", async ({ request }) => {
@@ -80,6 +93,8 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     .poll(async () => (await streamById(request, stream.id))?.liveEdge?.state, { timeout: 30_000 })
     .toBe("live");
   const playlist = stream.hls.full;
+  // The recoveries that had worked by the time it waits for the broadcast.
+  let recovered: Record<string, number>;
 
   // The source engine keeps running with the window it has, and so does the stream's engine:
   // data still comes for each new session, but the live edge stops (STALE_SOURCE_SECONDS: 30).
@@ -100,6 +115,7 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     expect(waiting?.state).toBe("stale-source");
     expect(waiting?.message).toContain("broadcast");
     expect(waiting?.lastFrameAt).toBe(quiet);
+    recovered = await recoveriesSucceeded(request, stream.id);
 
     // While it waits, new sessions bring the old window: none of it is published, and it doesn't
     // restart on every stall (a new session every 10 s here, STALE_SOURCE_RETRY_SECONDS).
@@ -115,6 +131,8 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     const tries = (await streamById(request, stream.id))!.recoveries - waiting!.recoveries;
     expect(tries).toBeGreaterThanOrEqual(1);
     expect(tries).toBeLessThanOrEqual(4);
+    // Tries that bring no video are attempts: none of them counts as a recovery that worked.
+    expect(await recoveriesSucceeded(request, stream.id)).toEqual(recovered);
   } finally {
     await setBroadcastInput(bc[2]!, true);
   }
@@ -122,6 +140,11 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
   // The next new session gets new data: it plays again, from video that is new.
   const back = await waitForPlaying(request, stream.id, 120_000);
   const resumedAt = Date.now();
+  // One recovery worked, however many tries it took: the new engine that found the broadcast again.
+  expect(await recoveriesSucceeded(request, stream.id)).toEqual({
+    ...recovered,
+    "restart-engine": (recovered["restart-engine"] ?? 0) + 1,
+  });
   expect(back.liveEdge?.state).toBe("live");
   expect(Date.parse(back.liveEdge!.advancedAt!)).toBeGreaterThan(resumedAt - 15_000);
   expect((await newestSegment(request, playlist))[0]).toBe(0x47);

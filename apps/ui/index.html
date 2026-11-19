@@ -67,6 +67,25 @@
           </svg>
           <span>Network</span>
         </button>
+        <button
+          class="rail-button rail-end"
+          type="button"
+          data-action="settings"
+          title="Tile previews, engine sharing and hot standby"
+        >
+          <svg
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4" />
+          </svg>
+          <span>Settings</span>
+        </button>
       </nav>
       <main class="content">
         <header class="topbar">
@@ -81,7 +100,7 @@
           <p>Add an Acestream ID to start watching. Streams you add are kept across restarts.</p>
           <button class="button primary" type="button" data-action="empty-add">Add a stream</button>
         </div>
-        <footer class="footer">
+        <footer class="footer" data-nav-page-end>
           Peer locations: <a href="https://db-ip.com" rel="noopener">IP Geolocation by DB-IP</a> (<a
             href="https://creativecommons.org/licenses/by/4.0/"
             rel="noopener"

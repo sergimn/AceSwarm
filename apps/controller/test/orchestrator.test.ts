@@ -10,7 +10,7 @@ import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineHandle, EngineManager, OnEngineAddress } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import { NetworkPolicyStore } from "../src/network-policy-store.ts";
-import { Orchestrator } from "../src/orchestrator.ts";
+import { Orchestrator, type OrchestratorDeps } from "../src/orchestrator.ts";
 import { SettingsStore } from "../src/settings-store.ts";
 import { SharedEngines } from "../src/shared-engines.ts";
 import { StreamStore } from "../src/stream-store.ts";
@@ -155,7 +155,9 @@ async function harness(video = true) {
   } as unknown as NetgwClient;
   const metrics = new ControllerMetrics(new Registry(), () => ({ streams: [], paths: [] }));
   const logger = createLogger("test", "silent");
-  const start = async (): Promise<{ orchestrator: Orchestrator; store: StreamStore }> => {
+  const start = async (
+    options: Pick<OrchestratorDeps, "thumbnailsOnly"> = {},
+  ): Promise<{ orchestrator: Orchestrator; store: StreamStore }> => {
     const wireguard = new WireguardStore(dataDir);
     const store = new StreamStore(dataDir);
     const orchestrator = new Orchestrator({
@@ -188,6 +190,7 @@ async function harness(video = true) {
         pathMinDwellMs: 300_000,
       },
       stopWaitMs: 500,
+      ...options,
     });
     started.push(orchestrator);
     await orchestrator.start();
@@ -195,6 +198,15 @@ async function harness(video = true) {
   };
   return { start, pipelines, reported, events, holds, orphanChecks };
 }
+
+test("tells every screen whether the admin allows thumbnails only in the tiles", async () => {
+  const { start } = await harness();
+  const { orchestrator } = await start();
+  expect(orchestrator.snapshot().tilePreviews).toEqual({ thumbnailsOnly: false });
+  await orchestrator.stop();
+  const restricted = await start({ thumbnailsOnly: true });
+  expect(restricted.orchestrator.snapshot().tilePreviews).toEqual({ thumbnailsOnly: true });
+});
 
 test("a disabled stream says when it last had video, is on no path and can't be restarted", async () => {
   const { start, pipelines, reported } = await harness();

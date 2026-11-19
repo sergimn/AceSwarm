@@ -98,8 +98,14 @@ a {
   flex-direction: column;
   align-items: center;
   gap: 12px;
+  /* Phone browsers count their toolbar in 100vh: 100dvh keeps Settings at the bottom in view. */
   height: 100vh;
+  height: 100dvh;
   padding: 20px 12px;
+  /* A screen too short for every button scrolls the rail instead of cutting Settings off, and the
+     remote's moves keep a button's focus ring clear of its edges. */
+  overflow-y: auto;
+  scroll-padding-block: 20px;
   background: var(--surface);
   border-right: 1px solid var(--border);
 }
@@ -134,6 +140,11 @@ a {
 
 .rail-button:focus {
   box-shadow: var(--focus);
+}
+
+/* Settings sits at the bottom of the rail, apart from the actions on streams and paths. */
+.rail-end {
+  margin-top: auto;
 }
 
 .content {
@@ -241,16 +252,25 @@ a {
     box-shadow 0.15s ease;
 }
 
-.tile:hover,
-.tile:focus {
+/*
+ * The tile under the mouse stands out, or the focused one while keys are used (see input-mode.ts):
+ * only ever one. A tile opened with a click keeps focus once its stream is closed, but doesn't
+ * stand out until a key is pressed.
+ */
+[data-input="pointer"] .tile:hover,
+[data-input="keys"] .tile:focus {
   transform: scale(1.03);
   z-index: 1;
 }
 
-.tile:focus {
+[data-input="keys"] .tile:focus {
   box-shadow:
     var(--focus),
     0 12px 32px rgb(0 0 0 / 50%);
+}
+
+[data-input="pointer"] .tile:focus-visible {
+  box-shadow: none;
 }
 
 .tile-media {
@@ -325,14 +345,15 @@ a {
   display: grid;
   gap: 4px;
   padding: 12px;
-  background: rgb(13 17 23 / 92%);
+  /* Opaque: the tile's name is under the last rows, and would show through. */
+  background: var(--bg);
   font-size: 0.85em;
   transform: translateY(100%);
   transition: transform 0.2s ease;
 }
 
-.tile:hover .tile-stats,
-.tile:focus .tile-stats {
+[data-input="pointer"] .tile:hover .tile-stats,
+[data-input="keys"] .tile:focus .tile-stats {
   transform: translateY(0);
 }
 
@@ -490,6 +511,7 @@ a {
 }
 
 .segments {
+  position: relative;
   display: inline-flex;
   gap: 6px;
 }
@@ -497,6 +519,50 @@ a {
 .segment[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* A choice the admin doesn't allow. It stays focusable, so remotes can reach it and show its tip. */
+.segment[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.segment[aria-disabled="true"]:hover {
+  border-color: var(--border);
+}
+
+/* Under the choices: why the one before it is greyed out, while the mouse is on it or a remote focuses it. */
+.tip {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  font-size: 0.85em;
+  line-height: 1.35;
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity 0.15s,
+    visibility 0.15s;
+}
+
+/*
+ * The tip covers the next setting, so it takes the pointer itself (a press on it presses nothing
+ * under it), and it shows while the pointer is over the button or the tip. With a remote it shows
+ * while the button has focus; with a pointer focus left there by a click doesn't keep it up. A tap
+ * leaves the button hovered until the next one.
+ */
+[aria-disabled="true"]:hover + .tip,
+.tip:hover,
+[data-input="keys"] [aria-disabled="true"]:focus + .tip {
+  visibility: visible;
+  opacity: 1;
 }
 
 .setting-text {
@@ -804,18 +870,43 @@ p.form-error {
   visibility: hidden;
 }
 
-.player-waiting {
+.player-waiting,
+.player-waiting-probe {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  /* WAITING_PADDING in player-stats.ts, and the fallbacks below. */
   padding: 32px;
   text-align: center;
 }
 
-.player-waiting[hidden] {
+.player-waiting {
+  transition: padding 0.25s ease;
+}
+
+/* An unseen copy of the message, always in the middle, that the player measures (see player.ts). */
+.player-waiting-probe {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/*
+ * While the controls show, the message moves out from under the stats window when the window would
+ * cover it (on a small screen, a TV browser's 960×540 included): below it, or beside it on a short
+ * screen. The player sets `--waiting-top`, `--waiting-bottom` and `--waiting-left`. Once the
+ * controls fade, it is back in the middle.
+ */
+.player.show-overlay .player-waiting {
+  padding-top: var(--waiting-top, 32px);
+  padding-bottom: var(--waiting-bottom, 32px);
+  padding-left: var(--waiting-left, 32px);
+}
+
+.player-waiting[hidden],
+.player-waiting-probe[hidden] {
   display: none;
 }
 
@@ -853,18 +944,83 @@ p.form-error {
   font-size: 1.6em;
 }
 
-.player-details {
-  margin: 6px 0 0;
+/*
+ * The live stats: a discreet window over the picture, one stat to a line. It sits 24px in from the
+ * picture's left edge (black bars left out), a quarter of the way down it: the player sets
+ * `--picture-left` and `--stats-top`. It holds nothing to press, so it never takes a click from
+ * the controls. It is sized in em throughout, so that its font size scales the whole window:
+ * large enough to read from the sofa on a TV, and a bit smaller on a phone, where it would cover
+ * most of the picture.
+ */
+.player-stats {
+  position: absolute;
+  top: var(--stats-top);
+  left: calc(var(--picture-left, 0px) + 24px);
+  max-width: min(24em, calc(100% - var(--picture-left, 0px) - 48px));
+  padding: 0.7em 1em;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 0.7em;
+  background: rgb(13 17 23 / 70%);
+  font-size: 1.35em;
+  pointer-events: none;
+}
+
+@media (width <= 500px), (height <= 500px) {
+  .player-stats {
+    font-size: 1.125em;
+  }
+}
+
+.player-stats dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.2em 1.1em;
+  margin: 0;
+}
+
+/* The rows only group a label with its value, for the tests and for hiding: the grid lines them up. */
+.player-stat {
+  display: contents;
+}
+
+.player-stat dt {
   color: var(--muted);
 }
 
+.player-stat dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+/* The tiles' grey for "Disabled" is too dim for small text here: the muted colour reads better. */
+.player-stat .state-stopped {
+  color: var(--muted);
+}
+
+.player-stat[data-stat="state"] dd::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-right: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.08em;
+}
+
+/* The controls paint above the stats window, should a very small screen leave no room between them. */
 .player-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
 .player-top {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -872,7 +1028,7 @@ p.form-error {
 }
 
 .player-connection {
-  margin: 6px 0 0;
+  margin: 0 0 0.4em;
   color: var(--amber);
 }
 
@@ -924,12 +1080,18 @@ p.form-error {
     justify-content: center;
     height: auto;
     padding: 6px 16px;
+    overflow: visible;
     border-top: 1px solid var(--border);
     border-right: 0;
   }
 
   .brand {
     display: none;
+  }
+
+  /* In the bottom bar it is one more button beside the others. */
+  .rail-end {
+    margin-top: 0;
   }
 
   .content {

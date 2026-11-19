@@ -77,6 +77,7 @@ export interface StreamView {
    * while the stream has no engine; null before it has one, and while the stream is disabled.
    */
   path: string | null;
+  /** Recovery steps it took since it was started, whether or not they brought video back. */
   recoveries: number;
   /** The engine the stream plays from; shared engines serve every stream on their path. */
   engine: { name: string; shared: boolean } | null;
@@ -186,8 +187,18 @@ export interface Snapshot {
   wireguardOnly: boolean;
   sharedEngines: SharedEnginesView;
   hotStandby: HotStandbyView;
+  tilePreviews: TilePreviewsView;
   /** How often players report the stream they show full screen. */
   viewerPingSeconds: number;
+}
+
+/** How the grid's tiles may show their streams, as the admin set it in `.env`. */
+export interface TilePreviewsView {
+  /**
+   * Tiles only show thumbnails (LOW_CPU_PREVIEWS), whatever a browser chose under Settings,
+   * and the transcoder makes no live previews: the streams' `hls.preview` playlists stay empty.
+   */
+  thumbnailsOnly: boolean;
 }
 
 /** Settings the UI changes (`PATCH /api/settings`), kept in the controller's data volume. */

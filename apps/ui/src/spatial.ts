@@ -12,6 +12,7 @@ export interface Box {
   bottom: number;
 }
 
+/** Pixels of slack when comparing positions: browsers report boxes with rounding noise. */
 const EPSILON = 1;
 /** How much more a sideways offset costs than distance along the direction. */
 const ORTHOGONAL_WEIGHT = 2;
@@ -26,13 +27,30 @@ function overlapGap(startA: number, endA: number, startB: number, endB: number):
   return 0;
 }
 
+/**
+ * Whether the span `to` lies ahead of the span `from` along an axis, forwards (right, down) or
+ * backwards (left, up): clear of it, or overlapping it with its centre further along.
+ *
+ * The centre has to be further along by more than the slack. The focused tile is drawn scaled
+ * around its centre, and the browser reports the scaled box with rounding noise: the tile below it
+ * then has its centre a hair to the left or right of the focused one's, and the tile beside it a
+ * hair above or below. Without the slack, Left could land on the tile below instead of the rail,
+ * or Down on the tile beside instead of the footer.
+ */
+function isAhead(fromStart: number, fromEnd: number, toStart: number, toEnd: number, forwards: boolean): boolean {
+  const centreShift = (toStart + toEnd) / 2 - (fromStart + fromEnd) / 2;
+  return forwards
+    ? toStart >= fromEnd - EPSILON || centreShift > EPSILON
+    : toEnd <= fromStart + EPSILON || centreShift < -EPSILON;
+}
+
 /** Distance score of `to` from `from` in a direction, or undefined when it is not in that direction. */
 export function directionalDistance(from: Box, to: Box, direction: Direction): number | undefined {
   let primary: number;
   let secondary: number;
   switch (direction) {
     case "right": {
-      if (to.left < from.right - EPSILON && (to.left + to.right) / 2 <= (from.left + from.right) / 2) {
+      if (!isAhead(from.left, from.right, to.left, to.right, true)) {
         return undefined;
       }
       primary = Math.max(0, to.left - from.right);
@@ -40,7 +58,7 @@ export function directionalDistance(from: Box, to: Box, direction: Direction): n
       break;
     }
     case "left": {
-      if (to.right > from.left + EPSILON && (to.left + to.right) / 2 >= (from.left + from.right) / 2) {
+      if (!isAhead(from.left, from.right, to.left, to.right, false)) {
         return undefined;
       }
       primary = Math.max(0, from.left - to.right);
@@ -48,7 +66,7 @@ export function directionalDistance(from: Box, to: Box, direction: Direction): n
       break;
     }
     case "down": {
-      if (to.top < from.bottom - EPSILON && (to.top + to.bottom) / 2 <= (from.top + from.bottom) / 2) {
+      if (!isAhead(from.top, from.bottom, to.top, to.bottom, true)) {
         return undefined;
       }
       primary = Math.max(0, to.top - from.bottom);
@@ -56,7 +74,7 @@ export function directionalDistance(from: Box, to: Box, direction: Direction): n
       break;
     }
     case "up": {
-      if (to.bottom > from.top + EPSILON && (to.top + to.bottom) / 2 >= (from.top + from.bottom) / 2) {
+      if (!isAhead(from.top, from.bottom, to.top, to.bottom, false)) {
         return undefined;
       }
       primary = Math.max(0, from.top - to.bottom);

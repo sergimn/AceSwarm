@@ -295,7 +295,7 @@ describe("Pipeline with a source's live edge", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(): Pipeline {
+  function start(plan: Partial<PipelineSettings["plan"]> = {}): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -311,6 +311,7 @@ describe("Pipeline with a source's live edge", () => {
         playlistSize: 6,
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
+        ...plan,
       },
       liveEdge: { staleAfterMs: 60_000, noLiveAfterPolls: 10 },
     };
@@ -341,9 +342,9 @@ describe("Pipeline with a source's live edge", () => {
     edges[run]?.edge.observe({ status: "dl", downloaded, last, pos: last });
   }
 
-  /** ffmpeg of generation `generation` wrote `count` segments of each variant so far. */
-  async function wrote(generation: number, count: number): Promise<void> {
-    for (const variant of ["full", "preview"]) {
+  /** ffmpeg of generation `generation` wrote `count` segments of each of its variants so far. */
+  async function wrote(generation: number, count: number, variants = ["full", "preview"]): Promise<void> {
+    for (const variant of variants) {
       const directory = join(hlsDir, "s1", `g${String(generation)}`, variant);
       await mkdir(directory, { recursive: true });
       const lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0"];
@@ -428,6 +429,21 @@ describe("Pipeline with a source's live edge", () => {
     expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
     expect(edges).toHaveLength(0);
     expect(instance.status().liveEdge).toBeNull();
+  });
+
+  it("publishes a source that makes no preview, as with LOW_CPU_PREVIEWS, and has no preview to serve", async () => {
+    const instance = start({ previewMode: "thumbnails" });
+    await instance.start("http://e1/play", false);
+    frames(25);
+    await wrote(1, 2, ["full"]);
+    expect(await playlist(instance)).toEqual(["../g1/full/seg_000000.ts", "../g1/full/seg_000001.ts"]);
+    expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
+    // The preview's route answers 404 "no segments yet", and the tiles show the thumbnail.
+    expect(await instance.playlist("preview")).toBeUndefined();
+    const thumbnail = join(hlsDir, "s1", "g1", "thumbnail.jpg");
+    await writeFile(thumbnail, "picture");
+    await utimes(thumbnail, new Date(clock.now), new Date(clock.now));
+    expect(instance.thumbnailPath()).toBe(thumbnail);
   });
 
   it("stops reading a source whose live edge stops, and drops its segments once they are old", async () => {

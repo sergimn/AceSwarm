@@ -3,7 +3,7 @@ import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
-import type { ControllerMetrics } from "./metrics.ts";
+import type { RecoverySteps } from "./recovery-steps.ts";
 import type { OpenSession } from "./standby-engine.ts";
 import type { TakenStandby } from "./standby.ts";
 import type { MovedStream, StreamEngines } from "./stream-engines.ts";
@@ -27,7 +27,6 @@ export interface PlayingStream {
 /** What `StreamFailover` needs from the stream's supervisor. */
 export interface StreamFailoverHost {
   logger: Logger;
-  metrics: ControllerMetrics;
   settings: { handoverTimeoutMs: number; tickMs: number };
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -39,8 +38,8 @@ export interface StreamFailoverHost {
   /** The stream waits for its broadcast, which sends nothing new (see `StreamSupervisor`). */
   sourceStale: () => boolean;
   setState: (state: StreamState, message: string | null) => void;
-  /** Counts a recovery step in the stream's view. */
-  countRecovery: () => void;
+  /** The stream's recovery steps, which a failover is one of. */
+  steps: RecoverySteps;
   /** The stream plays from the engine it moved to, on `path`. */
   commit: (moved: MovedStream, path: string) => Promise<void>;
   openSession: OpenSession;
@@ -51,15 +50,13 @@ export interface StreamFailoverHost {
  * check, and failing over to a hot one when the stream stops getting video.
  */
 export class StreamFailover {
-  private readonly streamId: string;
   private readonly engines: StreamEngines;
   private readonly paths: StreamPaths;
   private readonly host: StreamFailoverHost;
   /** When the stream last got video, as far as this supervisor saw. */
   private lastVideoAt: number | undefined;
 
-  constructor(streamId: string, engines: StreamEngines, paths: StreamPaths, host: StreamFailoverHost) {
-    this.streamId = streamId;
+  constructor(engines: StreamEngines, paths: StreamPaths, host: StreamFailoverHost) {
     this.engines = engines;
     this.paths = paths;
     this.host = host;
@@ -144,11 +141,9 @@ export class StreamFailover {
     if (engine === undefined || standby === undefined) {
       return;
     }
-    this.host.countRecovery();
-    this.host.metrics.recoveries.inc({ stream: this.streamId, action: "failover" });
     this.host.logger.warn({ reason, to: standby.path }, "failing over to a standby");
     try {
-      await this.moveTo(engine, standby, reason);
+      await this.host.steps.take("failover", async () => this.moveTo(engine, standby, reason));
     } catch (error) {
       const state = this.host.sourceStale() ? "stale-source" : "stalled";
       this.host.setState(state, `failing over to ${standby.path} failed: ${describeError(error)}`);
@@ -179,12 +174,13 @@ export class StreamFailover {
     this.host.setState(state, `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
     const { handoverTimeoutMs, tickMs } = this.host.settings;
     const timeoutMs = standby.hot ? Math.min(handoverTimeoutMs, HOT_HANDOVER_TIMEOUT_MS) : handoverTimeoutMs;
+    const { now, sleep, steps } = this.host;
     await this.engines.failover({
       from: engine,
       fromPath: path,
       session,
       standby,
-      handover: { timeoutMs, pollMs: Math.min(tickMs, 1000), now: this.host.now, sleep: this.host.sleep },
+      handover: { timeoutMs, pollMs: Math.min(tickMs, 1000), now, sleep, starting: steps.handingOver },
       commit: this.host.commit,
     });
   }
@@ -198,16 +194,24 @@ export class StreamFailover {
     if (engine === undefined) {
       return false;
     }
-    if (await this.engines.finishLateMove(engine, session, pipeline)) {
-      return true;
+    try {
+      return (
+        (await this.engines.finishLateMove(engine, session, pipeline)) ||
+        (await this.engines.finishLateFailover({
+          from: engine,
+          fromPath: path,
+          session,
+          pipeline,
+          commit: this.host.commit,
+        }))
+      );
+    } finally {
+      // Also when letting go of the engine it left failed afterwards: the stream moved all the same.
+      const moved = this.host.playing().session;
+      if (moved !== undefined && moved !== session) {
+        this.host.steps.arrivedLate(moved);
+      }
     }
-    return this.engines.finishLateFailover({
-      from: engine,
-      fromPath: path,
-      session,
-      pipeline,
-      commit: this.host.commit,
-    });
   }
 
   /**

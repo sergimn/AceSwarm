@@ -58,6 +58,8 @@ export interface HandoverTiming {
   pollMs: number;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
+  /** Told of each handover as it starts (see `RecoverySteps.handingOver`). */
+  starting?: ((session: EngineSession) => void) | undefined;
 }
 
 /** The transcoder's ffmpeg for a move's new source exited before video came from it. */
@@ -112,6 +114,7 @@ export async function handOverTo(
   timing: HandoverTiming,
 ): Promise<PipelineStatus> {
   const source = session.playbackUrl;
+  timing.starting?.(session);
   if (reused && (await transcoderReads(transcoder, id, session))) {
     try {
       return await waitForHandover(transcoder, id, source, timing);

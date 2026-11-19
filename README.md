@@ -2,7 +2,7 @@
 
 Ace Swarm collects your Acestream streams in one place. You watch them in a browser that works with a TV remote. It keeps them playing and shows how healthy each one is.
 
-- **A grid of live previews.** Select a tile to watch the stream full screen. Hover or focus a tile to see:
+- **A grid of live previews.** Select a tile to watch the stream full screen. Point at a tile with the mouse, or move to it with the remote, to see:
   - how fresh the picture is ("Now" while new frames arrive),
   - how many peers are actually sending data (and how many the engine says are connected),
   - where the peers sending data are from, as flags.
@@ -51,6 +51,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 | `ENGINE_MEMORY_CACHE_MB`    | `128`                  | Stream data each engine keeps in memory. An engine uses about this plus 150 MB.                                  |
 | `ENGINE_MEMORY_MB`          | `512`                  | Memory limit per engine. The controller refuses one too small for the cache and names the minimum.               |
 | `PREVIEW_MODE`              | `video`                | `keyframes` makes previews much cheaper. Use it on a Raspberry Pi.                                               |
+| `LOW_CPU_PREVIEWS`          | `false`                | `true` shows thumbnails only in the tiles, on every screen: the cheapest previews, whatever `PREVIEW_MODE` says. |
 | `PATH_STRATEGY`             | `sticky-best`          | `sticky-best` moves a stream only when its path fails. `round-robin` spreads streams over the paths that are up. |
 | `STALE_SOURCE_SECONDS`      | `60`                   | A broadcast whose live edge doesn't move for this long counts as stopped: its stream waits for it.               |
 | `ACESWARM_ENGINES_INTERNAL` | `false`                | Set to `true` on Podman.                                                                                         |
@@ -58,8 +59,8 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 ### Raspberry Pi 5
 
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
-- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`.
-- Turn on **One engine per path** (under **Streams**) when you run several streams: they then share one engine instead of each starting its own.
+- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`. To save the most, set `LOW_CPU_PREVIEWS=true`: the tiles then only show thumbnails, and **Live video** is greyed out under **Settings**. Both decode only the key frames of an H.264 broadcast. A broadcast whose key frames ffmpeg can't use (no IDR frames and no recovery points, as with some open GOPs and intra refresh) gives them nothing to decode: after about 45 seconds of data without a picture, the transcoder decodes every frame of that stream, which costs more CPU (and with `LOW_CPU_PREVIEWS` still makes no live preview), and logs `key frames only decoding gave no frame`.
+- Turn on **One engine per path** (under **Settings**) when you run several streams: they then share one engine instead of each starting its own.
 - With WireGuard profiles, [hot standby](#hot-standby) gives each stream an engine on every other path too, so streams × paths engines without **One engine per path**. On a Pi, turn that on, or set `STANDBY_MAX_PATHS=1`, or turn hot standby off.
 - An engine levels off at about its cache plus 150 MB, about 275 MB with the default settings. The Pi's arm64 engine behaved like the x86 one in testing, so an 8 GB Pi has room for several streams with their own engines. The dashboard shows how much each engine really uses.
 
@@ -87,7 +88,7 @@ echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/90-ping
 sudo sysctl --system
 ```
 
-On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it. The containers are gone anyway.
+On Ubuntu 26.04, `docker compose down` may end with `rootless netns: kill network process: permission denied`: the AppArmor profile Ubuntu ships for `pasta` doesn't let Podman stop it ([Ubuntu bug 2154379](https://bugs.launchpad.net/ubuntu/+source/passt/+bug/2154379)). Compose then quits early: the last container stays behind (stopped), and so do the stack's networks and, with `-v`, its volumes. The next `docker compose up` still starts the stack.
 
 ## WireGuard
 
@@ -115,7 +116,7 @@ Turn on **WireGuard only** under **Network** to stop using the direct connection
 
 ## One engine per path
 
-Every stream normally gets an engine of its own. Turn on **One engine per path** under **Streams** and the streams on each network path share one engine instead: one for the direct connection, one for each WireGuard profile in use. Turning it on or off moves every stream to the other kind of engine without interrupting its picture.
+Every stream normally gets an engine of its own. Turn on **One engine per path** under **Settings** and the streams on each network path share one engine instead: one for the direct connection, one for each WireGuard profile in use. Turning it on or off moves every stream to the other kind of engine without interrupting its picture.
 
 - **One stream failing leaves the engine alone.** Restarting a shared engine would interrupt every stream on it, so a failing stream only restarts its own session, and moves to another path if that doesn't help.
 - **The engine is replaced when:**
@@ -144,7 +145,7 @@ With more than one network path (add a WireGuard profile), every stream that pla
 - **A healthy stream never moves.** Standbys only take over when the stream's own engine or path fails, and they keep their paths when path scores change, since a standby that moves starts again from no peers.
 - **Standbys that bring no video start again**, and go after three tries; their path gets a new one later, but not after three rounds of that, until the path goes down or the stream moves. A standby whose path is down stays two minutes in case the path comes back. The stream's **Standby** figure (the player's overlay, and its tile when it has one standby) says why one is not hot when the controller knows, such as "mullvad-de (warming up: ffmpeg decoded no video from it)", and keeps a path that lost its standbys as "failed" (within `STANDBY_MAX_PATHS`, while standbys are wanted), with "gave up" once it gets no more.
 - **Only for streams that play.** A stream that hasn't had video for ten minutes (a broadcast that is off) keeps no standbys; they start again once it plays.
-- **It costs resources.** Each standby is one more engine (or one more session on a shared engine), downloading the stream all the time. Turn **Hot standby on other paths** off under **Streams**, or set `STANDBY_MAX_PATHS` to keep standbys only on each stream's best few other paths. With **One engine per path** on, standbys only add sessions to the engines that are running anyway, which costs much less memory.
+- **It costs resources.** Each standby is one more engine (or one more session on a shared engine), downloading the stream all the time. Turn **Hot standby on other paths** off under **Settings**, or set `STANDBY_MAX_PATHS` to keep standbys only on each stream's best few other paths. With **One engine per path** on, standbys only add sessions to the engines that are running anyway, which costs much less memory.
 
 The stream's tile and the player's overlay show its standbys and whether they are hot. **Network** counts the standbys that pull through each path next to its streams.
 
@@ -177,7 +178,7 @@ flowchart LR
 
 - **controller:** the web UI and API. It runs one supervisor per stream, which creates the stream's engine, watches its health and recovers it.
 - **cleanup:** removes the engines when the whole stack goes down (`docker compose down` or `stop`). A controller restart leaves them running, so the streams play on.
-- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview and thumbnails.
+- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails.
 - **netgw:** the network gateway. Every engine routes through it. It owns the WireGuard tunnels, routes each engine through its path, probes the paths, and counts each engine's peers from connection tracking.
 - **engine:** the Acestream engine. It starts as root only to point its default route at the gateway, then drops to an unprivileged user with no capabilities.
 

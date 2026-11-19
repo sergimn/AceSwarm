@@ -1,6 +1,6 @@
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService, runService } from "@aceswarm/shared/service";
-import { loadConfig } from "./config.ts";
+import { loadConfig, previewMode } from "./config.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS } from "./live-edge.ts";
 import { PipelineManager, registerRoutes } from "./server.ts";
 
@@ -16,7 +16,7 @@ const manager = new PipelineManager(
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
     liveEdge: { ...DEFAULT_LIVE_EDGE_SETTINGS, staleAfterMs: config.STALE_SOURCE_SECONDS * 1000 },
     plan: {
-      previewMode: config.PREVIEW_MODE,
+      previewMode: previewMode(config),
       previewHeight: config.PREVIEW_HEIGHT,
       previewFps: config.PREVIEW_FPS,
       previewBitrateKbps: config.PREVIEW_BITRATE_KBPS,
@@ -34,4 +34,4 @@ const manager = new PipelineManager(
 await manager.clean();
 registerRoutes(service, manager);
 await runService(service, config.PORT, logger, () => manager.stopAll());
-logger.info({ port: config.PORT, previewMode: config.PREVIEW_MODE }, "transcoder ready");
+logger.info({ port: config.PORT, previewMode: previewMode(config) }, "transcoder ready");

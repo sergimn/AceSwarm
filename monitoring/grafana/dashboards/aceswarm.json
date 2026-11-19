@@ -267,7 +267,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(aceswarm_stream_recoveries_total[$__range])) or vector(0)",
+          "expr": "sum(increase(aceswarm_stream_recoveries_succeeded_total[$__range])) or vector(0)",
           "range": false,
           "instant": true,
           "refId": "A",
@@ -294,7 +294,8 @@
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value"
-      }
+      },
+      "description": "Recoveries that brought video back in the dashboard's range, over all streams: one each time a stream plays again after recovery steps (aceswarm_stream_recoveries_succeeded_total). The steps that brought no video back don't count: every step taken is in Recovery attempts per hour, in the collapsed row Recovery attempts."
     },
     {
       "type": "row",
@@ -636,7 +637,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (increase(aceswarm_stream_recoveries_total{stream=~\"$stream\"}[1h]))",
+          "expr": "sum by (action) (increase(aceswarm_stream_recoveries_succeeded_total{stream=~\"$stream\"}[1h]))",
           "range": true,
           "instant": false,
           "legendFormat": "{{action}}",
@@ -656,12 +657,13 @@
             "stacking": {
               "mode": "normal"
             }
-          }
+          },
+          "decimals": 0
         },
         "overrides": []
       },
       "options": {},
-      "description": "Recovery actions: restart-pipeline, restart-engine and switch-path."
+      "description": "Recoveries that brought video back (aceswarm_stream_recoveries_succeeded_total): a stream counts one each time it plays again after recovery steps, under the last step that changed where it plays from: restart-pipeline, restart-engine, switch-path, or failover to a hot standby. A restart by hand counts as restart-engine, unless the stream was playing. The steps tried before that one don't count, nor do the tries of a stream that waits for a broadcast that is off: every step taken is in Recovery attempts per hour, in the collapsed row Recovery attempts below."
     },
     {
       "type": "timeseries",
@@ -809,6 +811,63 @@
     },
     {
       "type": "row",
+      "title": "Recovery attempts",
+      "id": 44,
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Recovery attempts per hour",
+          "id": 45,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 57
+          },
+          "targets": [
+            {
+              "expr": "sum by (action) (increase(aceswarm_stream_recoveries_total{stream=~\"$stream\"}[1h]))",
+              "range": true,
+              "instant": false,
+              "legendFormat": "{{action}}",
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 60,
+                "stacking": {
+                  "mode": "normal"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "options": {},
+          "description": "Every recovery step taken, whether or not it brought video back (aceswarm_stream_recoveries_total): restart-pipeline, restart-engine, switch-path and failover to a hot standby. A stream that waits for a broadcast that is off keeps trying, so it adds steps here and no recovery. The ones that brought video back are in Recoveries per hour."
+        }
+      ]
+    },
+    {
+      "type": "row",
       "title": "Peers",
       "id": 12,
       "collapsed": false,
@@ -816,7 +875,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 57
       },
       "panels": []
     },
@@ -832,7 +891,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 57
+        "y": 58
       },
       "targets": [
         {
@@ -868,7 +927,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 57
+        "y": 58
       },
       "targets": [
         {
@@ -904,7 +963,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 66
       },
       "targets": [
         {
@@ -950,7 +1009,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 66
       },
       "targets": [
         {
@@ -986,7 +1045,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 74
       },
       "targets": [
         {
@@ -1023,7 +1082,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 73
+        "y": 74
       },
       "targets": [
         {
@@ -1056,7 +1115,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 82
       },
       "panels": []
     },
@@ -1073,7 +1132,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 82
+        "y": 83
       },
       "targets": [
         {
@@ -1157,7 +1216,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 82
+        "y": 83
       },
       "targets": [
         {
@@ -1227,7 +1286,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 82
+        "y": 83
       },
       "targets": [
         {
@@ -1286,7 +1345,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 91
       },
       "targets": [
         {
@@ -1324,7 +1383,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 91
       },
       "targets": [
         {
@@ -1361,7 +1420,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 98
+        "y": 99
       },
       "targets": [
         {
@@ -1446,7 +1505,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 98
+        "y": 99
       },
       "targets": [
         {
@@ -1491,7 +1550,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 107
       },
       "panels": []
     },
@@ -1507,7 +1566,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 107
+        "y": 108
       },
       "targets": [
         {
@@ -1562,7 +1621,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 113
+        "y": 114
       },
       "targets": [
         {
@@ -1597,7 +1656,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 113
+        "y": 114
       },
       "targets": [
         {
@@ -1632,7 +1691,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 113
+        "y": 114
       },
       "targets": [
         {
@@ -1669,7 +1728,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 121
+        "y": 122
       },
       "targets": [
         {
@@ -1710,7 +1769,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 121
+        "y": 122
       },
       "targets": [
         {
@@ -1746,7 +1805,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 129
+        "y": 130
       },
       "panels": []
     },
@@ -1762,7 +1821,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 130
+        "y": 131
       },
       "targets": [
         {
@@ -1796,7 +1855,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 140
+        "y": 141
       },
       "targets": [
         {

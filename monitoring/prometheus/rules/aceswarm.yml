@@ -6,8 +6,12 @@ groups:
       # disabled stream has no aceswarm_stream_up, so the time it was off counts neither way.
       - record: aceswarm:stream_up:ratio_1h
         expr: avg_over_time(aceswarm_stream_up[1h])
+      # Every recovery step taken, and the recoveries that brought video back: one each time a
+      # stream plays again after recovery steps, under the last step that changed where it plays from.
       - record: aceswarm:stream_recoveries:increase_1h
         expr: sum by (stream, action) (increase(aceswarm_stream_recoveries_total[1h]))
+      - record: aceswarm:stream_recoveries_succeeded:increase_1h
+        expr: sum by (stream, action) (increase(aceswarm_stream_recoveries_succeeded_total[1h]))
       - record: aceswarm:path_up:ratio_1h
         expr: avg_over_time(aceswarm_path_up[1h])
 
@@ -25,7 +29,7 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: "Stream {{ $labels.stream }} needed more than 6 recoveries in the last hour"
+          summary: "Stream {{ $labels.stream }} took more than 6 recovery steps in the last hour"
       - alert: AceSwarmPathDown
         expr: aceswarm_path_up == 0
         for: 5m
