@@ -5,9 +5,19 @@ import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
 
 export type Variant = "full" | "preview";
+/** Whether a run's source sends data now: it does, it stopped for a while, or nothing is known yet. */
+export type Flow = "flowing" | "paused" | "unknown";
 export const VARIANTS: readonly Variant[] = ["full", "preview"];
 
 const KILL_GRACE_MS = 3000;
+/**
+ * The live edge of a source that sends data moves at least this often. The engine's live position
+ * moves about once a second as far as the stats showed, and a session only counts as live once its
+ * edge kept moving at the broadcast's own pace (see `LiveEdge`), but this was not measured against
+ * a real engine, and a few failed stat polls must not look like a pause: if the edge moved less
+ * often than this, the wait would keep starting over. A source is stale after 60 s without a move.
+ */
+const EDGE_FRESH_MS = 20_000;
 
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
 export interface GenerationPlan {
@@ -17,6 +27,8 @@ export interface GenerationPlan {
   stat?: string | undefined;
   directory: string;
   mode: FullMode;
+  /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
+  allFrames: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
 }
@@ -44,6 +56,8 @@ export class Generation {
   staleStopped = false;
   readonly directory: string;
   readonly mode: FullMode;
+  /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
+  readonly allFrames: boolean;
   readonly startedAt: number;
   /** How long ffmpeg waits for data from the source before it gives up. */
   readonly inputTimeoutSeconds: number;
@@ -62,6 +76,12 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
+  /** Since when the data comes without a break (see `watchFlow`), or none yet. */
+  private flowingSince: number | undefined;
+  /** The last time the data was seen to come, while `flowingSince` is set. */
+  private flowSeenAt = 0;
+  /** How long the data came for the stream's earlier runs that got no frame, until it stops for a while. */
+  private flowedBefore = 0;
 
   constructor(plan: GenerationPlan) {
     this.number = plan.number;
@@ -69,6 +89,7 @@ export class Generation {
     this.stat = plan.stat;
     this.directory = plan.directory;
     this.mode = plan.mode;
+    this.allFrames = plan.allFrames;
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
@@ -81,6 +102,51 @@ export class Generation {
 
   stale(): boolean {
     return this.watch?.edge.state() === "stale";
+  }
+
+  /**
+   * Notes whether the broadcast's data comes at `now`: ffmpeg opened the source (it knows its
+   * video), the run may publish, and the live edge moved lately (a source without a stat URL has
+   * nothing to tell, and counts). It notes when the data began to come, together with how long it
+   * came for the stream's earlier runs (`carried`), and starts over, with that too, when it stopped
+   * for a while: that is the broadcast pausing.
+   */
+  watchFlow(now: number, carried: number): Flow {
+    // A run that ended keeps what it saw: its flow is handed on when it is replaced (see `flowedMs`).
+    if (this.retired || this.state === "exited" || this.frames > 0) {
+      return "unknown";
+    }
+    if (this.videoCodec === undefined || !this.publishing()) {
+      this.flowingSince = undefined;
+      return "unknown";
+    }
+    if (!this.edgeMoves()) {
+      this.flowingSince = undefined;
+      this.flowedBefore = 0;
+      return "paused";
+    }
+    if (this.flowingSince === undefined) {
+      this.flowingSince = now;
+      this.flowedBefore = Math.max(this.flowedBefore, carried);
+    }
+    this.flowSeenAt = now;
+    return "flowing";
+  }
+
+  /**
+   * How long the data came without a frame: for this run since it began to come, and for the
+   * stream's earlier runs that ended without one. With key frames only decoding, no frame for long
+   * means the broadcast has none ffmpeg can use (see `decodesKeyFramesOnly`).
+   */
+  flowedMs(): number {
+    return this.flowedBefore + (this.flowingSince === undefined ? 0 : this.flowSeenAt - this.flowingSince);
+  }
+
+  /** Whether the broadcast sends data now, as far as the session's live edge tells (see `LiveEdge`). */
+  private edgeMoves(): boolean {
+    // A session with no live position has output published as it comes, and nothing to tell either.
+    const edge = this.watch?.edge;
+    return edge === undefined || edge.state() === "none" || edge.movedWithin(EDGE_FRESH_MS);
   }
 
   /** Whether ffmpeg failed before any video, and opens the source again. */
