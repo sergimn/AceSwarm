@@ -69,7 +69,8 @@ export async function waitForSteadyPlaying(
 /**
  * Removes every stream and WireGuard profile, and turns engine sharing and hot standby off, so
  * each spec starts from an empty stack with one engine per stream (standby.spec.ts turns hot
- * standby on).
+ * standby on). It returns once the controller has removed every engine, so the spec's first
+ * request doesn't run into a removal.
  */
 export async function resetStack(request: APIRequestContext): Promise<void> {
   // WireGuard only keeps the last profile, so it goes first.
@@ -85,6 +86,22 @@ export async function resetStack(request: APIRequestContext): Promise<void> {
   for (const profile of profiles) {
     await request.delete(`/api/wireguard/${profile.name}`);
   }
+  await waitForEnginesRemoved();
+}
+
+/**
+ * Waits until the stack has no engine container left, stopped ones too. Deleting a stream answers
+ * at once, and the controller removes its engines (own and standby) in the background, and the
+ * ones of a path that streams shared on its next sweep. Removing a running container deletes its
+ * network interface on the host, and the browser aborts the requests it has in flight when the
+ * host's interfaces change (`net::ERR_NETWORK_CHANGED`): a spec whose first request, or
+ * `page.goto`, lands in the middle of that fails for a reason that has nothing to do with it.
+ * With no stream left, any engine still there is on its way out.
+ */
+async function waitForEnginesRemoved(timeout = 90_000): Promise<void> {
+  await expect
+    .poll(() => stackEngines(), { timeout, intervals: [500], message: "engines left after the streams were removed" })
+    .toEqual([]);
 }
 
 export interface NetworkDialog {
