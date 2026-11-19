@@ -14,9 +14,10 @@ const KILL_GRACE_MS = 3000;
  * The live edge of a source that sends data moves at least this often. The engine's live position
  * moves about once a second as far as the stats showed, and a session only counts as live once its
  * edge kept moving at the broadcast's own pace (see `LiveEdge`), but this was not measured against
- * a real engine: if one moved it less often, the wait would keep starting over.
+ * a real engine, and a few failed stat polls must not look like a pause: if the edge moved less
+ * often than this, the wait would keep starting over. A source is stale after 60 s without a move.
  */
-const EDGE_FRESH_MS = 10_000;
+const EDGE_FRESH_MS = 20_000;
 
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
 export interface GenerationPlan {
@@ -111,8 +112,11 @@ export class Generation {
    * for a while: that is the broadcast pausing.
    */
   watchFlow(now: number, carried: number): Flow {
-    const idle = this.retired || this.state === "exited" || this.frames > 0;
-    if (idle || this.videoCodec === undefined || !this.publishing()) {
+    // A run that ended keeps what it saw: its flow is handed on when it is replaced (see `flowedMs`).
+    if (this.retired || this.state === "exited" || this.frames > 0) {
+      return "unknown";
+    }
+    if (this.videoCodec === undefined || !this.publishing()) {
       this.flowingSince = undefined;
       return "unknown";
     }

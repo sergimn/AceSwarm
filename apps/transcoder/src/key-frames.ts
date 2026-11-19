@@ -9,8 +9,8 @@ import type { ProgressBlock } from "./progress.ts";
  * counted from the start of the run (measured on a 720p x264 test source: about 17 s for key
  * frames every 5 s, 34 to 40 s for every 10 s, 48 s for every 12 s, 60 s for every 15 s; about
  * twice the interval for a small, fast one, so it depends on bitrate and encoder). The wait begins after the run opened and probed the
- * source, about 5 s in, so key frames up to about 12 s apart get their frame in time and those
- * further apart are decoded in full too. The controller waits 90 s for video, counted from when
+ * source, about 5 s in, so key frames up to about 12 s apart get their frame in time (less after
+ * runs that got none, as they count) and those further apart are decoded in full too. The controller waits 90 s for video, counted from when
  * the session opens, so the swarm's prebuffering uses up part of it: when the data starts late the
  * controller starts the stream's pipeline again before the fallback or its first frame came. What
  * came counts for the next run (see `KeyFrames.carried`), so the fallback comes all the same.

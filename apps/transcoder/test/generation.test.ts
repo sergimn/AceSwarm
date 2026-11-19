@@ -31,7 +31,7 @@ describe("Generation flow", () => {
     clock.now += 4000;
     expect(run.watchFlow(clock.now, 7000)).toBe("flowing");
     expect(run.flowedMs()).toBe(11_000);
-    clock.now += 7000;
+    clock.now += 21_000;
     expect(run.watchFlow(clock.now, 7000)).toBe("paused");
     expect(run.flowedMs()).toBe(0);
   });
@@ -58,17 +58,24 @@ describe("Generation flow", () => {
     expect(run.watchFlow(17_000, 7000)).toBe("unknown");
     // What came before still counts, the run's own time starts over.
     expect(run.flowedMs()).toBe(7000);
+    // And it does not count twice when the data comes again.
+    run.videoCodec = "h264";
+    expect(run.watchFlow(20_000, 7000)).toBe("flowing");
+    expect(run.watchFlow(22_000, 7000)).toBe("flowing");
+    expect(run.flowedMs()).toBe(9000);
   });
 
   it.each([
     ["retired", (run: Generation) => (run.retired = true)],
     ["exited", (run: Generation) => (run.state = "exited")],
     ["showing a frame", (run: Generation) => (run.frames = 1)],
-  ])("sees no flow of a run that is %s", (_name, change) => {
+  ])("sees no more flow of a run that is %s", (_name, change) => {
     const run = generation();
     expect(run.watchFlow(1000, 0)).toBe("flowing");
+    expect(run.watchFlow(5000, 0)).toBe("flowing");
     change(run);
-    expect(run.watchFlow(5000, 0)).toBe("unknown");
-    expect(run.flowedMs()).toBe(0);
+    expect(run.watchFlow(9000, 0)).toBe("unknown");
+    // What it saw is handed on to the run that replaces it, and does not grow.
+    expect(run.flowedMs()).toBe(4000);
   });
 });

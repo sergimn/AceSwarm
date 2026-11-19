@@ -578,15 +578,15 @@ describe("Pipeline decoding key frames only", () => {
     expect(skipsFrames(runs[3])).toBe(false);
   });
 
-  it("counts a live edge that moved 10 seconds ago, not one that moved a moment longer ago", async () => {
+  it("counts a live edge that moved 20 seconds ago, not one that moved a moment longer ago", async () => {
     // The data comes for the patience, with the last move of the edge exactly that long before.
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");
     await opened();
     live();
     await instance.sync();
-    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 10);
-    clock.now += 10_000;
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 20);
+    clock.now += 20_000;
     await instance.sync();
     await runsStarted(2);
     await instance.stop();
@@ -600,8 +600,8 @@ describe("Pipeline decoding key frames only", () => {
     await opened();
     live();
     await other.sync();
-    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 10);
-    clock.now += 10_001;
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 20);
+    clock.now += 20_001;
     await other.sync();
     await noMoreRuns(1);
   });
@@ -668,6 +668,57 @@ describe("Pipeline decoding key frames only", () => {
     expect(skipsFrames(runs[2])).toBe(false);
   });
 
+  it("counts the data that came for a run that ended before the controller started the stream again", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(35);
+    await instance.sync();
+    // The controller stops the session first: the run ends, and a sync sees that before the restart.
+    exit(children[0]);
+    await instance.sync();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await runsStarted(2);
+    await opened(1);
+    live(1);
+    await instance.sync();
+    moves(9);
+    await instance.sync();
+    await noMoreRuns(2);
+    moves(1);
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "restart", "all-frames"]);
+  });
+
+  it("keeps what an earlier run saw when a later run, that saw nothing, ends", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(30);
+    await instance.sync();
+    // The second run never gets as far as knowing its video.
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await runsStarted(2);
+    await instance.sync();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await runsStarted(3);
+    await opened(2);
+    live(2);
+    await instance.sync();
+    moves(14);
+    await instance.sync();
+    await noMoreRuns(3);
+    moves(1);
+    await instance.sync();
+    await runsStarted(4);
+    expect(reasons).toEqual(["start", "restart", "restart", "all-frames"]);
+  });
+
   it("starts the wait over for the runs that follow when the data stops coming for a while", async () => {
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");
@@ -682,7 +733,7 @@ describe("Pipeline decoding key frames only", () => {
     live(1);
     await instance.sync();
     // The broadcast sends nothing for a while: what came before counts no more.
-    clock.now += 11_000;
+    clock.now += 21_000;
     await instance.sync();
     moves(1);
     await instance.sync();
