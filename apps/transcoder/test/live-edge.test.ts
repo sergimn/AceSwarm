@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LiveEdge, parseLiveSample, type LiveEdgeSeed, type LiveSample } from "../src/live-edge.ts";
+import { LiveEdge, newerSeed, parseLiveSample, type LiveEdgeSeed, type LiveSample } from "../src/live-edge.ts";
 
 const SETTINGS = { staleAfterMs: 60_000, noLiveAfterPolls: 3 };
 
@@ -401,6 +401,32 @@ describe("why a session is stale (staleBecause)", () => {
     clock.now += 10_001;
     edge.observe(sample(5048, 100, 4945));
     expect(edge.view()).toMatchObject({ state: "stale", staleBecause: "quiet" });
+  });
+});
+
+describe("newerSeed", () => {
+  it("is the one there is", () => {
+    const seed = { edge: 5000, since: 1000 };
+    expect(newerSeed(undefined, undefined)).toBeUndefined();
+    expect(newerSeed(seed, undefined)).toBe(seed);
+    expect(newerSeed(undefined, seed)).toBe(seed);
+  });
+
+  it("has the newer edge, and the latest times either one found the broadcast sending new data", () => {
+    const first = { edge: 9000, since: 1000, quietSince: 1000, newDataAt: 1000 };
+    const second = { edge: 5000, since: 101_000, quietSince: 104_000, newDataAt: 104_000 };
+    const merged = { edge: 9000, since: 1000, quietSince: 104_000, newDataAt: 104_000 };
+    expect(newerSeed(first, second)).toEqual(merged);
+    expect(newerSeed(second, first)).toEqual(merged);
+  });
+
+  it("counts a seed without a quiet time from when its edge was seen, and knows of no new data without any", () => {
+    const first = { edge: 5000, since: 1000 };
+    const second = { edge: 5000, since: 3000, quietSince: 2000 };
+    // The same edge: the second one's.
+    expect(newerSeed(first, second)).toEqual({ edge: 5000, since: 3000, quietSince: 2000, newDataAt: undefined });
+    expect(newerSeed(second, first)).toEqual({ edge: 5000, since: 1000, quietSince: 2000, newDataAt: undefined });
+    expect(newerSeed(first, { ...second, newDataAt: 1500 })?.newDataAt).toBe(1500);
   });
 });
 

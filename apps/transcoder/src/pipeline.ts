@@ -10,6 +10,7 @@ import { KeyFrames, REOPENS_AFTER_FALLBACK } from "./key-frames.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
+  newerSeed,
   watchLiveEdge as defaultWatch,
   type LiveEdgeSeed,
   type LiveEdgeSettings,
@@ -493,20 +494,10 @@ export class Pipeline {
    */
   private newestEdge(also?: Generation): LiveEdgeSeed | undefined {
     let newest = this.lastEdge;
-    let quietSince = newest?.quietSince ?? newest?.since;
-    let newDataAt = newest?.newDataAt;
     for (const generation of [this.active, this.pending, also]) {
-      const seen = generation?.watch?.edge.snapshot();
-      if (seen === undefined) {
-        continue;
-      }
-      quietSince = Math.max(quietSince ?? -Infinity, seen.quietSince ?? seen.since);
-      newDataAt = seen.newDataAt === undefined ? newDataAt : Math.max(newDataAt ?? -Infinity, seen.newDataAt);
-      if (newest === undefined || seen.edge >= newest.edge) {
-        newest = seen;
-      }
+      newest = newerSeed(newest, generation?.watch?.edge.snapshot());
     }
-    return newest === undefined ? undefined : { ...newest, quietSince, newDataAt };
+    return newest;
   }
 
   /** What the generation's ffmpeg does. */

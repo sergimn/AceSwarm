@@ -441,9 +441,10 @@ export class StreamSupervisor {
    * counts as hot while its own live edge moves: the broadcast is fine there.
    *
    * With a lagging engine the broadcast is there: a wait for it is over, and the ladder goes on
-   * from where it was when the wait began (see `SourceWait.back`). For a stream that played until
-   * then, the engine is replaced now, not when the wait's next try was due. Should the next
-   * engines lag too, the ladder's usual waits, which double, keep them from going back to back.
+   * from where it was when the wait began, or after a restart by hand since (see `SourceWait.back`).
+   * For a stream that played until the wait, the engine is replaced now, not when the wait's next
+   * try was due. Should the next engines lag too, the ladder's usual waits, which double, keep
+   * them from going back to back.
    */
   private async recover(health: Health): Promise<void> {
     let { reason } = health;

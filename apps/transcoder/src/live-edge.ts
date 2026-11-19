@@ -32,6 +32,21 @@ export interface LiveEdgeSeed {
   newDataAt?: number | undefined;
 }
 
+/**
+ * What two of a stream's sources saw, as one: the newer edge (the second one's when both have the
+ * same), with the latest time either of them found the broadcast sending new data. Those times
+ * are the stream's, not one source's.
+ */
+export function newerSeed(one: LiveEdgeSeed | undefined, other: LiveEdgeSeed | undefined): LiveEdgeSeed | undefined {
+  if (one === undefined || other === undefined) {
+    return one ?? other;
+  }
+  const quietSince = Math.max(one.quietSince ?? one.since, other.quietSince ?? other.since);
+  const newData = Math.max(one.newDataAt ?? -Infinity, other.newDataAt ?? -Infinity);
+  const newest = other.edge >= one.edge ? other : one;
+  return { ...newest, quietSince, newDataAt: newData === -Infinity ? undefined : newData };
+}
+
 /** Rises of a new session's edge compared, by our clock (see `LiveEdge`). */
 const RISE_WINDOW_MS = 10_000;
 const MIN_RISE_SPAN_MS = 1500;

@@ -16,7 +16,7 @@ export class SourceWait {
   private edgeAt: number | undefined;
   /** It may try once before the next step is due, when the live edge moves (see `moved`). */
   private early = true;
-  /** Where the stream's recovery ladder was when the wait began (see `back`). */
+  /** Where the stream's recovery ladder was when the wait began, or after a restart by hand since (see `back`). */
   private ladder: RecoveryState | undefined;
   private readonly policy: RecoveryPolicy;
   private readonly logger: Logger;
@@ -59,12 +59,13 @@ export class SourceWait {
    * over, and what is left is the engine's to fix.
    *
    * Returns the recovery ladder to go on from, when it was waiting and knows one: the ladder as
-   * it was when the wait began. The wait's tries were for a broadcast that sent nothing, so they
-   * don't count against the engines. The ladder must not start over here: engines that are
-   * replaced as soon as they show how far behind they serve never see the broadcast move, so
-   * after a while of them the transcoder can't tell that the broadcast goes on, and a short wait
-   * begins and ends on the next engine. Starting over each time would keep the waits between
-   * lagging engines from growing.
+   * it was when the wait began, or after a restart by hand during the wait (see `byHand`). The
+   * wait's tries were for a broadcast that sent nothing, so they don't count against the
+   * engines. The ladder must not start over here: engines that are replaced as soon as they show
+   * how far behind they serve never see the broadcast move, so after a while of them the
+   * transcoder can't tell that the broadcast goes on, and a short wait begins and ends on the
+   * next engine. Starting over each time would keep the waits between lagging engines from
+   * growing.
    */
   back(liveEdge: LiveEdgeView | null | undefined): RecoveryState | undefined {
     if (!this.stale) {
