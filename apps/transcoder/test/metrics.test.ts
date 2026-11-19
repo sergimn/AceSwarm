@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService, type Service } from "@aceswarm/shared/service";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager } from "../src/server.ts";
 
@@ -74,6 +74,19 @@ describe("the transcoder's metrics", () => {
       new RegExp(String.raw`^${metric}\{stream="${stream}"[^}]*\} (\S+)$`, "m").exec(text)?.[1];
   }
 
+  /** Each series of how the first stream's ffmpeg decodes, in one scrape: its `decoding` label and value. */
+  async function decodings(): Promise<Record<string, string>> {
+    const text = await service.registry.metrics();
+    const found: Record<string, string> = {};
+    for (const [, labels = "", value = ""] of text.matchAll(/^aceswarm_pipeline_decoding\{([^}]*)\} (\S+)$/gm)) {
+      const decoding = /decoding="([^"]*)"/.exec(labels)?.[1];
+      if (labels.includes('stream="s1"') && decoding !== undefined) {
+        found[decoding] = value;
+      }
+    }
+    return found;
+  }
+
   async function progress(run: number, block: string): Promise<void> {
     (children[run]?.stdout as PassThrough).write(block);
     await nextTurn();
@@ -109,5 +122,36 @@ describe("the transcoder's metrics", () => {
     expect((await scrape())("aceswarm_pipeline_fps", "s1")).toBeUndefined();
     await progress(2, "frame=50\nfps=25\nprogress=continue\n");
     expect((await scrape())("aceswarm_pipeline_fps", "s1")).toBe("25");
+  });
+
+  test("says how each stream's ffmpeg decodes, with one series per way and 1 for the current one", async () => {
+    expect(await decodings()).toEqual({});
+    await manager.start("s1", "http://e1/play", false);
+    // Video mode decodes every frame, as the settings want.
+    expect(await decodings()).toEqual({
+      "key-frames": "0",
+      "key-frames-waiting": "0",
+      "all-frames-fallback": "0",
+      "all-frames": "1",
+    });
+
+    // The gauge follows the pipeline at each scrape (the pipeline's tests check its states).
+    const pipeline = manager.get("s1");
+    expect(pipeline).toBeDefined();
+    if (pipeline === undefined) {
+      return;
+    }
+    const decoding = vi.spyOn(pipeline, "decoding").mockReturnValue("key-frames-waiting");
+    expect(await decodings()).toMatchObject({ "key-frames-waiting": "1", "all-frames": "0" });
+    decoding.mockReturnValue("all-frames-fallback");
+    expect(await decodings()).toMatchObject({ "key-frames-waiting": "0", "all-frames-fallback": "1" });
+    decoding.mockReturnValue(undefined);
+    expect(await decodings()).toEqual({});
+
+    // A stream whose pipeline is removed has none.
+    decoding.mockRestore();
+    expect(await decodings()).toMatchObject({ "all-frames": "1" });
+    await manager.stop("s1");
+    expect(await decodings()).toEqual({});
   });
 });

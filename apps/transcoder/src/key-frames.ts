@@ -25,6 +25,17 @@ export const KEY_FRAMES_PATIENCE_MS = 45_000;
 export const REOPENS_AFTER_FALLBACK = 5;
 
 /**
+ * How a stream's ffmpeg decodes its broadcast (see `KeyFrames.decoding`):
+ * - `key-frames`: key frames only, and they gave a frame (in this run or an earlier one), so it stays so;
+ * - `key-frames-waiting`: key frames only, with no frame of them yet, so it may still fall back;
+ * - `all-frames-fallback`: every frame, because key frames only gave no frame for the patience;
+ * - `all-frames`: every frame, as the settings want (`PREVIEW_MODE=video`, or a re-encoded full
+ *   stream with `LOW_CPU_PREVIEWS`).
+ */
+export const DECODINGS = ["key-frames", "key-frames-waiting", "all-frames-fallback", "all-frames"] as const;
+export type Decoding = (typeof DECODINGS)[number];
+
+/**
  * What a stream's pipeline knows about the key frames of its broadcast: whether it needs every
  * frame decoded, because key frames only decoding gave it no picture, or has shown that it has
  * key frames ffmpeg can use.
@@ -71,6 +82,14 @@ export class KeyFrames {
     }
     this.allFrames = true;
     return true;
+  }
+
+  /** How the run with this plan decodes the broadcast, for the metrics. */
+  decoding(plan: FfmpegPlan): Decoding {
+    if (decodesKeyFramesOnly(plan)) {
+      return this.worked ? "key-frames" : "key-frames-waiting";
+    }
+    return decodesKeyFramesOnly({ ...plan, allFrames: false }) ? "all-frames-fallback" : "all-frames";
   }
 
   /**
