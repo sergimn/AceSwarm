@@ -131,9 +131,12 @@ describe("a source whose live edge stopped", () => {
     expect(evaluateHealth(inputs({ pipeline: retried })).reason).toBe("no new data from the broadcast for 11m");
   });
 
-  it("says when the engine serves the broadcast far behind its live edge", () => {
+  it("says when the engine serves far behind the live edge of a broadcast not known to send new data", () => {
     const late = pipeline({ liveEdge: stale(NOW - 1000, 75) });
-    expect(evaluateHealth(inputs({ pipeline: late })).reason).toBe("the engine serves the broadcast 75s late");
+    expect(evaluateHealth(inputs({ pipeline: late }))).toMatchObject({
+      state: "stale-source",
+      reason: "the engine serves the broadcast 75s late, and the broadcast is not known to send new data",
+    });
   });
 
   it("waits for video while a new source's live edge has not moved yet", () => {

@@ -1941,6 +1941,93 @@ describe("an engine that serves a broadcast that goes on too far behind (lagging
     expect(fake.instance.view().message).toMatch(/trying a new engine in \d+s$/);
   });
 
+  test("keeps doubling the waits when every engine lags and is slow to show where it serves", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+
+    // What a transcoder says of engines that each take 20 s to show a live position, 103 s behind a
+    // broadcast that goes on. A session sees new data once it watched its edge move for 3 s, and a
+    // session far behind is "behind" only while one saw new data within the last 60 s: engines
+    // replaced as soon as they show up never do, so after a minute of them it says "quiet" for a moment.
+    const startMs = 20_000;
+    let newDataAt = fake.clock.now;
+    let startedAt = fake.clock.now - startMs;
+    let seenAt: number | undefined = fake.clock.now - 3000;
+    let engines = fake.restarted.length;
+    const replacedAt: number[] = [];
+    let waits = 0;
+    let waiting = false;
+    for (let second = 1; second <= 1800; second += 1) {
+      fake.clock.now += 1000;
+      const now = fake.clock.now;
+      if (now - startedAt < startMs) {
+        liveEdge.value = null;
+      } else {
+        seenAt ??= now;
+        newDataAt = now - seenAt >= 3000 ? now : newDataAt;
+        liveEdge.value = {
+          ...lagging(now),
+          staleBecause: now - newDataAt <= 60_000 ? "behind" : "quiet",
+          quietSince: new Date(newDataAt).toISOString(),
+        };
+      }
+      await fake.instance.tick();
+      if (fake.restarted.length > engines) {
+        engines = fake.restarted.length;
+        startedAt = now;
+        seenAt = undefined;
+        replacedAt.push(second);
+      }
+      const waitsNow = fake.instance.view().state === "stale-source";
+      waits += waitsNow && !waiting ? 1 : 0;
+      waiting = waitsNow;
+    }
+    const gaps = replacedAt.slice(1).map((at, index) => at - (replacedAt[index] ?? 0));
+    // The first engines go as soon as they show up, 20 s apart: the ladder's waits of 1 to 16 s
+    // are over by then (the fourth one goes 3 s later, once the transcoder says "behind" again).
+    // Then the waits go on doubling, to 32 s and the longest one, and stay there. A ladder that
+    // started over at each wait would keep the engines 20 s apart for good.
+    expect(gaps.slice(0, 6)).toEqual([20, 20, 20, 23, 20, 32]);
+    expect(new Set(gaps.slice(6))).toEqual(new Set([settings.recoveryMaxDelayMs / 1000]));
+    expect(replacedAt).toHaveLength(34);
+    // "Waiting for source" showed for that one moment, not again and again while engines lag.
+    expect(waits).toBe(1);
+  });
+
+  test("waits its turn after a restart by hand during the wait, which started the ladder over", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.instance.view().state).toBe("stale-source");
+    fake.clock.now += 5000;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(2);
+
+    // The engine of the restart by hand lags: it goes after the ladder's first wait from that
+    // restart, not at once as it would on the ladder from before the wait.
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(2);
+    expect(fake.instance.view()).toMatchObject({
+      state: "stalled",
+      message: "the engine serves the broadcast 103s late; retrying in 1s",
+    });
+    fake.clock.now += 1000;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(3);
+  });
+
   test("is replaced at once when a stream that played falls behind, and counts as a recovery", async () => {
     const video = { on: true };
     const liveEdge: { value: LiveEdgeView | null } = { value: null };

@@ -192,10 +192,15 @@ export class LiveEdge {
   }
 
   state(): LiveEdgeState {
+    return this.stateWhen(this.staleBecause());
+  }
+
+  /** The state, given why the session is stale (so both come from one reading of the clock). */
+  private stateWhen(staleBecause: "quiet" | "behind" | null): LiveEdgeState {
     if (this.edge === undefined) {
       return this.hasNoLivePos ? "none" : "waiting";
     }
-    if (this.staleBecause() !== null) {
+    if (staleBecause !== null) {
       return "stale";
     }
     return this.verified ? "live" : "waiting";
@@ -235,14 +240,15 @@ export class LiveEdge {
   }
 
   view(): LiveEdgeView {
-    const state = this.state();
+    const staleBecause = this.staleBecause();
+    const state = this.stateWhen(staleBecause);
     // A session without a live position says nothing about the broadcast, and its output is
     // published: the quiet time of the sessions before it is kept for the next one (`snapshot`),
     // not shown as this one's.
     const quietSince = state === "none" ? undefined : this.quietSince;
     return {
       state,
-      staleBecause: this.staleBecause(),
+      staleBecause,
       edgeAt: this.edge === undefined ? null : new Date(this.edge * 1000).toISOString(),
       advancedAt: this.edgeSince === undefined ? null : new Date(this.edgeSince).toISOString(),
       quietSince: quietSince === undefined ? null : new Date(quietSince).toISOString(),

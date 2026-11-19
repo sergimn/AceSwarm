@@ -41,14 +41,17 @@ export function duration(ms: number): string {
 
 /**
  * Why a source whose live edge the transcoder found stale is. How long the broadcast sent nothing
- * new counts from `quietSince`, which goes on when a retry opens a session on a newer window.
+ * new counts from `quietSince`, which goes on when a retry opens a session on a newer window. A
+ * session that is stale for how far behind its engine serves, rather than for that long without
+ * new data, says so, with what makes the stream wait all the same: nobody saw the broadcast send
+ * new data lately (otherwise it is `lagging`, see `evaluateHealth`).
  */
 function staleReason(edge: LiveEdgeView, now: number): string {
   const behind = edge.behindSeconds ?? 0;
   const since = edge.quietSince === null ? undefined : Date.parse(edge.quietSince);
   return since !== undefined && now - since > behind * 1000
     ? `no new data from the broadcast for ${duration(now - since)}`
-    : lateReason(edge);
+    : `${lateReason(edge)}, and the broadcast is not known to send new data`;
 }
 
 function lateReason(edge: LiveEdgeView): string {

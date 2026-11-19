@@ -269,9 +269,10 @@ export interface LiveEdgeView {
    *   stale threshold, or it serves far behind an edge while no session of the stream was seen to
    *   get new data within the threshold (a new engine on the old window of a broadcast that
    *   stopped). Nothing local can change that: the stream waits for its broadcast.
-   * - behind: the broadcast sends new data (see `quietSince`), but the engine serves it more than
-   *   the threshold behind its live edge. That is this session's start, not the broadcast: a new
-   *   one starts close to the edge.
+   * - behind: the broadcast sends new data (a live session of the stream saw some within the
+   *   threshold; the time an edge was first seen, which `quietSince` can be, doesn't count), but
+   *   the engine serves it more than the threshold behind its live edge. That is this session's
+   *   start, not the broadcast: a new one usually starts close to the edge.
    *
    * Absent from a transcoder that doesn't tell: the controller then waits for the broadcast, as for
    * "quiet".

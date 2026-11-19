@@ -280,7 +280,7 @@ export class StreamSupervisor {
     }
     // Someone stepped in: it acts now, and the ladder's waits start over from this step.
     this.recovery = { failures: 0, lastActionAt: undefined };
-    this.sourceWait.due();
+    this.sourceWait.byHand();
     await this.runAction("restart-engine", "manual restart", this.state !== "playing");
   }
 
@@ -439,17 +439,18 @@ export class StreamSupervisor {
    * which only it coming back can make work. A hot standby still takes over, since a standby only
    * counts as hot while its own live edge moves: the broadcast is fine there.
    *
-   * With a lagging engine the broadcast is there: a wait for it is over, and the ladder starts
-   * over, so the engine is replaced now, not when the wait's next try was due. Should the next
+   * With a lagging engine the broadcast is there: a wait for it is over, and the ladder goes on
+   * from where it was when the wait began (see `SourceWait.back`). For a stream that played until
+   * then, the engine is replaced now, not when the wait's next try was due. Should the next
    * engines lag too, the ladder's usual waits, which double, keep them from going back to back.
    */
   private async recover(health: Health): Promise<void> {
     let { reason } = health;
     const lagging = health.lagging === true;
     if (health.state === "stale-source") {
-      this.sourceWait.begin(reason, this.pipeline?.liveEdge);
-    } else if (lagging && this.sourceWait.back(this.pipeline?.liveEdge)) {
-      this.recovery = { failures: 0, lastActionAt: undefined };
+      this.sourceWait.begin(reason, this.pipeline?.liveEdge, this.recovery);
+    } else if (lagging) {
+      this.recovery = this.sourceWait.back(this.pipeline?.liveEdge) ?? this.recovery;
     }
     const waiting = this.sourceWait.waiting;
     // A hot standby takes over at once, before the ladder: it already pulls the stream.

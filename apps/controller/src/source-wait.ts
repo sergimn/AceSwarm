@@ -1,6 +1,6 @@
 import type { LiveEdgeView, StreamState } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { RecoveryPolicy } from "./recovery.ts";
+import type { RecoveryPolicy, RecoveryState } from "./recovery.ts";
 
 /**
  * A stream's wait for its broadcast while that sends nothing new: the transcoder found the live
@@ -16,6 +16,8 @@ export class SourceWait {
   private edgeAt: number | undefined;
   /** It may try once before the next step is due, when the live edge moves (see `moved`). */
   private early = true;
+  /** Where the stream's recovery ladder was when the wait began (see `back`). */
+  private ladder: RecoveryState | undefined;
   private readonly policy: RecoveryPolicy;
   private readonly logger: Logger;
 
@@ -33,11 +35,12 @@ export class SourceWait {
     return this.stale;
   }
 
-  /** The source is stale: the stream waits for its broadcast from now on. */
-  begin(reason: string, liveEdge: LiveEdgeView | null | undefined): void {
+  /** The source is stale: the stream waits for its broadcast from now on. `ladder`: its recovery ladder now. */
+  begin(reason: string, liveEdge: LiveEdgeView | null | undefined, ladder?: RecoveryState): void {
     if (!this.stale) {
       this.logger.warn({ reason, liveEdge }, "the broadcast sends no new data; waiting for it");
       this.edgeAt = edgeTime(liveEdge);
+      this.ladder = ladder;
     }
     this.stale = true;
   }
@@ -46,21 +49,37 @@ export class SourceWait {
   end(): void {
     this.stale = false;
     this.edgeAt = undefined;
+    this.ladder = undefined;
     this.early = true;
   }
 
   /**
    * The broadcast sends new data again, though the session brings no video: its engine serves the
    * broadcast too far behind its live edge (`LiveEdgeView.staleBecause` is "behind"). The wait is
-   * over, and what is left is the engine's to fix. Returns whether it was waiting.
+   * over, and what is left is the engine's to fix.
+   *
+   * Returns the recovery ladder to go on from, when it was waiting and knows one: the ladder as
+   * it was when the wait began. The wait's tries were for a broadcast that sent nothing, so they
+   * don't count against the engines. The ladder must not start over here: engines that are
+   * replaced as soon as they show how far behind they serve never see the broadcast move, so
+   * after a while of them the transcoder can't tell that the broadcast goes on, and a short wait
+   * begins and ends on the next engine. Starting over each time would keep the waits between
+   * lagging engines from growing.
    */
-  back(liveEdge: LiveEdgeView | null | undefined): boolean {
+  back(liveEdge: LiveEdgeView | null | undefined): RecoveryState | undefined {
     if (!this.stale) {
-      return false;
+      return undefined;
     }
+    const { ladder } = this;
     this.logger.info({ liveEdge }, "the broadcast sends new data again, but the engine serves it too far behind");
     this.end();
-    return true;
+    return ladder;
+  }
+
+  /** A restart by hand: the ladder starts over from it, and the next step may come early again. */
+  byHand(): void {
+    this.ladder = undefined;
+    this.due();
   }
 
   /**
