@@ -76,9 +76,14 @@ export class SourceWait {
     return ladder;
   }
 
-  /** A restart by hand: the ladder starts over from it, and the next step may come early again. */
-  byHand(): void {
-    this.ladder = undefined;
+  /**
+   * A restart by hand: the next step may come early again, and the ladder started over with it.
+   * `ladder` is the ladder after that restart. A wait that goes on keeps it as the one to go on
+   * from (see `back`), in place of the one from when it began: the tries the wait makes from here
+   * on don't count against the engines either.
+   */
+  byHand(ladder: RecoveryState): void {
+    this.ladder = this.stale ? ladder : undefined;
     this.due();
   }
 

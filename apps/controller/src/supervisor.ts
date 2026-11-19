@@ -280,8 +280,8 @@ export class StreamSupervisor {
     }
     // Someone stepped in: it acts now, and the ladder's waits start over from this step.
     this.recovery = { failures: 0, lastActionAt: undefined };
-    this.sourceWait.byHand();
     await this.runAction("restart-engine", "manual restart", this.state !== "playing");
+    this.sourceWait.byHand(this.recovery);
   }
 
   /**
@@ -296,6 +296,7 @@ export class StreamSupervisor {
     this.forceRestart = false;
     this.logger.info("manual restart; the stream has no session, starting it now");
     this.recovery = { failures: 0, lastActionAt: undefined };
+    this.sourceWait.byHand(this.recovery);
   }
 
   private readonly setState = (state: StreamState, message: string | null): void => {
@@ -446,10 +447,9 @@ export class StreamSupervisor {
    */
   private async recover(health: Health): Promise<void> {
     let { reason } = health;
-    const lagging = health.lagging === true;
     if (health.state === "stale-source") {
       this.sourceWait.begin(reason, this.pipeline?.liveEdge, this.recovery);
-    } else if (lagging) {
+    } else if (health.lagging === true) {
       this.recovery = this.sourceWait.back(this.pipeline?.liveEdge) ?? this.recovery;
     }
     const waiting = this.sourceWait.waiting;
@@ -462,7 +462,7 @@ export class StreamSupervisor {
       return;
     }
     // Either kind of stale source wants a new engine: the one it has keeps what it serves.
-    const freshEngine = waiting || lagging;
+    const freshEngine = waiting || health.lagging === true;
     const decision = nextRecovery(this.recovery, this.sourceWait.waits(this.policy), this.canSwitchPath(), freshEngine);
     const wait = this.sourceWait.until(decision.notBefore, this.now(), this.pipeline?.liveEdge);
     if (wait > 0) {

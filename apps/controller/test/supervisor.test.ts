@@ -94,6 +94,8 @@ interface Fakes {
   created?: EngineHandle[];
   /** Fails the first session start, like an engine that dies right away. */
   failFirstSession?: boolean;
+  /** While on, no session opens. */
+  failSessions?: { on: boolean };
   /** Gives each session URLs of its own, as a real engine does (by default an engine's sessions share them). */
   sessionIds?: boolean;
   /** Starting the transcoder fails this many more times. */
@@ -234,7 +236,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       await fakes.sessionGate;
       await fakes.hold?.session;
       sessions += 1;
-      if (fakes.failFirstSession === true && sessions === 1) {
+      if ((fakes.failFirstSession === true && sessions === 1) || fakes.failSessions?.on === true) {
         throw new Error("engine died");
       }
       const id = fakes.sessionIds === true ? `?session=${String(sessions)}` : "";
@@ -2026,6 +2028,87 @@ describe("an engine that serves a broadcast that goes on too far behind (lagging
     liveEdge.value = lagging(fake.clock.now);
     await fake.instance.tick();
     expect(fake.restarted).toHaveLength(3);
+  });
+
+  test("is replaced at once when the wait went on for long after a restart by hand", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const fake = supervisor([direct], { video, liveEdge });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    fake.clock.now += 5000;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(2);
+
+    // The broadcast stays off for ten more minutes: the wait's tries go on, a minute apart by then.
+    for (let second = 1; second <= 600; second += 1) {
+      fake.clock.now += 1000;
+      liveEdge.value = stale(fake.clock.now);
+      await fake.instance.tick();
+    }
+    const tries = fake.restarted.length;
+    expect(tries).toBeGreaterThan(8);
+    expect(fake.instance.view().state).toBe("stale-source");
+
+    // It is back, and the engine of the last try lags. Those tries were for a broadcast that sent
+    // nothing: the engine goes now, not after the wait they would add up to on the usual ladder.
+    fake.clock.now += 1000;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(tries + 1);
+    expect(fake.instance.view()).toMatchObject({
+      state: "recovering",
+      message: "the engine serves the broadcast 103s late; restart engine",
+    });
+  });
+
+  test("goes on from a fresh ladder after a restart by hand of a stream that had no session", async () => {
+    const video = { on: true };
+    const liveEdge: { value: LiveEdgeView | null } = { value: null };
+    const failSessions = { on: false };
+    const fake = supervisor([direct], { video, liveEdge, failSessions });
+    await fake.instance.tick();
+    await fake.instance.tick();
+    video.on = false;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    // A restart by hand: the wait remembers the ladder after it, one step in.
+    fake.clock.now += 5000;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(2);
+    // The wait's next try can't open a session: the stream has none.
+    failSessions.on = true;
+    fake.clock.now += 30_001;
+    liveEdge.value = stale(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(3);
+    expect(fake.instance.view().message).toBe("restart engine failed: engine died");
+    failSessions.on = false;
+
+    // A restart by hand starts it now, and the ladder over: the wait remembers that one instead.
+    fake.clock.now += 1000;
+    fake.instance.requestRestart();
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({
+      state: "stale-source",
+      message: "opening stream",
+    });
+
+    // Its engine lags, and so does the next one: the first goes at once, the second after the
+    // ladder's first wait (1 s). On the ladder the wait remembered before, that would be its second (2 s).
+    fake.clock.now += 1000;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(4);
+    fake.clock.now += 1000;
+    liveEdge.value = lagging(fake.clock.now);
+    await fake.instance.tick();
+    expect(fake.restarted).toHaveLength(5);
   });
 
   test("is replaced at once when a stream that played falls behind, and counts as a recovery", async () => {
