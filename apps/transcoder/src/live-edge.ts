@@ -57,7 +57,9 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  * know of a slightly later end of the old window has an edge newer than the previous session's,
  * which starts that time over (it gets another `staleAfterMs` to show it moves), though the
  * broadcast is as quiet as before. A session that was live and sees its own edge move again after
- * it went stale is live again, and does start `quietSince` over.
+ * it went stale is live again, and does start `quietSince` over. A session without a live position
+ * (`none`) reports no quiet time, as its output is played as it comes, but keeps the stream's for
+ * the session after it.
  *
  * - waiting: no new data seen yet. A new session counts once it downloaded and its own edge kept
  *   moving past the newest edge the stream's previous session saw, at about the broadcast's pace:
