@@ -132,7 +132,25 @@ export function setBroadcastBlocked(broadcast: Broadcast, blocked: boolean): voi
  * broadcast that stops does. Playing engines keep their connections and their live edge stops.
  */
 export async function setBroadcastInput(broadcast: Broadcast, on: boolean): Promise<void> {
-  const url = `http://${MESH.source}:7700/inputs/${broadcast.name}/${on ? "start" : "stop"}`;
+  await controlInput(broadcast, on ? "start" : "stop");
+}
+
+/** What a broadcast's stream carries, and on which PIDs (see `start_input` in e2e/broadcast.sh). */
+export type BroadcastLayout = "default" | "moved" | "hevc";
+
+/**
+ * Starts a broadcast's input again with another layout, on the broadcast runner (through its
+ * tracker): H.264 video on PID 256 ("default"), the same on PID 211 ("moved"), or HEVC video on
+ * PID 211 ("hevc"). Its source engine reads on from the new input, so playing engines keep their
+ * session and get a stream whose video moves to another PID or codec in the middle, under program
+ * tables whose version stays the same.
+ */
+export async function setBroadcastLayout(broadcast: Broadcast, layout: BroadcastLayout): Promise<void> {
+  await controlInput(broadcast, `layout/${layout}`);
+}
+
+async function controlInput(broadcast: Broadcast, action: string): Promise<void> {
+  const url = `http://${MESH.source}:7700/inputs/${broadcast.name}/${action}`;
   const response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(40_000) });
   if (!response.ok) {
     throw new Error(`${url}: HTTP ${String(response.status)} ${await response.text()}`);

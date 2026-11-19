@@ -11,6 +11,7 @@ import {
 } from "./decode-check.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS, LiveEdge, type LiveEdgeSettings, type WatchLiveEdge } from "./live-edge.ts";
 import { TsPackets } from "./ts-packets.ts";
+import { LayoutChanges } from "./ts-tables.ts";
 
 export interface StandbyReaderSettings {
   /** A connection that brings no data for this long is dropped and opened again. */
@@ -61,6 +62,7 @@ export interface StandbyLiveEdge {
  * `createDecodeChecker`): when the data starts to come, and again every so often. Once a check
  * found no video, the data doesn't count until a later one does. Before the first check ends, it
  * counts: checks wait their turn, and a standby that brings no data for long is started again.
+ * A check that is running when the broadcast changes its layout says nothing (see `relaidOut`).
  *
  * With the session's stat URL, only data that comes while its live edge moves counts: an engine
  * whose broadcast stopped still serves the old window it has, which would make it look hot.
@@ -89,6 +91,8 @@ class StandbyReader {
   private quietChecks = 0;
   private check: DecodeCheck | undefined;
   private nextCheckAt = 0;
+  /** The check that is running ended because the broadcast changed its layout (see `relaidOut`). */
+  private endedByLayout = false;
 
   constructor(source: StandbySource, settings: StandbyReaderSettings, logger: Logger, deps: ReaderDeps) {
     const { liveEdge, now } = deps;
@@ -167,6 +171,7 @@ class StandbyReader {
     };
     arm();
     const packets = new TsPackets();
+    const layouts = new LayoutChanges();
     let withoutVideo = 0;
     try {
       // The playback URL redirects to the stream itself.
@@ -177,7 +182,10 @@ class StandbyReader {
       }
       for await (const chunk of response.body) {
         this.bytes += (chunk as Uint8Array).byteLength;
-        const video = packets.push(chunk as Uint8Array) > 0;
+        const video = packets.push(chunk as Uint8Array, layouts.packet) > 0;
+        if (layouts.changed()) {
+          this.relaidOut();
+        }
         this.decodeCheck(chunk as Uint8Array, video);
         const decodes = this.decoder === undefined || this.decodes !== false;
         if (video && decodes && (this.watch === undefined || this.watch.edge.publishable())) {
@@ -230,6 +238,18 @@ class StandbyReader {
     this.check?.feed(chunk);
   }
 
+  /**
+   * The broadcast changed its layout mid-stream: its video moved to another PID or codec (see
+   * `TsTables`). ffmpeg stays on the streams it found when it started, so a check that is running
+   * would get no more video and fail a standby that is fine: it ends without an answer. The next
+   * check comes at once, as what the last one found may not hold for the new layout.
+   */
+  private relaidOut(): void {
+    this.nextCheckAt = this.now();
+    this.endedByLayout = this.check !== undefined;
+    this.check?.stop();
+  }
+
   private checkPriority(): CheckPriority {
     if (this.decodes === undefined) {
       return CHECK_PRIORITY.first;
@@ -251,6 +271,12 @@ class StandbyReader {
     // that couldn't start) leaves the answer as it was. The next one comes a little later, later
     // each time in a row: at most a minute later for a standby whose video decodes, and never
     // sooner than the failures before it allow for one whose video didn't.
+    const endedByLayout = this.endedByLayout;
+    this.endedByLayout = false;
+    if (result === "inconclusive" && endedByLayout) {
+      // Not a check that went quiet: the next one is already due (see `relaidOut`).
+      return;
+    }
     if (result === "inconclusive") {
       this.quietChecks += 1;
       const wait = backoff(this.quietChecks);

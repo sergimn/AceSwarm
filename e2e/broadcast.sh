@@ -9,10 +9,14 @@
 #    a broadcast by its infohash or its content ID.
 #  - The sources' built-in tracker refuses every announce ("not authorized"), so the sources and
 #    the players announce to e2e/tracker.ts (port 7700) instead. The tests also stop and start a
-#    broadcast's input through it (POST /inputs/bcN/stop|start), for a broadcast that stops.
+#    broadcast's input through it (POST /inputs/bcN/stop|start), for a broadcast that stops, and
+#    replace it by one with another layout (POST /inputs/bcN/layout/LAYOUT), for a broadcast that
+#    moves its video to other PIDs or to another codec mid-stream.
 #
 #   broadcast.sh start HOST [COUNT]   HOST: the address players reach this machine on (its mesh
 #                                     address). COUNT broadcasts, 3 by default.
+#   broadcast.sh input N [LAYOUT]     starts broadcast N's input again with this layout (see
+#                                     start_input): default, moved or hevc
 #   broadcast.sh wait                 waits until every broadcast is live and prints them as JSON:
 #                                     [{"name": "bc1", "infohash": "...", "contentId": "..."}, ...]
 #   broadcast.sh logs                 prints the logs of every part
@@ -50,17 +54,8 @@ start_one() {
   mkdir -p "$dir/publish" "$dir/cache" "$dir/state"
   # The engine runs as uid 1000 inside its image.
   chmod 0777 "$dir/publish" "$dir/cache" "$dir/state"
-  docker rm -f "$SOURCE-$n" "$ENGINE-$n" >/dev/null 2>&1 || true
-
-  # ffmpeg's HTTP server serves one client, then exits; Docker restarts it for the next reconnect.
-  # About 1.3 Mbit/s: 960x540 H.264 at 25 fps with AAC audio.
-  docker run -d --name "$SOURCE-$n" --network host --restart always "$FFMPEG_IMAGE" \
-    -hide_banner -loglevel error -re \
-    -f lavfi -i "testsrc2=size=960x540:rate=25" -f lavfi -i "sine=frequency=$((330 + 110 * n)):sample_rate=48000" \
-    -vf "hue=h=$((120 * (n - 1)))" \
-    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
-    -b:v 1200k -maxrate 1200k -bufsize 600k -g 50 -c:a aac -b:a 96k \
-    -f mpegts -listen 1 "http://127.0.0.1:$((18000 + n))/live.ts" >/dev/null
+  docker rm -f "$ENGINE-$n" >/dev/null 2>&1 || true
+  start_input "$n"
 
   # PYCRYPTODOME_INTEGER=native: the image's pycryptodome 4 rejects the negative intermediate values
   # the engine's RSA key generation (the broadcast's signing key) relies on.
@@ -71,6 +66,47 @@ start_one() {
     --skip-internal-tracker --tracker "http://$host:7700/announce" --port "$((7763 + n))" \
     --publish-dir /broadcast/publish --cache-dir /broadcast/cache --state-dir /broadcast/state \
     --log-stdout >/dev/null
+}
+
+# Starts broadcast N's input, in place of the one that runs: ffmpeg's test pattern as HTTP MPEG-TS
+# on 127.0.0.1:1800N, about 1.3 Mbit/s (960x540 at 25 fps with AAC audio). ffmpeg's HTTP server
+# serves one client, then exits; Docker restarts it for the next reconnect.
+#
+# LAYOUT is what the stream carries, and where:
+#   default  H.264 video on PID 256, audio on PID 257 (ffmpeg's own numbering)
+#   moved    the same, on PIDs 211 and 221
+#   hevc     HEVC video on PID 211, audio on PID 221
+# The source engine reads on from the new input, so players get a stream that changes its layout
+# in the middle. Every ffmpeg writes its program tables with version 0: the version never tells
+# of the change, as with broadcasts that switch encoders.
+start_input() {
+  local n="$1" layout="${2:-default}"
+  local video=(-c:v libx264 -preset ultrafast -tune zerolatency) pids=()
+  if ! [[ "$n" =~ ^[0-9]{1,2}$ ]]; then
+    log "not a broadcast: $n"
+    return 2
+  fi
+  case "$layout" in
+    default) ;;
+    moved) pids=(-streamid 0:211 -streamid 1:221) ;;
+    hevc)
+      video=(-c:v libx265 -preset ultrafast -tune zerolatency -x265-params log-level=error)
+      pids=(-streamid 0:211 -streamid 1:221)
+      ;;
+    *)
+      log "unknown layout: $layout"
+      return 2
+      ;;
+  esac
+  docker rm -f "$SOURCE-$n" >/dev/null 2>&1 || true
+  docker run -d --name "$SOURCE-$n" --network host --restart always "$FFMPEG_IMAGE" \
+    -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc2=size=960x540:rate=25" -f lavfi -i "sine=frequency=$((330 + 110 * n)):sample_rate=48000" \
+    -vf "hue=h=$((120 * (n - 1)))" \
+    "${video[@]}" -pix_fmt yuv420p \
+    -b:v 1200k -maxrate 1200k -bufsize 600k -g 50 -c:a aac -b:a 96k \
+    "${pids[@]}" -f mpegts -listen 1 "http://127.0.0.1:$((18000 + n))/live.ts" >/dev/null
+  log "bc$n input: $layout layout"
 }
 
 # The cache file is named after the broadcast's infohash: live.<infohash>.0
@@ -154,6 +190,7 @@ stop() {
 
 case "${1:-}" in
   start) start "${@:2}" ;;
+  input) start_input "${@:2}" ;;
   wait) wait_ready ;;
   logs) logs ;;
   stop) stop ;;

@@ -37,6 +37,8 @@ function pipelineAt(lastFrameAt: string | null): PipelineStatus {
     fps: null,
     videoCodec: null,
     mode: "copy",
+    layout: null,
+    layoutChangedAt: null,
     exitCode: null,
     error: null,
     pendingSource: null,

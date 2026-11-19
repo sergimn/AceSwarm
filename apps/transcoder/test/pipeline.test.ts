@@ -9,6 +9,7 @@ import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveEdge } from "../src/live-edge.ts";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { fakeSources, type FakeSource } from "./fake-source.ts";
 
 /** An ffmpeg process that never delivers anything, as with an engine still looking for peers. */
 function silentProcess(): ChildProcess {
@@ -38,18 +39,6 @@ function exit(child: ChildProcess | undefined, code = 183): void {
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-/** The source an ffmpeg run reads. */
-function sourceOf(args: string[] | undefined): string | undefined {
-  const index = args?.indexOf("-i") ?? -1;
-  return index === -1 ? undefined : args?.[index + 1];
-}
-
-/** How long an ffmpeg run waits for its input, in microseconds. */
-function inputTimeout(args: string[] | undefined): string | undefined {
-  const index = args?.indexOf("-rw_timeout") ?? -1;
-  return index === -1 ? undefined : args?.[index + 1];
-}
-
 describe("Pipeline", () => {
   let hlsDir: string;
   let pipeline: Pipeline | undefined;
@@ -57,6 +46,12 @@ describe("Pipeline", () => {
   const runs: string[][] = [];
   /** Every ffmpeg process, in the same order. */
   const children: ChildProcess[] = [];
+  /** The source each run opened, in the same order: every run of these tests reads its own. */
+  let opened: FakeSource[] = [];
+  /** The source a run reads. */
+  const sourceOf = (run: number): string | undefined => opened[run]?.request.source;
+  /** How long a run's reader waits for data, in milliseconds. */
+  const inputTimeout = (run: number): number | undefined => opened[run]?.request.idleTimeoutMs;
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-test-"));
@@ -89,6 +84,8 @@ describe("Pipeline", () => {
     };
     const events = { generationStarted: () => undefined, handover: () => undefined };
     const logger = createLogger("test", "silent");
+    const sources = fakeSources();
+    opened = sources.opened;
     pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
@@ -97,6 +94,7 @@ describe("Pipeline", () => {
         return child;
       },
       now,
+      openSource: sources.open,
     });
     return pipeline;
   }
@@ -105,21 +103,21 @@ describe("Pipeline", () => {
     const instance = start(120);
     await instance.start("http://engine-1/play", false);
     await instance.start("http://engine-1/play-again", false);
-    expect(runs.map((args) => inputTimeout(args))).toEqual(["60000000", "60000000"]);
+    expect(opened.map((source) => source.request.idleTimeoutMs)).toEqual([60_000, 60_000]);
   });
 
   it("waits as long as the handover for a new engine's first data", async () => {
     const instance = start(120);
     await instance.start("http://engine-1/play", false);
     await instance.start("http://engine-2/play", true);
-    expect(inputTimeout(runs[1])).toBe("120000000");
+    expect(inputTimeout(1)).toBe(120_000);
     expect(instance.status().pendingSource).toBe("http://engine-2/play");
   });
 
   it("waits as long as the handover even when there is no picture left to keep", async () => {
     const instance = start(120);
     await instance.start("http://engine-2/play", true);
-    expect(inputTimeout(runs[0])).toBe("120000000");
+    expect(inputTimeout(0)).toBe(120_000);
     expect(instance.status().source).toBe("http://engine-2/play");
   });
 
@@ -132,7 +130,7 @@ describe("Pipeline", () => {
       expect(runs).toHaveLength(3);
     });
     expect(runs[2]).toContain("libx264");
-    expect(inputTimeout(runs[2])).toBe("120000000");
+    expect(inputTimeout(2)).toBe(120_000);
     expect(instance.status().pendingSource).toBe("http://engine-2/play");
   });
 
@@ -140,7 +138,7 @@ describe("Pipeline", () => {
     const instance = start(30);
     await instance.start("http://engine-1/play", false);
     await instance.start("http://engine-2/play", true);
-    expect(inputTimeout(runs[1])).toBe("60000000");
+    expect(inputTimeout(1)).toBe(60_000);
   });
 
   it("opens a handover's source again when ffmpeg fails before any video, as often as asked", async () => {
@@ -160,8 +158,8 @@ describe("Pipeline", () => {
       await vi.waitFor(() => {
         expect(runs).toHaveLength(run + 1);
       });
-      expect(sourceOf(runs[run])).toBe("http://engine-2/play");
-      expect(inputTimeout(runs[run])).toBe("120000000");
+      expect(sourceOf(run)).toBe("http://engine-2/play");
+      expect(inputTimeout(run)).toBe(120_000);
       expect(instance.status().pendingSource).toBe("http://engine-2/play");
       exit(children[run]);
     }
@@ -211,7 +209,7 @@ describe("Pipeline", () => {
     await vi.waitFor(() => {
       expect(runs).toHaveLength(3);
     });
-    expect(sourceOf(runs[2])).toBe("http://engine-2/play");
+    expect(sourceOf(2)).toBe("http://engine-2/play");
     exit(children[2]);
     expect(instance.status()).toMatchObject({ source: "http://engine-2/play", state: "exited" });
   });
@@ -226,7 +224,7 @@ describe("Pipeline", () => {
     // The sync's run of the old source creates its directories before it would start ffmpeg.
     await new Promise((resolve) => setTimeout(resolve, 100));
     const running = children.filter((child) => child.exitCode === null && !child.killed);
-    expect(running.map((child) => sourceOf(runs[children.indexOf(child)]))).toEqual(["http://engine-2/play"]);
+    expect(running.map((child) => sourceOf(children.indexOf(child)))).toEqual(["http://engine-2/play"]);
     expect(instance.status().source).toBe("http://engine-2/play");
   });
 
@@ -297,6 +295,7 @@ describe("Pipeline with a source's live edge", () => {
         children.push(child);
         return child;
       },
+      openSource: fakeSources().open,
       now: () => clock.now,
       watchLiveEdge: (url, edge) => {
         const watch = { url, edge, stopped: false };

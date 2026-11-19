@@ -3,6 +3,8 @@ import { statSync } from "node:fs";
 import type { PipelineState } from "@aceswarm/shared/api-types";
 import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
+import { NO_SINK, type Sink, type SourceReader } from "./source-reader.ts";
+import type { Layout } from "./ts-tables.ts";
 
 export type Variant = "full" | "preview";
 /** Whether a run's source sends data now: it does, it stopped for a while, or nothing is known yet. */
@@ -19,6 +21,17 @@ const KILL_GRACE_MS = 3000;
  */
 const EDGE_FRESH_MS = 20_000;
 
+/**
+ * The connection a run reads its source through. A run that takes over from it in the middle of
+ * the stream gets the connection too (see `Pipeline`), so the engine's session is read on.
+ */
+export interface Connection {
+  /** Undefined only until the reader is open. */
+  reader: SourceReader | undefined;
+  /** The run it feeds now. */
+  run: Generation;
+}
+
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
 export interface GenerationPlan {
   number: number;
@@ -29,6 +42,8 @@ export interface GenerationPlan {
   mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   allFrames: boolean;
+  /** Takes over in the middle of a stream that is already being read (see `FfmpegPlan`). */
+  midStream?: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
 }
@@ -58,10 +73,23 @@ export class Generation {
   readonly mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   readonly allFrames: boolean;
+  /** Takes over in the middle of a stream that is already being read (see `FfmpegPlan`). */
+  readonly midStream: boolean;
   readonly startedAt: number;
-  /** How long ffmpeg waits for data from the source before it gives up. */
+  /** How long the source's reader waits for data before it gives up. */
   readonly inputTimeoutSeconds: number;
   process: ChildProcess | undefined;
+  /** The connection to its source, while it is the run that connection feeds. */
+  connection: Connection | undefined;
+  /** Its ffmpeg's input, once ffmpeg started. */
+  sink: Sink = NO_SINK;
+  /** What the source's program tables say it carries (see `TsTables`): only known of MPEG-TS, once they came. */
+  layout: Layout | undefined;
+  /**
+   * When another run took over from it in the middle of the stream: its input ended there, and
+   * the last segments its ffmpeg writes out are still to be published.
+   */
+  handedOverAt: number | undefined;
   state: PipelineState = "starting";
   frames = 0;
   lastFrameAt: number | undefined;
@@ -90,9 +118,47 @@ export class Generation {
     this.directory = plan.directory;
     this.mode = plan.mode;
     this.allFrames = plan.allFrames;
+    this.midStream = plan.midStream === true;
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
+  }
+
+  /**
+   * Goes on where `old` is in its source, in the middle of the stream: the connection feeds this
+   * run from here on, and it is the same attempt on the same session. So it gets what belongs to
+   * the session rather than to one ffmpeg run: the live edge's watch, the handover it is part of,
+   * the tries left, and the last frame players got (until its own first one, the stream's last
+   * frame is still that one). Where `old` could already publish, all of this run's output can:
+   * everything it reads comes after what was published.
+   */
+  takeOver(old: Generation, layout: Layout): void {
+    this.layout = layout;
+    this.connection = old.connection;
+    old.connection = undefined;
+    if (this.connection !== undefined) {
+      this.connection.run = this;
+    }
+    this.watch = old.watch;
+    old.watch = undefined;
+    this.reopens = old.reopens;
+    this.handoverSince = old.handoverSince;
+    this.publishedFrameAt = old.publishedFrameAt;
+    if (old.publishingSince === undefined) {
+      return;
+    }
+    this.publishingSince = old.publishingSince;
+    for (const variant of VARIANTS) {
+      this.publishFrom[variant] = -1;
+    }
+  }
+
+  /** Stops its ffmpeg, and the reading of its source while that feeds this run. */
+  halt(): void {
+    if (this.connection?.run === this) {
+      this.connection.reader?.stop();
+    }
+    killProcess(this.process);
   }
 
   /** Whether its output may be published now: its live edge moves, or it has none. */

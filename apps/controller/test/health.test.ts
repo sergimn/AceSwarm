@@ -1,6 +1,6 @@
 import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import { describe, expect, it } from "vitest";
-import { duration, evaluateHealth, type HealthInputs } from "../src/health.ts";
+import { duration, evaluateHealth, lastSignOfVideo, type HealthInputs } from "../src/health.ts";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 
@@ -15,6 +15,8 @@ function pipeline(overrides: Partial<PipelineStatus> = {}): PipelineStatus {
     fps: null,
     videoCodec: null,
     mode: "copy",
+    layout: null,
+    layoutChangedAt: null,
     exitCode: null,
     error: null,
     pendingSource: null,
@@ -83,6 +85,62 @@ function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): 
     behindSeconds,
   };
 }
+
+describe("a broadcast that changes its layout mid-stream", () => {
+  it("counts the time without video from the change, while the transcoder starts on the new layout", () => {
+    // The broadcast paused before it moved its video: the last frame is older than a stall takes.
+    const changed = pipeline({ state: "starting", lastFrameAt: ago(45_000), layoutChangedAt: ago(5000) });
+    expect(lastSignOfVideo(changed)).toBe(NOW - 5000);
+    expect(evaluateHealth(inputs({ pipeline: changed }))).toEqual({
+      state: "playing",
+      healthy: true,
+      reason: "receiving video",
+    });
+  });
+
+  it("is stalled when no video came of the change either, for as long as players got none", () => {
+    const quiet = pipeline({ state: "starting", lastFrameAt: ago(70_000), layoutChangedAt: ago(25_000) });
+    expect(evaluateHealth(inputs({ pipeline: quiet }))).toEqual({
+      state: "stalled",
+      healthy: false,
+      reason: "no new video for 70s",
+    });
+  });
+
+  it("allows nothing for a change whose ffmpeg run failed", () => {
+    const failed = pipeline({
+      state: "exited",
+      error: "Conversion failed!",
+      lastFrameAt: ago(30_000),
+      layoutChangedAt: ago(5000),
+    });
+    expect(lastSignOfVideo(failed)).toBe(NOW - 30_000);
+    expect(evaluateHealth(inputs({ pipeline: failed }))).toEqual({
+      state: "stalled",
+      healthy: false,
+      reason: "pipeline exited: Conversion failed!",
+    });
+  });
+
+  it("makes no difference once video came after it", () => {
+    const longAgo = ago(3_600_000);
+    const playing = pipeline({ lastFrameAt: ago(5000), layoutChangedAt: longAgo });
+    expect(lastSignOfVideo(playing)).toBe(NOW - 5000);
+    expect(evaluateHealth(inputs({ pipeline: playing })).state).toBe("playing");
+    const stopped = pipeline({ lastFrameAt: ago(45_000), layoutChangedAt: longAgo });
+    expect(evaluateHealth(inputs({ pipeline: stopped }))).toMatchObject({
+      state: "stalled",
+      reason: "no new video for 45s",
+    });
+  });
+
+  it("is no sign of video for a stream that showed none yet", () => {
+    const starting = pipeline({ state: "starting", layoutChangedAt: ago(1000) });
+    expect(lastSignOfVideo(starting)).toBeUndefined();
+    expect(lastSignOfVideo(undefined)).toBeUndefined();
+    expect(evaluateHealth(inputs({ pipeline: starting }))).toMatchObject({ state: "starting", healthy: false });
+  });
+});
 
 describe("a source whose live edge stopped", () => {
   it("is a stale source, before any other reading of the pipeline", () => {

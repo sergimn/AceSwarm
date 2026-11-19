@@ -286,8 +286,21 @@ export interface PipelineStatus {
   lastFrameAt: string | null;
   frames: number;
   fps: number | null;
+  /** The codec of the source's video: what ffmpeg found, or until then what the source's tables say. */
   videoCodec: string | null;
+  /** What the full output does with the video: H.264 is copied, anything else is re-encoded. */
   mode: "copy" | "transcode";
+  /**
+   * What the source's program tables say it carries now, as `program 1 [256:h264 257:0x0f]` (per
+   * stream its PID and codec or stream type); null until they came, and for a source that has none.
+   */
+  layout: string | null;
+  /**
+   * When the source players get last changed its layout mid-stream (its video moved to another
+   * PID or codec, or the like); null if it never did. A new ffmpeg run takes over right at the
+   * change, so `state` is `starting` and `lastFrameAt` stands still for a few seconds after it.
+   */
+  layoutChangedAt: string | null;
   exitCode: number | null;
   error: string | null;
   /** Source waiting to take over (make-before-break handover), if any. */

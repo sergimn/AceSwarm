@@ -1,7 +1,13 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
+import type {
+  BulkAddResponse,
+  PathAssignment,
+  PipelineStatus,
+  Snapshot,
+  StreamView,
+} from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
 
@@ -248,6 +254,32 @@ export function gatewayRequest(method: string, path: string, body?: unknown): { 
   const args = [method, `http://127.0.0.1:8082${path}`, body === undefined ? "" : JSON.stringify(body)];
   const output = compose("exec", "-T", "netgw", "node", "--input-type=module", "-e", script, ...args);
   return JSON.parse(output) as { status: number; body: string };
+}
+
+/** Fetches a path of the transcoder's own API from inside its container: it is not published. */
+function transcoderGet(path: string): string {
+  const script = "process.stdout.write(await (await fetch(process.argv[1])).text());";
+  const url = `http://127.0.0.1:8081${path}`;
+  return compose("exec", "-T", "transcoder", "node", "--input-type=module", "-e", script, url);
+}
+
+/** What the transcoder says of a stream's pipeline: its ffmpeg run, and what its source carries. */
+export function pipelineStatus(streamId: string): PipelineStatus | undefined {
+  const status = JSON.parse(transcoderGet(`/pipelines/${streamId}`)) as Partial<PipelineStatus>;
+  return status.id === streamId ? (status as PipelineStatus) : undefined;
+}
+
+/** How many ffmpeg runs the transcoder started for a stream, by reason (aceswarm_pipeline_starts_total). */
+export function pipelineStarts(streamId: string): Record<string, number> {
+  const starts: Record<string, number> = {};
+  const series = /^aceswarm_pipeline_starts_total\{([^}]*)\} (\S+)$/gm;
+  for (const [, labels = "", value] of transcoderGet("/metrics").matchAll(series)) {
+    const reason = /reason="([^"]*)"/.exec(labels)?.[1];
+    if (reason !== undefined && labels.includes(`stream="${streamId}"`)) {
+      starts[reason] = Number(value);
+    }
+  }
+  return starts;
 }
 
 /** Like `gatewayAssignments`, but undefined while the gateway is not answering. */

@@ -1,0 +1,559 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { createLogger } from "@aceswarm/shared/logger";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
+
+const HEVC = 0x24;
+/** A stream type the tables give no codec for (private data, without a descriptor that names it). */
+const UNNAMED = 0x06;
+
+/** An ffmpeg process that takes its input and says nothing by itself. */
+function quietProcess(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    kill: () => {
+      Object.assign(child, { killed: true });
+      return true;
+    },
+  });
+  return child;
+}
+
+const iso = (ms: number): string => new Date(ms).toISOString();
+
+describe("Pipeline following what its source carries", () => {
+  let hlsDir: string;
+  let pipeline: Pipeline | undefined;
+  /** The arguments of every ffmpeg run, in order, and the processes. */
+  const runs: string[][] = [];
+  const children: ChildProcess[] = [];
+  /** Why each ffmpeg run started, in the same order. */
+  const reasons: string[] = [];
+  const handovers: string[] = [];
+  /** Every connection to a source, in order: a run that takes over mid-stream opens none. */
+  let opened: FakeSource[] = [];
+  const clock = { now: 1_000_000 };
+
+  beforeEach(async () => {
+    hlsDir = await mkdtemp(join(tmpdir(), "pipeline-layout-test-"));
+    runs.length = 0;
+    children.length = 0;
+    reasons.length = 0;
+    handovers.length = 0;
+    clock.now = 1_000_000;
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await pipeline?.stop();
+    await rm(hlsDir, { recursive: true, force: true });
+  });
+
+  function start(): Pipeline {
+    const settings: PipelineSettings = {
+      hlsDir,
+      ffmpegPath: "ffmpeg",
+      handoverTimeoutMs: 120_000,
+      plan: {
+        previewMode: "video",
+        previewHeight: 270,
+        previewFps: 15,
+        previewBitrateKbps: 400,
+        fullTranscodeMaxHeight: 1080,
+        audioBitrateKbps: 128,
+        segmentSeconds: 2,
+        playlistSize: 8,
+        thumbnailIntervalSeconds: 10,
+        inputTimeoutSeconds: 60,
+      },
+    };
+    const events = {
+      generationStarted: (_id: string, reason: string) => {
+        reasons.push(reason);
+      },
+      handover: (_id: string, result: string) => {
+        handovers.push(result);
+      },
+    };
+    const sources = fakeSources();
+    opened = sources.opened;
+    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
+      spawner: (_command, args) => {
+        runs.push(args);
+        const child = quietProcess();
+        children.push(child);
+        return child;
+      },
+      now: () => clock.now,
+      openSource: sources.open,
+    });
+    return pipeline;
+  }
+
+  /** What a run's ffmpeg does with the full output's video. */
+  const modeOf = (run: number): string => (runs[run]?.includes("copy") === true ? "copy" : "transcode");
+  /** How long a run's ffmpeg studies its input before it starts, in seconds. */
+  const analyzes = (run: number): number => {
+    const args = runs[run] ?? [];
+    return Number(args[args.indexOf("-analyzeduration") + 1]) / 1_000_000;
+  };
+  const inputEnded = (run: number): boolean => (children[run]?.stdin as PassThrough).writableEnded;
+  const killed = (run: number): boolean => children[run]?.killed === true;
+
+  /** ffmpeg of generation `generation` wrote `count` segments of each variant so far. */
+  async function wrote(generation: number, count: number): Promise<void> {
+    for (const variant of ["full", "preview"]) {
+      const directory = join(hlsDir, "s1", `g${String(generation)}`, variant);
+      await mkdir(directory, { recursive: true });
+      const lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0"];
+      for (let index = 0; index < count; index += 1) {
+        lines.push("#EXTINF:2.000,", `seg_${String(index).padStart(6, "0")}.ts`);
+      }
+      await writeFile(join(directory, "index.m3u8"), `${lines.join("\n")}\n`);
+    }
+  }
+
+  async function frames(frame: number, run: number): Promise<void> {
+    (children[run]?.stdout as PassThrough).write(`frame=${String(frame)}\nfps=25\nprogress=continue\n`);
+    await nextTurn();
+  }
+
+  /** ffmpeg's banner names the video of its input. */
+  async function banner(run: number, codec: string): Promise<void> {
+    (children[run]?.stderr as PassThrough).write(
+      `Input #0, mpegts, from 'pipe:0':\n  Stream #0:0[0x100]: Video: ${codec} (Main), yuv420p, 1920x1080\n`,
+    );
+    await nextTurn();
+  }
+
+  function exit(run: number, code = 0): void {
+    Object.assign(children[run] ?? {}, { exitCode: code });
+    children[run]?.emit("exit", code, null);
+  }
+
+  /** The segments players get of the full output, in order. */
+  async function playlist(instance: Pipeline): Promise<string[]> {
+    const text = (await instance.playlist("full")) ?? "";
+    return text
+      .split("\n")
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => line.replace("../", "").replace("/full/seg_00000", ":").replace(".ts", ""));
+  }
+
+  /** A stream that plays: its first run published three segments, its last frame at the clock's time. */
+  async function playing(): Promise<Pipeline> {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    opened[0]?.layout(layoutOf(256));
+    await wrote(1, 3);
+    await frames(75, 0);
+    expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+    await frames(100, 0);
+    return instance;
+  }
+
+  describe("the full output's mode", () => {
+    it("replaces a run in the wrong mode once the source's tables name its video, on the same connection", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      expect(modeOf(0)).toBe("copy");
+      expect(analyzes(0)).toBe(5);
+
+      // The tables come before ffmpeg got a byte.
+      expect(opened[0]?.layout(layoutOf(256, HEVC))).toBe(true);
+      expect(runs).toHaveLength(2);
+      expect(modeOf(1)).toBe("transcode");
+      expect(reasons).toEqual(["start", "transcode"]);
+      // The first run read nothing and is gone; the source is read on as it is, for the new one.
+      expect(killed(0)).toBe(true);
+      expect(opened).toHaveLength(1);
+      expect(opened[0]?.stopped).toBe(false);
+      // Nothing of the stream was read yet, so the new run studies it like any other.
+      expect(analyzes(1)).toBe(5);
+      expect(instance.status()).toMatchObject({
+        state: "starting",
+        mode: "transcode",
+        videoCodec: "hevc",
+        layout: "program 1 [256:hevc 257:0x0f]",
+        layoutChangedAt: null,
+        source: "http://e1/play",
+      });
+
+      // What the reader passes on goes to the new run.
+      await opened[0]?.sink.write(Uint8Array.of(1, 2, 3));
+      expect((children[1]?.stdin as PassThrough).read()).toEqual(Buffer.of(1, 2, 3));
+      expect((children[0]?.stdin as PassThrough).read()).toBeNull();
+    });
+
+    it("leaves a run as it is when the tables name the video it was started for", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      expect(opened[0]?.layout(layoutOf(256))).toBe(false);
+      expect(runs).toHaveLength(1);
+      expect(instance.status()).toMatchObject({
+        mode: "copy",
+        videoCodec: "h264",
+        layout: "program 1 [256:h264 257:0x0f]",
+      });
+    });
+
+    it("starts the next run in the mode the stream's last video needed, and goes back when that changed", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256, HEVC));
+      expect(runs.map((_, run) => modeOf(run))).toEqual(["copy", "transcode"]);
+
+      // Most sources stay as they are: another engine's session of the stream starts re-encoding.
+      await instance.start("http://e2/play", false);
+      expect(modeOf(2)).toBe("transcode");
+      expect(opened[1]?.layout(layoutOf(256, HEVC))).toBe(false);
+      expect(runs).toHaveLength(3);
+
+      // The broadcast is H.264 again by the time the next source starts: it is copied again.
+      await instance.start("http://e3/play", false);
+      expect(modeOf(3)).toBe("transcode");
+      expect(opened[2]?.layout(layoutOf(256))).toBe(true);
+      expect(modeOf(4)).toBe("copy");
+      expect(opened).toHaveLength(3);
+      expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: "h264" });
+      await instance.start("http://e4/play", false);
+      expect(modeOf(5)).toBe("copy");
+    });
+
+    it("follows ffmpeg's own finding where the tables don't tell, in both directions", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      expect(opened[0]?.layout(layoutOf(256, UNNAMED))).toBe(false);
+      expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: null });
+
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      expect(modeOf(1)).toBe("transcode");
+      expect(reasons).toEqual(["start", "transcode"]);
+      // ffmpeg had the stream's start by then, so the new run reads the source again.
+      expect(opened).toHaveLength(2);
+      expect(opened[0]?.stopped).toBe(true);
+      expect(killed(0)).toBe(true);
+
+      // The run that re-encodes lists its own H.264 output after its input: that is not the source's video.
+      await banner(1, "hevc");
+      (children[1]?.stderr as PassThrough).write(
+        "Stream mapping:\n  Stream #0:0 -> #0:0 (hevc (native) -> h264 (libx264))\n" +
+          "Output #0, hls, to 'full/index.m3u8':\n  Stream #0:0: Video: h264, yuv420p, 1920x1080\n",
+      );
+      await nextTurn();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ mode: "transcode", videoCodec: "hevc" });
+
+      // A later source of the stream carries H.264: its run starts re-encoding, and is replaced by one that copies.
+      await instance.start("http://e2/play", false);
+      expect(modeOf(2)).toBe("transcode");
+      await banner(2, "h264");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(4);
+      });
+      expect(modeOf(3)).toBe("copy");
+      expect(reasons.at(-1)).toBe("copy");
+      expect(opened.map((source) => source.request.source)).toEqual([
+        "http://e1/play",
+        "http://e1/play",
+        "http://e2/play",
+        "http://e2/play",
+      ]);
+      await banner(3, "h264");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runs).toHaveLength(4);
+      expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: "h264" });
+    });
+  });
+
+  describe("a source whose tables and ffmpeg disagree", () => {
+    it("takes ffmpeg's finding for that layout from then on, and does not go back and forth", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      // The tables say H.264, so the run copies; ffmpeg finds HEVC in the stream it takes for the video.
+      expect(opened[0]?.layout(layoutOf(256))).toBe(false);
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      expect(modeOf(1)).toBe("transcode");
+      expect(opened).toHaveLength(2);
+
+      // The new run reads the same tables: they don't send it back to copying.
+      expect(opened[1]?.layout(layoutOf(256))).toBe(false);
+      await banner(1, "hevc");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ mode: "transcode", videoCodec: "hevc" });
+
+      // Nor a later source of the stream with that layout.
+      await instance.start("http://e2/play", false);
+      expect(modeOf(2)).toBe("transcode");
+      expect(opened[2]?.layout(layoutOf(256))).toBe(false);
+      expect(runs).toHaveLength(3);
+
+      // Another layout is taken at its word, until ffmpeg says otherwise about it too.
+      expect(opened[2]?.layout(layoutOf(211))).toBe(true);
+      expect(modeOf(3)).toBe("copy");
+      await banner(3, "h264");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runs).toHaveLength(4);
+      // And back on the first layout, ffmpeg's finding still stands.
+      expect(opened[2]?.layout(layoutOf(256))).toBe(true);
+      expect(modeOf(4)).toBe("transcode");
+      expect(opened).toHaveLength(3);
+    });
+
+    it("lets ffmpeg change its finding for a layout", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      opened[1]?.layout(layoutOf(256));
+      // This time ffmpeg agrees with the tables: the next run copies, and stays.
+      await banner(1, "h264");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(3);
+      });
+      expect(modeOf(2)).toBe("copy");
+      expect(opened[2]?.layout(layoutOf(256))).toBe(false);
+      await banner(2, "h264");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runs).toHaveLength(3);
+      expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: "h264" });
+    });
+  });
+
+  describe("a layout change mid-stream", () => {
+    it("starts a new run on the same connection, and publishes the old run's last segments first", async () => {
+      const instance = await playing();
+      const lastFrame = clock.now;
+      expect(instance.status()).toMatchObject({ state: "running", lastFrameAt: iso(lastFrame), layoutChangedAt: null });
+
+      // The video moves to other PIDs.
+      clock.now += 5000;
+      expect(opened[0]?.layout(layoutOf(211))).toBe(true);
+      expect(runs).toHaveLength(2);
+      expect(reasons).toEqual(["start", "layout"]);
+      expect(modeOf(1)).toBe("copy");
+      // It knows the stream from the tables in front of it: it need not study it for long.
+      expect(analyzes(1)).toBe(1);
+      // The engine's session is read on. The old run's input ended at the change; it is not stopped.
+      expect(opened).toHaveLength(1);
+      expect(opened[0]?.stopped).toBe(false);
+      expect(inputEnded(0)).toBe(true);
+      expect(killed(0)).toBe(false);
+      expect(inputEnded(1)).toBe(false);
+      // Until the new run has video out, the stream's last frame is the old run's.
+      expect(instance.status()).toMatchObject({
+        state: "starting",
+        mode: "copy",
+        layout: "program 1 [211:h264 212:0x0f]",
+        layoutChangedAt: iso(clock.now),
+        lastFrameAt: iso(lastFrame),
+        frames: 0,
+        source: "http://e1/play",
+      });
+
+      // The new run has a segment before the old one wrote its last: a playlist only goes forward, so it waits.
+      clock.now += 1000;
+      await wrote(2, 1);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+      await wrote(1, 4);
+      exit(0);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3", "g2:0"]);
+      // The old run's end is not the source's: the new run reads on.
+      expect(opened[0]?.stopped).toBe(false);
+      // Players have the new run's video, though ffmpeg has not counted its frames yet.
+      expect(instance.status()).toMatchObject({ state: "starting", lastFrameAt: iso(clock.now) });
+
+      clock.now += 2000;
+      await frames(40, 1);
+      await wrote(2, 2);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3", "g2:0", "g2:1"]);
+      expect(instance.status()).toMatchObject({ state: "running", lastFrameAt: iso(clock.now), frames: 40 });
+    });
+
+    it("starts the run the new video needs", async () => {
+      const instance = await playing();
+      expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(true);
+      expect(modeOf(1)).toBe("transcode");
+      expect(analyzes(1)).toBe(1);
+      expect(instance.status()).toMatchObject({ mode: "transcode", videoCodec: "hevc" });
+      // And back.
+      expect(opened[0]?.layout(layoutOf(256))).toBe(true);
+      expect(modeOf(2)).toBe("copy");
+      expect(reasons).toEqual(["start", "layout", "layout"]);
+      expect(opened).toHaveLength(1);
+      expect(inputEnded(1)).toBe(true);
+
+      // Both runs that handed over end with what they had; each one's output comes in its turn.
+      await wrote(3, 1);
+      await wrote(2, 1);
+      exit(1);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+      await wrote(1, 4);
+      exit(0);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3", "g2:0", "g3:0"]);
+    });
+
+    it("keeps the mode when the new tables don't name the video's codec", async () => {
+      const instance = await playing();
+      const lastFrame = clock.now;
+      clock.now += 2000;
+      expect(opened[0]?.layout(layoutOf(211, UNNAMED))).toBe(true);
+      expect(modeOf(1)).toBe("copy");
+      expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: null });
+      // ffmpeg finds out, and a run in the other mode reads the source again.
+      clock.now += 1000;
+      await banner(1, "vp9");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(3);
+      });
+      expect(modeOf(2)).toBe("transcode");
+      expect(opened).toHaveLength(2);
+      // The stream showed video until the change: its new run is no stream that never played.
+      expect(instance.status()).toMatchObject({ state: "starting", lastFrameAt: iso(lastFrame) });
+      // Its first segment is out before ffmpeg reports a frame: the last frame is still the old one.
+      exit(0);
+      await wrote(3, 1);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g3:0"]);
+      expect(instance.status()).toMatchObject({ lastFrameAt: iso(lastFrame) });
+      clock.now += 3000;
+      await frames(25, 2);
+      expect(instance.status()).toMatchObject({ state: "running", lastFrameAt: iso(clock.now) });
+    });
+
+    it("waits three seconds at most for the old run's last segments", async () => {
+      const instance = await playing();
+      opened[0]?.layout(layoutOf(211));
+      await wrote(2, 1);
+      clock.now += 2900;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+      expect(killed(0)).toBe(false);
+      clock.now += 100;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g2:0"]);
+      expect(killed(0)).toBe(true);
+      // What it writes after that is too late.
+      await wrote(1, 4);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g2:0"]);
+    });
+
+    it("goes on with a handover whose new source changes its layout before it took over", async () => {
+      const instance = await playing();
+      await instance.start("http://e2/play", true);
+      expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
+      opened[1]?.layout(layoutOf(256));
+      clock.now += 30_000;
+      expect(opened[1]?.layout(layoutOf(211, HEVC))).toBe(true);
+      expect(runs).toHaveLength(3);
+      expect(modeOf(2)).toBe("transcode");
+      // Nothing of the waiting source was published, so its first run is not waited for.
+      expect(killed(1)).toBe(true);
+      expect(opened[1]?.stopped).toBe(false);
+      // The source players get did not change: its video is not excused for this.
+      expect(instance.status()).toMatchObject({
+        source: "http://e1/play",
+        pendingSource: "http://e2/play",
+        layout: "program 1 [256:h264 257:0x0f]",
+        layoutChangedAt: null,
+      });
+
+      await wrote(3, 1);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g3:0"]);
+      expect(handovers).toEqual(["promoted"]);
+      expect(instance.status()).toMatchObject({ source: "http://e2/play", pendingSource: null, mode: "transcode" });
+      expect(opened[0]?.stopped).toBe(true);
+    });
+
+    it("gives the handover its whole time, counted from its start, whatever its source's layout does", async () => {
+      const instance = await playing();
+      await instance.start("http://e2/play", true);
+      opened[1]?.layout(layoutOf(256));
+      clock.now += 100_000;
+      opened[1]?.layout(layoutOf(211));
+      clock.now += 19_000;
+      await instance.sync();
+      expect(handovers).toEqual([]);
+      clock.now += 2000;
+      await instance.sync();
+      expect(handovers).toEqual(["failed"]);
+      expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: null });
+      expect(opened[1]?.stopped).toBe(true);
+    });
+
+    it("takes no notice of a source that is no longer the stream's", async () => {
+      const instance = await playing();
+      await instance.start("http://e2/play", false);
+      expect(opened[0]?.stopped).toBe(true);
+      expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(false);
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ mode: "copy", layoutChangedAt: null });
+    });
+  });
+
+  describe("the end of a source", () => {
+    it("lets ffmpeg write out what it has, and says why the stream ended", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      await frames(50, 0);
+      opened[0]?.end("the engine ended the stream");
+      expect(inputEnded(0)).toBe(true);
+      expect(killed(0)).toBe(false);
+      expect(instance.status()).toMatchObject({ state: "running" });
+      exit(0);
+      expect(instance.status()).toMatchObject({ state: "exited", exitCode: 0, error: "the engine ended the stream" });
+    });
+
+    it("stops an ffmpeg that does not end by itself five seconds after its source did", async () => {
+      vi.useFakeTimers();
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.end("no data from the engine for 60s", false);
+      await vi.advanceTimersByTimeAsync(4900);
+      expect(killed(0)).toBe(false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(killed(0)).toBe(true);
+      expect(instance.status().error).toBe("no data from the engine for 60s");
+    });
+
+    it("stops reading a source whose ffmpeg ended, and every source when the stream stops", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      (children[0]?.stderr as PassThrough).write("Conversion failed!\n");
+      await nextTurn();
+      exit(0, 1);
+      expect(opened[0]?.stopped).toBe(true);
+      expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, error: "Conversion failed!" });
+
+      await instance.start("http://e2/play", false);
+      await instance.start("http://e3/play", true);
+      opened[1]?.layout(layoutOf(256));
+      opened[1]?.layout(layoutOf(211));
+      await instance.stop();
+      expect(opened.map((source) => source.stopped)).toEqual([true, true, true]);
+      expect(children.map((child) => child.killed)).toEqual([false, true, true, true]);
+    });
+  });
+});

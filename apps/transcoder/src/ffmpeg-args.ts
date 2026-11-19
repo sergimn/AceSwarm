@@ -3,7 +3,6 @@ export type FullMode = "copy" | "transcode";
 export type PreviewMode = "video" | "keyframes" | "thumbnails";
 
 export interface FfmpegPlan {
-  source: string;
   /** Generation directory; outputs go to `full/`, `preview/` and `thumbnail.jpg` inside it. */
   directory: string;
   fullMode: FullMode;
@@ -16,8 +15,19 @@ export interface FfmpegPlan {
   segmentSeconds: number;
   playlistSize: number;
   thumbnailIntervalSeconds: number;
-  /** Give up on the source after this long without data. Real engines can take 30+ s to start. */
+  /**
+   * Give up on the source after this long without data. Real engines can take 30+ s to start. The
+   * source's reader keeps this time (see `readSource`): ffmpeg reads from a pipe, and its own input
+   * timeout does not apply to one.
+   */
   inputTimeoutSeconds: number;
+  /**
+   * The run takes over in the middle of a stream that is already being read, as when a broadcast
+   * changes its layout (see `Pipeline`). Its data comes at the broadcast's pace, so every second
+   * ffmpeg spends looking at the stream before it starts is a second without new video: it looks
+   * at one second of it instead of five. The stream's tables come first, so it knows the streams.
+   */
+  midStream?: boolean;
   /**
    * Decodes every frame, even in keyframes mode: this broadcast gave key frames only decoding no
    * picture to work with (see `decodesKeyFramesOnly`), so it is previewed as in video mode.
@@ -68,7 +78,8 @@ function keyframeEvery(plan: FfmpegPlan): string[] {
 
 /**
  * Builds the ffmpeg command line for one generation of a stream. The engine allows a single
- * reader per stream, so one ffmpeg process reads it once and produces every output:
+ * reader per stream, so one ffmpeg process gets it once, on its standard input from the source's
+ * reader (see `readSource`), and produces every output:
  *
  * - full: original video when it is H.264 (no re-encode), otherwise H.264; audio to AAC so every
  *   browser can play it.
@@ -89,11 +100,9 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     "-fflags",
     "+genpts+discardcorrupt",
     "-analyzeduration",
-    "5000000",
+    plan.midStream === true ? "1000000" : "5000000",
     "-probesize",
     "5000000",
-    "-rw_timeout",
-    String(plan.inputTimeoutSeconds * 1_000_000),
   ];
   if (decodesKeyFramesOnly(plan)) {
     // Only affects decoding (preview and thumbnail); the copied full stream keeps every frame. In
@@ -101,7 +110,7 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     // counts 0.
     input.push("-skip_frame", "nokey");
   }
-  input.push("-i", plan.source);
+  input.push("-i", "pipe:0");
 
   const fullVideo =
     plan.fullMode === "copy"

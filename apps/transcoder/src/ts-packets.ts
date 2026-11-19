@@ -1,6 +1,6 @@
 /** MPEG-TS: packets of 188 bytes, each starting with the sync byte. */
-const PACKET_BYTES = 188;
-const SYNC_BYTE = 0x47;
+export const PACKET_BYTES = 188;
+export const SYNC_BYTE = 0x47;
 /** Padding packets, which a muxer sends to keep the bitrate: they carry nothing. */
 const NULL_PID = 0x1f_ff;
 /** PIDs below this carry tables (PAT, SDT, EIT and the like), not audio or video. */
@@ -21,10 +21,12 @@ export class TsPackets {
    * Feeds the next chunk, and returns how many of the packets it completed carry stream data: in
    * sync, without the transport error flag, with a payload, on a PID of audio or video (not a
    * table) and not padding. A packet whose end hasn't come yet counts with the chunk that brings it.
-   * Which PID holds the video isn't checked (that would mean following the PMT and knowing every
-   * codec's stream type); a decode check covers that.
+   * Which PID holds the video isn't checked (a decode check covers that).
+   *
+   * `visit` gets every packet in sync, whatever it carries: the 188 bytes at `at` in `data`, which
+   * are only valid during the call.
    */
-  push(chunk: Uint8Array): number {
+  push(chunk: Uint8Array, visit?: (data: Uint8Array, at: number) => void): number {
     const data = this.pending.length === 0 ? chunk : concat(this.pending, chunk);
     let at = 0;
     let packets = 0;
@@ -40,6 +42,7 @@ export class TsPackets {
         if (carriesData(data, at)) {
           packets += 1;
         }
+        visit?.(data, at);
         at += PACKET_BYTES;
       } else {
         if (data.length - at < PACKET_BYTES * LOCK_PACKETS) {

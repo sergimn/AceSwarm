@@ -70,6 +70,8 @@ const pipeline: PipelineStatus = {
   fps: null,
   videoCodec: null,
   mode: "copy",
+  layout: null,
+  layoutChangedAt: null,
   exitCode: null,
   error: null,
   pendingSource: null,
@@ -267,6 +269,8 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     pending: undefined as string | undefined,
     since: 0,
     lastFrameAt: null as string | null,
+    /** When the transcoder last followed a layout change of the source it plays (a test sets it). */
+    layoutChangedAt: null as string | null,
   };
   /** The playback URLs that deliver now. */
   const delivering = (): Set<string> => {
@@ -298,7 +302,8 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       real.lastFrameAt = new Date(clock.now).toISOString();
     }
     const source = real.active;
-    return { ...pipeline, state, source, pendingSource: real.pending ?? null, lastFrameAt: real.lastFrameAt };
+    const { lastFrameAt, layoutChangedAt } = real;
+    return { ...pipeline, state, source, pendingSource: real.pending ?? null, lastFrameAt, layoutChangedAt };
   };
   const readerStatus = (sources: string[]): StandbyReaderStatus[] | undefined => {
     if (fakes.sources === undefined || real.active === undefined) {
@@ -2306,6 +2311,38 @@ describe("hot standby on the other paths", () => {
     // It opened a new session there, which the transcoder reads.
     await fake.instance.tick();
     expect(fake.readers.at(-1)).toEqual([play(main)]);
+  });
+
+  test("stays on its engine while the transcoder follows a layout change of the broadcast", async () => {
+    const fake = await withStandby();
+    // The broadcast pauses, then moves its video: the transcoder starts ffmpeg again on the same session.
+    fake.sources.delete(play(main));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    fake.real.layoutChangedAt = new Date(fake.clock.now - 1000).toISOString();
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(fake.handovers).toEqual([]);
+
+    // The video is back within the few seconds that takes.
+    fake.clock.now += 4000;
+    fake.sources.add(play(main));
+    await fake.instance.tick();
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+    expect(fake.instance.path).toBe("direct");
+  });
+
+  test("fails over when no video comes of a layout change", async () => {
+    const fake = await withStandby();
+    fake.sources.delete(play(main));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    fake.real.layoutChangedAt = new Date(fake.clock.now - 1000).toISOString();
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("wg:a");
+    expect(fake.handovers).toEqual([play(standbyEngine)]);
   });
 
   test("remembers the engine and session it failed over to, for a restarted controller", async () => {

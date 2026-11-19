@@ -177,19 +177,22 @@ Two quirks of the 3.2.11 Linux engine shape it:
 
 The engine only reads HTTP sources (`--source -` for stdin isn't supported). ffmpeg's HTTP server serves one client and exits, so Docker restarts it for each reconnect.
 
+`e2e/broadcast.sh input N LAYOUT` starts a broadcast's ffmpeg again with another layout: `default` (H.264 video on PID 256, audio on 257), `moved` (the same on PIDs 211 and 221) or `hevc` (HEVC video on PID 211). The source engine reads on from the new input, so players get a stream that changes its layout in the middle. Every ffmpeg writes its program tables with version 0, so the version never tells of the change.
+
 ## Tests
 
 The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only, engine sharing and hot standby off, so each stream has one engine).
 
 ```mermaid
 flowchart LR
-  CR[controller-restart] --> I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
+  CR[controller-restart] --> I[isolation] --> L[layout] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
 ```
 
 | Spec                         | Engines | Checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `controller-restart.spec.ts` | 1, 2    | a controller restart with the UI open: the stream's engine and ffmpeg run keep going, the controller stops within 5 s and is unreachable for under 4 s, and (with Google Chrome, on its own engine) the video never freezes; on its own engine, with a hot standby (which the new run replaces) and on a shared engine; stopping the controller and then the cleanup service, as `docker compose down` does, removes every engine, stopping the cleanup service alone doesn't, and the streams start again                                                                                                                                                                                                              |
 | `isolation.spec.ts`          | 1       | engines can't reach the gateway, controller or transcoder APIs; the gateway drops engine connections to private addresses                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `layout.spec.ts`             | 1       | a broadcast that changes its layout mid-stream: its video moves to other PIDs, then to HEVC, then back to H.264, each time followed by one new ffmpeg run on the same engine session, without a recovery step; the full output is re-encoded while the video is HEVC and copied again after, and players get H.264 throughout                                                                                                                                                                                                                                                                                                                                                                                           |
 | `navigation.spec.ts`         | 3       | three streams added as one list that start right away, arrow key navigation for TV remotes, the full screen player and Back, the player's stats window 24 px in and a quarter of the way down the picture, details on one tile at a time (the one under the mouse, or the one the remote is on, also once a stream opened with a click is closed), the Settings at the bottom of the rail and the tile previews choice the browser keeps, thumbnails only while the admin allows nothing else (Live video greyed out, with its tip for the mouse and the remote, also once the admin sets it while the page is open; the stack runs without it, so the page gets snapshots that say it is set), previews and thumbnails |
 | `paths.spec.ts`              | 1       | the direct path, profiles with hooks rejected, a profile from another machine, moving to the VPN, fail closed after a gateway restart, sticky paths, back to direct on removal                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `recovery.spec.ts`           | 1, 2    | stall recovery where no path can help, an engine restart that leaves the other streams alone, a broadcast that stops and comes back: "stale-source", nothing old published, slow retries, fresh video after; a recovery counts as one that worked only once video is back, not for the tries before                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -288,6 +291,26 @@ sequenceDiagram
   AS->>AS: the next new session's live edge moves
   T->>AS: playing, live edge "live" and moving, newest segment is MPEG-TS
   T->>AS: one recovery that worked, under the new engine that found the broadcast
+```
+
+### A broadcast that changes its layout
+
+The tracker on the broadcast runner starts a broadcast's ffmpeg input again with another layout (`POST /inputs/bcN/layout/default|moved|hevc`). The stream's engine keeps its session, and the stream it serves moves its video to other PIDs, then to HEVC, then back, under program tables whose version stays 0. ffmpeg stays on the streams it found at its start, so without the transcoder following the tables the video would stop at the first change, and a stream that was once re-encoded would stay so.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Playwright
+  participant SRC as broadcast runner (tracker)
+  participant AS as AceSwarm
+  T->>AS: add a broadcast, playing steadily: layout 256:h264, full output copied
+  loop moved, hevc, default
+    T->>SRC: POST /inputs/bcN/layout/LAYOUT
+    AS->>AS: the tables change: a new ffmpeg run takes over on the same session
+    T->>AS: the pipeline reports the new layout, then plays steadily for 14 s
+    T->>AS: one more start with the reason "layout", same session and engine, no recovery step
+    T->>AS: mode "transcode" while the video is HEVC, "copy" again after, players get H.264 throughout
+  end
 ```
 
 ### Network paths
@@ -431,7 +454,7 @@ sequenceDiagram
 | `e2e/stun.ts`                            | minimal STUN client with keepalive                                   |
 | `e2e/vpn.sh`, `e2e/wg-server/`           | the WireGuard server under test                                      |
 | `e2e/broadcast.sh`                       | ffmpeg, the broadcast sources and the tracker                        |
-| `e2e/tracker.ts`                         | minimal BitTorrent HTTP tracker with `/stats`                        |
+| `e2e/tracker.ts`                         | minimal BitTorrent HTTP tracker with `/stats` and the input controls |
 | `e2e/stack.sh`, `e2e/compose.e2e.yaml`   | AceSwarm with real engines                                           |
 | `e2e/podman.sh`                          | rootless Podman on the `stack-podman` runner                         |
 | `e2e/playwright.config.ts`, `e2e/tests/` | the specs, their helpers (`helpers.ts`) and mesh helpers (`mesh.ts`) |

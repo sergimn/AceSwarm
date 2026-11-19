@@ -9,7 +9,7 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 
 ## 1. Rules
 
-- **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers and stopped broadcasts (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput` in `e2e/tests/mesh.ts`).
+- **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers, stopped broadcasts and broadcasts that change their layout (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput`, `setBroadcastLayout` in `e2e/tests/mesh.ts`).
 - **The suite runs in CI only.** It needs four machines joined by a mesh, so there is no local or single-machine run. `npm run check` covers typecheck, lint, format and unit tests, not E2E.
 - **No stream loads in a cloud sandbox.** The engine starts and its API answers, but its peer-to-peer traffic doesn't get out, so `getstream` answers "failed to load content". That says nothing about the code. Streams play in CI and on the Testing environment.
 - Never skip, disable or loosen a test to get green. `retries: 0` is on purpose.

@@ -8,6 +8,7 @@ import { Counter, Gauge } from "@prometheus-io/client";
 import { z } from "zod";
 import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
+import type { OpenSource } from "./source-reader.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
 
@@ -33,6 +34,7 @@ export class PipelineManager {
   private readonly spawner: Spawner | undefined;
   private readonly standbySettings: StandbyReaderSettings | undefined;
   private readonly watchLiveEdge: WatchLiveEdge;
+  private readonly openSource: OpenSource | undefined;
   /** Shared by every stream's standby readers, so that few decode checks run at once. */
   private readonly decoder: DecodeChecker;
   readonly generations: Counter<"stream" | "reason">;
@@ -44,13 +46,14 @@ export class PipelineManager {
     logger: Logger,
     spawner?: Spawner,
     standbySettings?: StandbyReaderSettings,
-    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker } = {},
+    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker; openSource?: OpenSource } = {},
   ) {
     this.settings = settings;
     this.logger = logger;
     this.spawner = spawner;
     this.standbySettings = standbySettings;
     this.watchLiveEdge = options.watchLiveEdge ?? watchLiveEdge;
+    this.openSource = options.openSource;
     this.decoder =
       options.decoder ??
       createDecodeChecker(
@@ -152,7 +155,7 @@ export class PipelineManager {
             this.handovers.inc({ stream, result });
           },
         },
-        { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge },
+        { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
       );
       this.pipelines.set(id, pipeline);
     }

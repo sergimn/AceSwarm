@@ -46,6 +46,25 @@ function staleReason(edge: LiveEdgeView, now: number): string {
 }
 
 /**
+ * When the stream last showed that it has video: its last new frame, or after that, the moment its
+ * broadcast changed layout mid-stream (see `PipelineStatus.layoutChangedAt`). A broadcast that
+ * moves its video to another PID or codec often sends nothing for a while first, and the
+ * transcoder then needs a few seconds to show video from the new layout. The change itself tells
+ * that the broadcast is back, so the time without frames counts from it: the stream is not taken
+ * for stalled, or moved to a standby, for a pause that the transcoder is already getting over.
+ * Undefined while the stream showed no video yet.
+ */
+export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | undefined {
+  if (pipeline === undefined || pipeline.lastFrameAt === null) {
+    return undefined;
+  }
+  const frame = Date.parse(pipeline.lastFrameAt);
+  const { layoutChangedAt, state } = pipeline;
+  // Once the run that took over failed, nothing is coming of the change.
+  return layoutChangedAt === null || state === "exited" ? frame : Math.max(frame, Date.parse(layoutChangedAt));
+}
+
+/**
  * Classifies a stream from what the pipeline and engine report. A stream is healthy only while
  * new video frames keep arriving; everything else is either still starting or stalled. Frames
  * only count while the engine's live edge moves (the transcoder publishes nothing else), and a
@@ -57,8 +76,7 @@ export function evaluateHealth(inputs: HealthInputs): Health {
   if (pipeline?.liveEdge?.state === "stale") {
     return { state: "stale-source", healthy: false, reason: staleReason(pipeline.liveEdge, now) };
   }
-  const lastFrame =
-    pipeline?.lastFrameAt === null || pipeline === undefined ? undefined : Date.parse(pipeline.lastFrameAt);
+  const lastFrame = lastSignOfVideo(pipeline);
 
   if (lastFrame !== undefined && now - lastFrame <= inputs.stallAfterMs) {
     return { state: "playing", healthy: true, reason: "receiving video" };
@@ -71,7 +89,9 @@ export function evaluateHealth(inputs: HealthInputs): Health {
     };
   }
   if (lastFrame !== undefined) {
-    return { state: "stalled", healthy: false, reason: `no new video for ${seconds(now - lastFrame)}` };
+    // How long players really got nothing new: a layout change in between brought no frame.
+    const frame = Date.parse(pipeline?.lastFrameAt ?? "");
+    return { state: "stalled", healthy: false, reason: `no new video for ${seconds(now - frame)}` };
   }
   const elapsed = now - inputs.attemptStartedAt;
   if (elapsed <= inputs.startupGraceMs) {
