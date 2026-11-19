@@ -177,9 +177,11 @@ describe("Pipeline decoding key frames only", () => {
 
   it("decodes every frame once the source gave no frame for the patience, on every source after", async () => {
     const instance = start();
+    expect(instance.decoding()).toBeUndefined();
     await instance.start("http://e1/play", false);
     expect(skipsFrames(runs[0])).toBe(true);
     expect(previewFilter(runs[0])).toBe("scale=-2:270");
+    expect(instance.decoding()).toBe("key-frames-waiting");
     await opened();
     await instance.sync();
 
@@ -202,6 +204,7 @@ describe("Pipeline decoding key frames only", () => {
     expect(previewFilter(runs[1])).toBe("fps=15,scale=-2:270");
     expect(reasons).toEqual(["start", "all-frames"]);
     expect(instance.status()).toMatchObject({ source: "http://e1/play", state: "starting", frames: 0 });
+    expect(instance.decoding()).toBe("all-frames-fallback");
 
     // The new run counts: it is the same source, and a new one gets the same treatment.
     await opened(1);
@@ -210,6 +213,7 @@ describe("Pipeline decoding key frames only", () => {
     await instance.start("http://e2/play", false);
     expect(skipsFrames(runs[2])).toBe(false);
     expect(reasons).toEqual(["start", "all-frames", "restart"]);
+    expect(instance.decoding()).toBe("all-frames-fallback");
   });
 
   it("starts one run, whatever many syncs ask at once", async () => {
@@ -230,7 +234,9 @@ describe("Pipeline decoding key frames only", () => {
     await opened();
     await instance.sync();
     clock.now += KEY_FRAMES_PATIENCE_MS - 1000;
+    expect(instance.decoding()).toBe("key-frames-waiting");
     await frames(1);
+    expect(instance.decoding()).toBe("key-frames");
     await instance.sync();
     clock.now += 60_000;
     await instance.sync();
@@ -238,6 +244,8 @@ describe("Pipeline decoding key frames only", () => {
     expect(instance.status().state).toBe("running");
     await instance.start("http://e2/play", false);
     expect(skipsFrames(runs[1])).toBe(true);
+    // The new source has given no frame yet, but the broadcast has key frames ffmpeg can use.
+    expect(instance.decoding()).toBe("key-frames");
   });
 
   it("waits for the source's data: ffmpeg that knows no video yet is still waiting for the engine", async () => {
@@ -286,6 +294,7 @@ describe("Pipeline decoding key frames only", () => {
     clock.now += 10 * KEY_FRAMES_PATIENCE_MS;
     await instance.sync();
     await noMoreRuns(1);
+    expect(instance.decoding()).toBe("all-frames");
   });
 
   it("does not start a source it stopped reading as stale again", async () => {
@@ -416,6 +425,7 @@ describe("Pipeline decoding key frames only", () => {
     expect(runs[2]).toContain("libx264");
     expect(skipsFrames(runs[2])).toBe(false);
     expect(reasons).toEqual(["start", "transcode", "all-frames"]);
+    expect(instance.decoding()).toBe("all-frames-fallback");
   });
 
   it("waits the patience again when the data stops coming for a while", async () => {
@@ -610,6 +620,7 @@ describe("Pipeline decoding key frames only", () => {
     await instance.start("http://e1/play", false);
     expect(skipsFrames(runs[0])).toBe(true);
     expect(runs[0]?.some((arg) => arg.includes("/preview/"))).toBe(false);
+    expect(instance.decoding()).toBe("key-frames-waiting");
     await opened();
     await instance.sync();
     clock.now += KEY_FRAMES_PATIENCE_MS - 1000;
@@ -626,6 +637,7 @@ describe("Pipeline decoding key frames only", () => {
     await opened(1);
     await frames(25, 1);
     expect(instance.status()).toMatchObject({ state: "running", frames: 25 });
+    expect(instance.decoding()).toBe("all-frames-fallback");
   });
 
   it("starts nothing again in thumbnails mode when the full stream is re-encoded, which skips no frames", async () => {
@@ -640,6 +652,27 @@ describe("Pipeline decoding key frames only", () => {
     clock.now += 10 * KEY_FRAMES_PATIENCE_MS;
     await instance.sync();
     await noMoreRuns(2);
+    // A re-encoded full stream needs every frame, so the settings want them all: no fallback.
+    expect(instance.decoding()).toBe("all-frames");
+  });
+
+  it("says a stream that switched decodes every frame as the settings want once its full stream is re-encoded", async () => {
+    const instance = start("thumbnails");
+    await instance.start("http://e1/play", false);
+    await opened();
+    await instance.sync();
+    clock.now += KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await runsStarted(2);
+    expect(instance.decoding()).toBe("all-frames-fallback");
+
+    // A new source with MPEG-2 video: thumbnails mode decodes every frame of a re-encoded full
+    // stream anyway, whether or not the stream switched.
+    await instance.start("http://e2/play", false);
+    await opened(2, MPEG2);
+    await runsStarted(4);
+    expect(runs[3]).toContain("libx264");
+    expect(instance.decoding()).toBe("all-frames");
   });
 
   it("counts the data that came for runs the controller started again, for a broadcast whose data starts late", async () => {

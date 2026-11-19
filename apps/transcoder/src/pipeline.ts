@@ -7,7 +7,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
 import { attachFfmpeg } from "./ffmpeg-process.ts";
 import { Generation, modifiedAt, VARIANTS, type GenerationPlan, type Variant } from "./generation.ts";
-import { KeyFrames, REOPENS_AFTER_FALLBACK } from "./key-frames.ts";
+import { KeyFrames, REOPENS_AFTER_FALLBACK, type Decoding } from "./key-frames.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
@@ -188,8 +188,7 @@ export class Pipeline {
   status(): PipelineStatus {
     const generation = this.active;
     const pendingSource = this.pending?.source ?? null;
-    const changedAt = this.layoutChangedAt;
-    const layoutChangedAt = changedAt === undefined ? null : new Date(changedAt).toISOString();
+    const layoutChangedAt = this.layoutChangedAt === undefined ? null : new Date(this.layoutChangedAt).toISOString();
     if (generation === undefined) {
       return {
         id: this.id,
@@ -232,6 +231,9 @@ export class Pipeline {
       liveEdge: generation.watch?.edge.view() ?? null,
     };
   }
+
+  /** How the stream's current ffmpeg run decodes the broadcast; undefined before its first run. */
+  readonly decoding = (): Decoding | undefined => this.active && this.keyFrames.decoding(this.planOf(this.active));
 
   async playlist(variant: Variant): Promise<string | undefined> {
     await this.sync();

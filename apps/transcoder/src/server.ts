@@ -6,6 +6,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { Service } from "@aceswarm/shared/service";
 import { Counter, Gauge } from "@prometheus-io/client";
 import { z } from "zod";
+import { DECODINGS } from "./key-frames.ts";
 import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
 import type { OpenSource } from "./source-reader.ts";
@@ -88,6 +89,7 @@ export class PipelineManager {
         running.reset();
         fps.reset();
         lastFrame.reset();
+        decoding.reset();
         standbyReaders.reset();
         for (const [stream, readers] of this.standbys) {
           for (const reader of readers.status()) {
@@ -101,6 +103,14 @@ export class PipelineManager {
           }
           if (status.lastFrameAt !== null) {
             lastFrame.set({ stream: status.id }, Date.parse(status.lastFrameAt) / 1000);
+          }
+        }
+        for (const [stream, pipeline] of this.pipelines) {
+          const current = pipeline.decoding();
+          if (current !== undefined) {
+            for (const candidate of DECODINGS) {
+              decoding.set({ stream, decoding: candidate }, candidate === current ? 1 : 0);
+            }
           }
         }
         total.set(this.pipelines.size);
@@ -124,6 +134,17 @@ export class PipelineManager {
       name: "aceswarm_pipeline_last_frame_timestamp_seconds",
       help: "Unix time of the last video frame of the stream that players could get",
       labelNames: ["stream"],
+      registers,
+    });
+    const decoding = new Gauge({
+      name: "aceswarm_pipeline_decoding",
+      help:
+        "How the stream's ffmpeg run decodes the broadcast, or its last run while none runs (1 for that way, 0 for the others): " +
+        "key-frames (key frames only, which gave a frame), key-frames-waiting (key frames only, no frame yet), " +
+        "all-frames-fallback (every frame, because key frames only gave none in time, as for a broadcast without IDR frames), " +
+        "all-frames (every frame, as PREVIEW_MODE=video, or a re-encoded full stream with LOW_CPU_PREVIEWS, need). " +
+        "No value before its first run",
+      labelNames: ["stream", "decoding"],
       registers,
     });
     const standbyReaders = new Gauge({
