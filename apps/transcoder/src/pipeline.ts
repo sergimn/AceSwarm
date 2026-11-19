@@ -531,16 +531,16 @@ export class Pipeline {
     const progress = new ProgressParser();
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
-      if (generation.state === "exited") {
-        // What it printed as it ended, read after its exit: it must not look like it runs again.
-        return;
-      }
       for (const block of progress.push(chunk)) {
         if (block.frame !== undefined && block.frame > generation.frames) {
           generation.frames = block.frame;
           this.keyFrames.progressed(block, this.planOf(generation));
           generation.lastFrameAt = this.now();
-          generation.state = "running";
+          if (generation.state !== "exited") {
+            // A block it printed as it ended can be read after its exit: its frames count, but
+            // it must not look like it runs again.
+            generation.state = "running";
+          }
           if (generation.publishing() && generation.published) {
             generation.publishedFrameAt = generation.lastFrameAt;
           }
