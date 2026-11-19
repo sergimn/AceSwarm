@@ -100,6 +100,12 @@ claim_cache() {
   "$bb" rm -rf "$own/data"
   "$bb" mkdir "$own/data"
   "$bb" chown "$user" "$own/data" 2>/dev/null || true
+  if ! "$bb" chpst -u "$user" "$bb" test -x "$cache_root"; then
+    # The engine's user is not the folder's owner: on the host it is user 1000, or with a rootless
+    # runtime one of the sub-user ids of the account the runtime runs as.
+    cache_fail "the engine's user ($user) cannot enter the folder ENGINE_CACHE_DIR names. The folder" \
+      "has to let other users in, as a folder made with mkdir does: chmod 755 <folder>"
+  fi
   if ! "$bb" chpst -u "$user" "$bb" test -w "$own/data"; then
     cache_fail "the engine's user ($user) cannot write to $own/data. The folder ENGINE_CACHE_DIR" \
       "names has to be on a filesystem that keeps Linux owners and permissions (ext4, not FAT or" \

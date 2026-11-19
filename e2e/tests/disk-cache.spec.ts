@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test, type APIRequestContext } from "@playwright/test";
@@ -99,6 +99,9 @@ test.beforeAll(async ({ request }) => {
   bc.push(...(await broadcasts(2)));
   // On a disk: the runner's own temporary folder, where it has one.
   run.dir = mkdtempSync(path.join(process.env["RUNNER_TEMP"] ?? tmpdir(), "aceswarm-e2e-cache-"));
+  // A temporary folder is closed to everyone but its owner. The engine's user is another one, so
+  // open it the way a folder made with mkdir is.
+  chmodSync(run.dir, 0o755);
   // Things of the user's own in the folder, one of them named like an engine's.
   writeFileSync(path.join(run.dir, "keep.txt"), "mine\n");
   mkdirSync(path.join(run.dir, "engine-notes"));

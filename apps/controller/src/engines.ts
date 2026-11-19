@@ -288,7 +288,8 @@ export class EngineManager {
       if (details.State.Status !== "running" && details.State.ExitCode === ENGINE_CACHE_SETUP_EXIT_CODE) {
         throw new EngineGoneError(
           "engine could not set up its cache on disk: the container runtime has to be able to write to the " +
-            "folder ENGINE_CACHE_DIR names, on a filesystem that keeps Linux owners and permissions " +
+            "folder ENGINE_CACHE_DIR names, the folder has to let other users in (mode 755), and its " +
+            "filesystem has to keep Linux owners and permissions " +
             "(the engine's log says what failed)",
         );
       }
