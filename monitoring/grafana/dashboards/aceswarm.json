@@ -810,6 +810,71 @@
       "description": "Age of the newest data of each stream's broadcast that its engine knows of (livepos.last). It is stamped by the broadcaster's clock, which can be off, so a steady offset is no problem; one that keeps growing is a broadcast that stopped."
     },
     {
+      "type": "state-timeline",
+      "title": "Key frames only or every frame",
+      "id": 46,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "expr": "max by (stream) (aceswarm_pipeline_decoding{decoding=\"key-frames\"} or 2 * aceswarm_pipeline_decoding{decoding=\"key-frames-waiting\"} or 3 * aceswarm_pipeline_decoding{decoding=\"all-frames-fallback\"} or 4 * aceswarm_pipeline_decoding{decoding=\"all-frames\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Key frames only",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "Key frames only, no frame yet",
+                  "color": "yellow"
+                },
+                "3": {
+                  "text": "Switched to every frame (no IDR frames)",
+                  "color": "orange"
+                },
+                "4": {
+                  "text": "Every frame",
+                  "color": "blue"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      },
+      "description": "How each stream's ffmpeg decodes the broadcast, which is most of the CPU a stream costs (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes, and with LOW_CPU_PREVIEWS while the full stream is copied, it decodes key frames only. That needs IDR frames (or frames with a recovery point), which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame, so the stream decodes every frame from then on, with less CPU saved. It stays so until the stream stops or the transcoder restarts, which then wait again. Every frame (blue): the settings want every frame: PREVIEW_MODE=video, or a full stream that is re-encoded. No value while the stream has no pipeline."
+    },
+    {
       "type": "row",
       "title": "Recovery attempts",
       "id": 44,
@@ -818,7 +883,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 64
       },
       "panels": [
         {
@@ -833,7 +898,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 57
+            "y": 65
           },
           "targets": [
             {
@@ -875,7 +940,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "panels": []
     },
@@ -891,7 +956,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -927,7 +992,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -963,7 +1028,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -1009,7 +1074,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -1045,7 +1110,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1082,7 +1147,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -1115,7 +1180,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "panels": []
     },
@@ -1132,7 +1197,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -1216,7 +1281,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -1286,7 +1351,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -1345,7 +1410,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 91
+        "y": 99
       },
       "targets": [
         {
@@ -1383,7 +1448,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 91
+        "y": 99
       },
       "targets": [
         {
@@ -1420,7 +1485,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 99
+        "y": 107
       },
       "targets": [
         {
@@ -1505,7 +1570,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 99
+        "y": 107
       },
       "targets": [
         {
@@ -1550,7 +1615,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 107
+        "y": 115
       },
       "panels": []
     },
@@ -1566,7 +1631,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 116
       },
       "targets": [
         {
@@ -1621,7 +1686,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 114
+        "y": 122
       },
       "targets": [
         {
@@ -1656,7 +1721,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 114
+        "y": 122
       },
       "targets": [
         {
@@ -1691,7 +1756,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 114
+        "y": 122
       },
       "targets": [
         {
@@ -1728,7 +1793,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 122
+        "y": 130
       },
       "targets": [
         {
@@ -1769,14 +1834,14 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 122
+        "y": 130
       },
       "targets": [
         {
           "expr": "sum by (from, to) (increase(aceswarm_stream_path_switches_total{stream=~\"$stream\"}[1h]))",
           "range": true,
           "instant": false,
-          "legendFormat": "{{from}} → {{to}}",
+          "legendFormat": "{{from}} \u2192 {{to}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1805,7 +1870,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 130
+        "y": 138
       },
       "panels": []
     },
@@ -1821,7 +1886,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 131
+        "y": 139
       },
       "targets": [
         {
@@ -1855,7 +1920,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 141
+        "y": 149
       },
       "targets": [
         {
