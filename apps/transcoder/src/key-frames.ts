@@ -4,12 +4,15 @@ import type { ProgressBlock } from "./progress.ts";
 
 /**
  * How long a run that decodes key frames only may read a source without any frame coming of it
- * before the stream is decoded in full (see `decodesKeyFramesOnly`). Joining a broadcast in the
- * middle of its key frame interval, the first frame comes after up to that interval and a bit
- * more: measured about 17 s for key frames every 5 s and 37 s for one every 10 s, counted from the
- * start of the run, which spends about 5 s on opening and probing the source before the wait
- * begins. The controller waits 90 s for video, and a run that decodes every frame needs about 10 s
- * of that.
+ * before the stream is decoded in full (see `decodesKeyFramesOnly`). With ffmpeg 9 the first frame
+ * of a broadcast that has key frames comes after about 3.5 to 4 times their interval, counted from
+ * the start of the run (measured: about 17 s for key frames every 5 s, 34 to 40 s for every 10 s,
+ * 48 s for every 12 s, 60 s for every 15 s). The wait begins after the run opened and probed the
+ * source, about 5 s in, so key frames up to about 12 s apart get their frame in time and those
+ * further apart are decoded in full too. The controller waits 90 s for video, counted from the
+ * engine's start: a run that decodes every frame needs about 10 s after the patience, so an engine
+ * that takes a long time to start can use up the rest, and the controller then starts the stream's
+ * pipeline again, which goes on decoding every frame.
  */
 export const KEY_FRAMES_PATIENCE_MS = 45_000;
 

@@ -69,8 +69,12 @@ describe("Pipeline decoding key frames only", () => {
   /** The live edge each run follows, in order. */
   const edges: { edge: LiveEdge }[] = [];
   const clock = { now: 1_000_000 };
+  /** The pipeline's logger for its stream, whose warnings the tests look at. */
+  const streamLogger = createLogger("test", "silent");
+  let warn = vi.spyOn(streamLogger, "warn");
 
   beforeEach(async () => {
+    warn = vi.spyOn(streamLogger, "warn");
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-keyframes-test-"));
     runs.length = 0;
     children.length = 0;
@@ -109,7 +113,9 @@ describe("Pipeline decoding key frames only", () => {
       },
       handover: () => undefined,
     };
-    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
+    const logger = createLogger("test", "silent");
+    vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
+    pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
         const child = fakeFfmpeg();
@@ -177,14 +183,18 @@ describe("Pipeline decoding key frames only", () => {
     await instance.sync();
 
     // Keyframes mode may take a while to show a first frame from a broadcast whose key frames
-    // come every few seconds.
-    clock.now += KEY_FRAMES_PATIENCE_MS - 1000;
+    // come every few seconds: 45 seconds, as the documentation says.
+    clock.now += 44_000;
     await instance.sync();
     await noMoreRuns(1);
 
     clock.now += 1000;
     await instance.sync();
     await runsStarted(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ generation: 1 }),
+      "key frames only decoding gave no frame; decoding every frame",
+    );
     expect(children[0]?.killed).toBe(true);
     expect(skipsFrames(runs[1])).toBe(false);
     // With every frame decoded, the preview thins them out as in video mode.
@@ -332,12 +342,30 @@ describe("Pipeline decoding key frames only", () => {
     await instance.start("http://e2/play", true);
     await opened(1);
     await instance.sync();
-    clock.now += 3 * KEY_FRAMES_PATIENCE_MS;
+    // Longer than the patience, shorter than the time a handover has (else it times out, not this).
+    clock.now += 2 * KEY_FRAMES_PATIENCE_MS;
+    expect(2 * KEY_FRAMES_PATIENCE_MS).toBeLessThan(120_000);
     await instance.sync();
     await noMoreRuns(2);
+    expect(children[1]?.killed).toBe(false);
     // The next source keeps decoding key frames only.
     await instance.start("http://e3/play", false);
     expect(skipsFrames(runs[2])).toBe(true);
+  });
+
+  it("does not take a source that sends slowly for a broadcast without key frames once frames came", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false);
+    await opened();
+    await frames(50);
+    // A new source, no handover: its first frame takes its time, the broadcast has key frames.
+    await instance.start("http://e2/play", false);
+    await opened(1);
+    await instance.sync();
+    clock.now += 2 * KEY_FRAMES_PATIENCE_MS;
+    await instance.sync();
+    await noMoreRuns(2);
+    expect(children[1]?.killed).toBe(false);
   });
 
   it("starts the run of a source that began before the broadcast was known to need every frame at once", async () => {

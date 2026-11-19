@@ -8,7 +8,11 @@ export type Variant = "full" | "preview";
 export const VARIANTS: readonly Variant[] = ["full", "preview"];
 
 const KILL_GRACE_MS = 3000;
-/** The live edge of a source that sends data moves at least this often. */
+/**
+ * The live edge of a source that sends data moves at least this often. A session only counts as
+ * live once its edge kept moving at the broadcast's own pace (see `LiveEdge`), so a verified
+ * source's edge moves about once a second, far more often than this.
+ */
 const EDGE_FRESH_MS = 10_000;
 
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
