@@ -74,18 +74,22 @@ async function follows(request: APIRequestContext, next: BroadcastLayout): Promi
   await expect
     .poll(() => pipelineStatus(streamId)?.layout, { timeout: 120_000, intervals: [1000] })
     .toBe(CARRIES[next]);
-  const after = await waitForSteadyPlaying(request, streamId, STEADY_MS);
+  // That returns the stream as it was when it began to play steadily: the checks are about now.
+  await waitForSteadyPlaying(request, streamId, STEADY_MS);
+  const after = (await streamById(request, streamId))!;
   const status = pipelineStatus(streamId)!;
+  const followedAt = Date.parse(status.layoutChangedAt ?? "");
 
   // The transcoder started one ffmpeg run for the change, and read on from the session it had.
   expect(pipelineStarts(streamId)).toEqual({ ...starts, layout: (starts["layout"] ?? 0) + 1 });
   expect(status.source).toBe(pipeline.source);
-  expect(Date.parse(status.layoutChangedAt ?? "")).toBeGreaterThan(changedAt - 5000);
-  // Nothing else moved: the same engine, no recovery step, and video that is new.
+  expect(followedAt).toBeGreaterThan(changedAt - 5000);
+  // Nothing else moved: the same engine, no recovery step, and video from the new run.
+  expect(after.state).toBe("playing");
   expect(after.engine).toEqual(before.engine);
   expect(after.recoveries).toBe(before.recoveries);
   expect(await recoveriesSucceeded(request, streamId)).toEqual(recovered);
-  expect(Date.parse(after.lastFrameAt ?? "")).toBeGreaterThan(changedAt);
+  expect(Date.parse(after.lastFrameAt ?? "")).toBeGreaterThan(followedAt);
   expect(after.liveEdge?.state).toBe("live");
   return status;
 }
