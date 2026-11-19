@@ -1415,7 +1415,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above its lowest reading (at most 145 MiB, an idle engine), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat. Where an idle engine uses less than 145 MiB, a full cache can read a few MiB under the cap.",
+      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above its lowest reading (at most 145 MiB, an idle engine), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat. Where an idle engine uses less than 145 MiB, a full cache can read a few MiB under the cap. An engine that keeps its cache on disk (ENGINE_CACHE_DIR) shows 0.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1500,7 +1500,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "How full each engine's memory cache is (estimated, see the panel on the left). Engines without a cap (ENGINE_MEMORY_CACHE_MB=0) don't show here.",
+      "description": "How full each engine's memory cache is (estimated, see the panel on the left). Engines without a cap (ENGINE_MEMORY_CACHE_MB=0) and engines that keep their cache on disk (ENGINE_CACHE_DIR) don't show here.",
       "gridPos": {
         "h": 8,
         "w": 12,

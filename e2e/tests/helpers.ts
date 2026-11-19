@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
@@ -129,6 +130,26 @@ export function compose(...args: string[]): string {
 }
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Starts the stack again with other settings, as editing `.env` and running `docker compose up -d`
+ * does: compose recreates the services whose settings changed and leaves the rest alone. `settings`
+ * are the variables that differ from the ones the stack was started with; call it without any to
+ * go back to those.
+ */
+export async function stackUp(settings: Record<string, string> = {}): Promise<void> {
+  await execFileAsync(fileURLToPath(new URL("../stack.sh", import.meta.url)), ["up"], {
+    env: { ...process.env, ...settings },
+    encoding: "utf8",
+    timeout: 240_000,
+    killSignal: "SIGKILL",
+  });
+}
+
+/** Runs a BusyBox command in an engine container, as root there (the engine itself is not root). */
+export function engineExec(engine: string, ...command: string[]): string {
+  return docker("exec", engine, "/usr/local/lib/aceswarm/busybox", ...command);
+}
 
 /**
  * `compose`, without blocking: the spec's own polling (of a playlist, say) goes on while it runs.

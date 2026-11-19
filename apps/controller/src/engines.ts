@@ -39,21 +39,46 @@ export interface EngineManagerOptions {
   memoryMb: number;
   /** The engine's memory cache limit; 0 leaves it to the engine. */
   memoryCacheMb: number;
+  /** Host folder for the engines' cache on disk (ENGINE_CACHE_DIR); empty keeps the cache in memory. */
+  cacheDir: string;
+  /** Size of each engine's cache on disk; only used with `cacheDir`. */
+  diskCacheMb: number;
   extraFlags: string;
   dns: string;
   readyTimeoutMs: number;
 }
 
+/** Where the engine image expects the host's cache folder (engine/entrypoint.sh). */
+const ENGINE_CACHE_MOUNT = "/cache";
+
+/**
+ * The exit code of an engine whose entrypoint could not set up its cache folder (EX_CONFIG in
+ * engine/entrypoint.sh). The engine's log says what went wrong.
+ */
+const ENGINE_CACHE_SETUP_EXIT_CODE = 78;
+
+type EngineCacheOptions = Pick<EngineManagerOptions, "cacheDir" | "diskCacheMb">;
+
 /** The environment of an engine container, which its entrypoint and start script read. */
 export function engineEnvironment(
-  options: Pick<EngineManagerOptions, "gatewayIp" | "dns" | "memoryCacheMb" | "extraFlags">,
+  options: Pick<EngineManagerOptions, "gatewayIp" | "dns" | "memoryCacheMb" | "extraFlags"> & EngineCacheOptions,
 ): string[] {
   return [
     `ACESWARM_GATEWAY=${options.gatewayIp}`,
     `ACESWARM_DNS=${options.dns}`,
     `ACESWARM_MEMORY_CACHE_BYTES=${String(options.memoryCacheMb * 1024 * 1024)}`,
+    // Above 0, the engine keeps its stream cache in the folder mounted at ENGINE_CACHE_MOUNT.
+    `ACESWARM_DISK_CACHE_BYTES=${String(options.cacheDir === "" ? 0 : options.diskCacheMb * 1024 * 1024)}`,
     `ACESWARM_ENGINE_FLAGS=${options.extraFlags}`,
   ];
+}
+
+/**
+ * The mounts of an engine container: the host's cache folder, when there is one. A bind mount given
+ * this way fails when the folder is missing, where the older `Binds` form would make it.
+ */
+export function engineMounts(options: EngineCacheOptions): { Type: "bind"; Source: string; Target: string }[] {
+  return options.cacheDir === "" ? [] : [{ Type: "bind", Source: options.cacheDir, Target: ENGINE_CACHE_MOUNT }];
 }
 
 export const ROLE_LABEL = "aceswarm.role";
@@ -187,6 +212,7 @@ export class EngineManager {
         RestartPolicy: { Name: "unless-stopped" },
         Memory: this.options.memoryMb * 1024 * 1024,
         LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
+        Mounts: engineMounts(this.options),
       },
     });
     await this.docker.startContainer(id);
@@ -256,6 +282,15 @@ export class EngineManager {
       const details = await this.docker.inspectContainer(containerId);
       if (details === undefined) {
         throw new EngineGoneError("engine container vanished while starting");
+      }
+      // The runtime starts an engine again when it exits (its restart policy), so an engine that
+      // cannot set up its cache folder shows as exited or as restarting, with that exit code.
+      if (details.State.Status !== "running" && details.State.ExitCode === ENGINE_CACHE_SETUP_EXIT_CODE) {
+        throw new EngineGoneError(
+          "engine could not set up its cache on disk: the container runtime has to be able to write to the " +
+            "folder ENGINE_CACHE_DIR names, on a filesystem that keeps Linux owners and permissions " +
+            "(the engine's log says what failed)",
+        );
       }
       if (!details.State.Running && details.State.Status === "exited") {
         throw new EngineGoneError(`engine exited with code ${String(details.State.ExitCode)}`);

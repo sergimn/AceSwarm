@@ -318,13 +318,13 @@ export class ControllerMetrics {
     });
     const cache = new Gauge({
       name: "aceswarm_engine_memory_cache_bytes",
-      help: "Estimated stream data in each engine's memory cache: its memory above an idle engine's, at most the cap",
+      help: "Estimated stream data in each engine's memory cache: its memory above an idle engine's, at most the cap; 0 with the cache on disk",
       labelNames: ["stream", "engine"],
       registers,
     });
     const cacheLimit = new Gauge({
       name: "aceswarm_engine_memory_cache_limit_bytes",
-      help: "Memory cache cap of each engine (ENGINE_MEMORY_CACHE_MB when it started); missing when it has none",
+      help: "Memory cache cap of each engine (ENGINE_MEMORY_CACHE_MB when it started); missing when it has none, or keeps its cache on disk",
       labelNames: ["stream", "engine"],
       registers,
     });

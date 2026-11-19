@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ContainerDetails, ContainerSummary, DockerClient, MemoryUsage } from "../src/docker.ts";
 import {
   engineCacheLimit,
+  engineCacheOnDisk,
   ENGINE_LOADING_MS,
   EngineResourceMonitor,
   estimateCacheBytes,
@@ -137,6 +138,34 @@ describe("EngineResourceMonitor", () => {
     for (const env of [["ACESWARM_MEMORY_CACHE_BYTES=0"], ["ACESWARM_MEMORY_CACHE_BYTES=12x"], ["OTHER=1"], [], null]) {
       expect(engineCacheLimit(env)).toBeNull();
     }
+  });
+
+  it("reports no memory cache for an engine that keeps its cache on disk", async () => {
+    const env = [
+      "ACESWARM_DISK_CACHE_BYTES=0",
+      `ACESWARM_MEMORY_CACHE_BYTES=${String(128 * MB)}`,
+      `ACESWARM_DISK_CACHE_BYTES=${String(256 * MB)}`,
+    ];
+    expect(engineCacheOnDisk(env)).toBe(true);
+    // The image's own value is 0, and so is the controller's without ENGINE_CACHE_DIR.
+    for (const other of [["ACESWARM_DISK_CACHE_BYTES=0"], ["ACESWARM_DISK_CACHE_BYTES=x"], ["OTHER=1"], [], null]) {
+      expect(engineCacheOnDisk(other)).toBe(false);
+    }
+
+    // Well above an idle engine's memory: with a memory cache that would read as a full cache.
+    const { monitor } = setup([{ ...engine("a", "s1", 400), env }]);
+    await monitor.sample();
+
+    expect(monitor.latest()).toEqual([
+      {
+        stream: "s1",
+        engine: "aceswarm-engine-s1-1",
+        usedBytes: 400 * MB,
+        limitBytes: 768 * MB,
+        cacheLimitBytes: null,
+        cacheBytes: 0,
+      },
+    ]);
   });
 
   it("estimates the cache as the memory above an idle engine's, at most the cap", () => {

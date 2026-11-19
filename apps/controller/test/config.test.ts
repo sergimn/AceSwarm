@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { ENGINE_MEMORY_OVERHEAD_MB, loadConfig, maxEngineMemoryCacheMb, minEngineMemoryMb } from "../src/config.ts";
-import { engineEnvironment } from "../src/engines.ts";
+import { engineEnvironment, engineMounts } from "../src/engines.ts";
+
+/** The cache settings of an engine that keeps its cache in memory. */
+const inMemory = { cacheDir: "", diskCacheMb: 256 };
 
 describe("engine memory settings", () => {
   it("defaults to a memory cache that fits under the engine's memory limit, below the alert", () => {
@@ -56,15 +59,75 @@ describe("engine memory settings", () => {
 
   it("hands the cache size to the engine in bytes", () => {
     expect(
-      engineEnvironment({ gatewayIp: "172.31.250.2", dns: "1.1.1.1,9.9.9.9", memoryCacheMb: 512, extraFlags: "--x 1" }),
+      engineEnvironment({
+        gatewayIp: "172.31.250.2",
+        dns: "1.1.1.1,9.9.9.9",
+        memoryCacheMb: 512,
+        extraFlags: "--x 1",
+        ...inMemory,
+      }),
     ).toEqual([
       "ACESWARM_GATEWAY=172.31.250.2",
       "ACESWARM_DNS=1.1.1.1,9.9.9.9",
       "ACESWARM_MEMORY_CACHE_BYTES=536870912",
+      "ACESWARM_DISK_CACHE_BYTES=0",
       "ACESWARM_ENGINE_FLAGS=--x 1",
     ]);
-    expect(engineEnvironment({ gatewayIp: "x", dns: "y", memoryCacheMb: 0, extraFlags: "" })).toContain(
+    expect(engineEnvironment({ gatewayIp: "x", dns: "y", memoryCacheMb: 0, extraFlags: "", ...inMemory })).toContain(
       "ACESWARM_MEMORY_CACHE_BYTES=0",
+    );
+  });
+});
+
+describe("engine cache on disk", () => {
+  it("keeps the cache in memory by default", () => {
+    const config = loadConfig({});
+    expect(config.ENGINE_CACHE_DIR).toBe("");
+    expect(config.ENGINE_DISK_CACHE_MB).toBe(256);
+    expect(engineMounts(inMemory)).toEqual([]);
+    // The size alone changes nothing: without a folder there is no cache on disk.
+    expect(engineEnvironment({ gatewayIp: "x", dns: "y", memoryCacheMb: 128, extraFlags: "", ...inMemory })).toContain(
+      "ACESWARM_DISK_CACHE_BYTES=0",
+    );
+  });
+
+  it("mounts the folder into the engine and hands it the cache size in bytes", () => {
+    const onDisk = { cacheDir: "/mnt/ssd/aceswarm cache", diskCacheMb: 300 };
+    expect(engineMounts(onDisk)).toEqual([{ Type: "bind", Source: "/mnt/ssd/aceswarm cache", Target: "/cache" }]);
+    expect(engineEnvironment({ gatewayIp: "x", dns: "y", memoryCacheMb: 128, extraFlags: "", ...onDisk })).toEqual([
+      "ACESWARM_GATEWAY=x",
+      "ACESWARM_DNS=y",
+      "ACESWARM_MEMORY_CACHE_BYTES=134217728",
+      "ACESWARM_DISK_CACHE_BYTES=314572800",
+      "ACESWARM_ENGINE_FLAGS=",
+    ]);
+  });
+
+  it("only takes the full path of a folder", () => {
+    for (const dir of ["/mnt/ssd/aceswarm-cache", "/srv/cache/", "/mnt/My Disk/cache:1", "/var/lib/..cache"]) {
+      expect(loadConfig({ ENGINE_CACHE_DIR: dir }).ENGINE_CACHE_DIR, dir).toBe(dir);
+    }
+    for (const dir of ["cache", "./cache", "~/cache", "/", "//", "/mnt/../etc", "/mnt/./cache", "/mnt/a\nb", " /mnt"]) {
+      expect(() => loadConfig({ ENGINE_CACHE_DIR: dir }), dir).toThrow(/ENGINE_CACHE_DIR has to be the full path/);
+    }
+  });
+
+  it("takes a cache size from 50 MB, the least the engine gives a stream", () => {
+    expect(loadConfig({ ENGINE_DISK_CACHE_MB: "50" }).ENGINE_DISK_CACHE_MB).toBe(50);
+    expect(loadConfig({ ENGINE_DISK_CACHE_MB: "20480" }).ENGINE_DISK_CACHE_MB).toBe(20_480);
+    for (const value of ["49", "0", "-1", "1.5", "256 --evil", "1048577"]) {
+      expect(() => loadConfig({ ENGINE_DISK_CACHE_MB: value }), value).toThrow(/ENGINE_DISK_CACHE_MB/);
+    }
+  });
+
+  it("lets the memory limit go down to what an engine without a memory cache needs", () => {
+    const onDisk = { ENGINE_CACHE_DIR: "/mnt/ssd/cache" };
+    // Too small for the default 128 MB memory cache, which stays empty with the cache on disk.
+    expect(() => loadConfig({ ENGINE_MEMORY_MB: "256" })).toThrow(/too small for ENGINE_MEMORY_CACHE_MB=128/);
+    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "256" }).ENGINE_MEMORY_MB).toBe(256);
+    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "0" }).ENGINE_MEMORY_MB).toBe(0);
+    expect(() => loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "255" })).toThrow(
+      /ENGINE_MEMORY_MB=255 is too small\. With its cache on disk \(ENGINE_CACHE_DIR\) an engine still needs at least 256 MB/,
     );
   });
 });

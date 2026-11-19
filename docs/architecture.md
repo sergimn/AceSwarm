@@ -245,10 +245,31 @@ So when no frame came for 45 seconds (`KEY_FRAMES_PATIENCE_MS`) of a run that de
 The entrypoint runs as root only for these steps:
 
 1. Set the default route through the gateway (`ACESWARM_GATEWAY`) and the DNS servers (`ACESWARM_DNS`).
-2. Drop to uid 1000 with `chpst`, which clears every capability, under `setpriv --nnp`, so nothing can regain privileges.
-3. Start the engine.
+2. With the cache on disk, make the engine's cache folder (see [cache on disk](#cache-on-disk)).
+3. Drop to uid 1000 with `chpst`, which clears every capability, under `setpriv --nnp`, so nothing can regain privileges.
+4. Start the engine.
 
-Engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engine's `--memory-cache-limit`), and have a memory limit (`ENGINE_MEMORY_MB`). Without the cap an engine grows for over an hour, to about 1.7 GB. With it, an engine levels off at about the cap plus 150 MB. The controller refuses a limit that leaves less than 256 MB besides the cap, or under which a full cache plus 200 MB (some room above the measured 150 MB) would pass the 85% memory alert. It exports each engine's memory use and out-of-memory kills, and its cache cap (read from the container's environment). Engines don't report how full their cache is, so the controller estimates it as the engine's memory above its idle memory, at most the cap. The idle memory is the engine's lowest reading once it has run for 20 s (it may still be loading before that), or 145 MiB (an idle x86 engine in testing) if that is lower, as for an engine first seen with a full cache after a controller restart. In testing, an engine's memory grew from that idle size by about what it downloaded, until the cache was full.
+By default engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB` (the engine's `--memory-cache-limit`), and have a memory limit (`ENGINE_MEMORY_MB`). Without the cap an engine grows for over an hour, to about 1.7 GB. With it, an engine levels off at about the cap plus 150 MB. The controller refuses a limit that leaves less than 256 MB besides the cap, or under which a full cache plus 200 MB (some room above the measured 150 MB) would pass the 85% memory alert. It exports each engine's memory use and out-of-memory kills, and its cache cap (read from the container's environment). Engines don't report how full their cache is, so the controller estimates it as the engine's memory above its idle memory, at most the cap. The idle memory is the engine's lowest reading once it has run for 20 s (it may still be loading before that), or 145 MiB (an idle x86 engine in testing) if that is lower, as for an engine first seen with a full cache after a controller restart. In testing, an engine's memory grew from that idle size by about what it downloaded, until the cache was full.
+
+### Cache on disk
+
+With `ENGINE_CACHE_DIR` set, engines keep their stream cache in that host folder instead of in memory. The controller only mounts the folder at `/cache` in every engine it creates and passes the size on (`ACESWARM_DISK_CACHE_BYTES`, from `ENGINE_DISK_CACHE_MB`). It gives the folder as a mount, not as a "bind": the container runtime then refuses a folder that does not exist, where it would make one for a bind, on whatever disk happens to be there. The rest happens in the engine's entrypoint, while it is still root:
+
+```mermaid
+flowchart TD
+  S[Engine container starts] --> D["Remove the folders of engines that are gone:<br/>every /cache/engine-*/ whose lock is free"]
+  D --> M["Make /cache/engine-&lt;container&gt;/ and lock<br/>.aceswarm-lock in it for as long as the container runs"]
+  M --> E["Make data/ in it, owned by the engine's user, and empty it"]
+  E --> R["Drop root and start the engine with<br/>--cache-dir …/data --live-cache-type disk<br/>--disk-cache-limit &lt;bytes&gt; --cache-auto 0"]
+```
+
+- **One folder per engine container**, named after the container's hostname: a stream's engine, its hot standbys and a path's shared engine run side by side, and a new engine generation is a new container. A container that restarts gets the same folder back, emptied.
+- **The lock says which engines are alive.** It is a kernel lock (`flock`) on a file in the engine's folder, held on a file descriptor that the engine inherits. The kernel drops it when the container's last process ends, however it ends, so nothing has to run when an engine goes. The controller cannot do this part: it has no access to the host's files, and should not need any.
+- **Engines clean up after each other.** An engine that starts removes every `engine-*` folder with a lock file that it can lock, by renaming it first, so a folder never disappears halfway. Anything else in the folder is left alone. Folders of the last engines stay until the next engine starts, also when the stack goes down.
+- **The engine's user can only write inside the `data` folders.** The engines' folders and their locks belong to root. Engines all run as the same user, so one engine could write to another's data, and the size cap is the engine's own: the kernel does not enforce it. Engines run third-party software, so the folder belongs on a disk where filling up does no harm.
+- **The engine writes one file per stream**, `data/.acestream_cache/live.<infohash>.0`, which grows to the cap and is then written over in place. `--cache-auto 0` is what makes the cap count: without it the x86 engine ignored every limit and grew the file towards 10 GiB. With several streams on one engine, each gets an equal share of the cap, at least 50 MB. In testing on the x86 engine with an 8 Mbit/s stream and the default 256 MB cap, the file stopped at the cap, the engine's memory stayed at 138 MB (an engine with the default 128 MB memory cache next to it levelled off at 252 MB), and the disk saw the whole stream: about 1 MB written every second.
+- **Memory.** The kernel keeps parts of the cache file in its page cache, which counts towards the container's memory limit but is given back under pressure: in testing an engine sat at its limit this way without being killed or stuttering. Docker reports that part separately and the controller leaves it out, like `docker stats`. Podman does not, so there the engine memory in the dashboard includes it, and a cache much bigger than the default needs a bigger `ENGINE_MEMORY_MB` to stay under the memory alert. The controller reports no memory cache for such an engine (no cap, 0 in use), and accepts an `ENGINE_MEMORY_MB` down to 256.
+- **When it cannot work**, the entrypoint says why in the engine's log and exits with code 78: the container runtime cannot write to the folder (a rootless runtime writes as the user it runs as), or the folder's filesystem does not keep owners and permissions. The controller turns that exit code into the stream's error. A folder that does not exist fails earlier, when the engine is created.
 
 ## Monitoring
 
