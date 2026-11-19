@@ -92,39 +92,47 @@ export async function resetStack(request: APIRequestContext): Promise<void> {
 /**
  * Waits until the stack has no engine container left, stopped ones too. Deleting a stream answers
  * at once, and the controller removes its engines (own and standby) in the background, and the
- * ones of a path that streams shared on its next sweep. Removing a running container deletes its
- * network interface on the host, and the browser aborts the requests it has in flight when the
- * host's interfaces change (`net::ERR_NETWORK_CHANGED`): a spec whose first request, or
+ * ones of a path that streams shared on its next sweep. On Docker, removing a running container
+ * deletes its network interface on the host, and the browser aborts the requests it has in flight
+ * when the host's interfaces change (`net::ERR_NETWORK_CHANGED`): a spec whose first request, or
  * `page.goto`, lands in the middle of that fails for a reason that has nothing to do with it.
  * With no stream left, the controller removes every engine that is still there, so one that stays
- * fails the reset, by name, instead of some later spec's first request.
+ * fails the reset, by name, instead of some later spec's first request. Only that first request
+ * is covered: a spec that has the page open while its own engines come and go isn't.
  *
  * The stack must have no engine in two reads a second apart. The browser hears of an interface
  * change a moment after it happens, and a step the controller was in the middle of, for a stream
- * that was deleted, can create its engine just after the first empty read.
+ * that was deleted, can create its engine just after the first empty read. Two reads make that
+ * unlikely, not impossible.
  *
- * The limit is above the longest teardown the controller waits for: a stream that was moving to
- * another engine when it was deleted finishes the move first (up to the 90 s an engine has to get
- * ready), and then its engines go.
+ * Most teardowns take seconds. The limit is for the slowest: the controller finishes the step it
+ * is in before it removes a deleted stream's engines, and a stream that was moving to another
+ * engine (sharing turned off by the spec before) can be in one that waits for an engine to get
+ * ready (90 s), opens a session on it (90 s) and hands over to it (120 s). It stays inside the
+ * 480 s that a test or a hook gets.
  */
-async function waitForEnginesRemoved(timeout = 180_000): Promise<void> {
+async function waitForEnginesRemoved(timeout = 300_000): Promise<void> {
   const deadline = Date.now() + timeout;
   let emptyReads = 0;
   for (;;) {
     let engines: string[];
+    let problem = "";
     try {
       engines = stackEngines();
     } catch (error) {
-      // The controller is removing containers while this runs: a failed listing is tried again.
-      engines = [`could not list the engines: ${error instanceof Error ? error.message : String(error)}`];
+      // The controller is removing containers while this runs, so a failed listing is tried again,
+      // and said so if it is the last word.
+      problem = `could not list the engines: ${error instanceof Error ? error.message : String(error)}`;
+      engines = [problem];
     }
     emptyReads = engines.length === 0 ? emptyReads + 1 : 0;
     if (emptyReads >= 2) {
       return;
     }
-    expect(Date.now(), `engines left after the streams were removed: ${engines.join(", ") || "none"}`).toBeLessThan(
-      deadline,
-    );
+    expect(
+      Date.now(),
+      problem || `engines left after the streams were removed: ${engines.join(", ") || "none"}`,
+    ).toBeLessThan(deadline);
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
