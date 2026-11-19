@@ -494,17 +494,19 @@ export class Pipeline {
   private newestEdge(also?: Generation): LiveEdgeSeed | undefined {
     let newest = this.lastEdge;
     let quietSince = newest?.quietSince ?? newest?.since;
+    let newDataAt = newest?.newDataAt;
     for (const generation of [this.active, this.pending, also]) {
       const seen = generation?.watch?.edge.snapshot();
       if (seen === undefined) {
         continue;
       }
       quietSince = Math.max(quietSince ?? -Infinity, seen.quietSince ?? seen.since);
+      newDataAt = seen.newDataAt === undefined ? newDataAt : Math.max(newDataAt ?? -Infinity, seen.newDataAt);
       if (newest === undefined || seen.edge >= newest.edge) {
         newest = seen;
       }
     }
-    return newest === undefined ? undefined : { ...newest, quietSince };
+    return newest === undefined ? undefined : { ...newest, quietSince, newDataAt };
   }
 
   /** What the generation's ffmpeg does. */

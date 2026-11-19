@@ -607,6 +607,24 @@ describe("Pipeline with a source's live edge", () => {
     expect(instance.status().liveEdge).toMatchObject({ state: "stale", quietSince: iso(lastNewData) });
   });
 
+  it("knows that the broadcast goes on from the last session that saw new data, whichever had the newest edge", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    live(0, 9000);
+    // The next session is far behind it, as after the broadcaster's clock jumped back, and moves on its own.
+    clock.now += 100_000;
+    await instance.start("http://e2/play", false, 0, "http://e2/stat");
+    live(1, 5000);
+
+    // Ten seconds later a new engine serves 103 s behind the edge. The first session has the
+    // newest edge, and saw new data long ago, but the second one's is what says the broadcast goes on.
+    clock.now += 10_000;
+    await instance.start("http://e3/play", false, 0, "http://e3/stat");
+    edges[2]?.edge.observe({ status: "dl", downloaded: 100, last: 5020, pos: 4917 });
+    await instance.sync();
+    expect(instance.status().liveEdge).toMatchObject({ state: "stale", staleBecause: "behind", behindSeconds: 103 });
+  });
+
   it("does not hand over to a source whose live edge does not move, and gives up once it is stale", async () => {
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");

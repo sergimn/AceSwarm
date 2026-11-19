@@ -334,7 +334,7 @@ describe("why a session is stale (staleBecause)", () => {
   it("is the engine's lag for a new session that starts far behind while the broadcast is back", () => {
     // The stream's previous session saw the broadcast's edge move 8 s ago.
     const start = 1_000_000;
-    const seed = { edge: 5040, since: start - 8000, quietSince: start - 8000 };
+    const seed = { edge: 5040, since: start - 8000, quietSince: start - 8000, newDataAt: start - 8000 };
     const { edge, clock } = edgeWithClock(seed, start);
     // The new engine knows of the newest data at once, and starts serving 103 s before it.
     edge.observe(sample(5048, 100, 4945));
@@ -363,9 +363,37 @@ describe("why a session is stale (staleBecause)", () => {
     expect(edge.view()).toMatchObject({ state: "stale", staleBecause: "quiet" });
   });
 
+  it("becomes the engine's lag once a session far behind sees a broadcast that had stopped send new data", () => {
+    // No session saw new data for ten minutes: the stream waits for its broadcast.
+    const start = 1_000_000;
+    const seed = { edge: 5000, since: start - 600_000, quietSince: start - 600_000, newDataAt: start - 600_000 };
+    const { edge, clock } = edgeWithClock(seed, start);
+    // The broadcast is back. The retry's engine knows of its newest data, but serves 103 s before it.
+    edge.observe(sample(5700, 100, 5597));
+    expect(edge.view()).toMatchObject({ state: "stale", staleBecause: "quiet" });
+    // Its edge moves at the broadcast's pace while it downloads: that is new data.
+    for (let second = 1; second <= 3; second += 1) {
+      clock.now += 1000;
+      edge.observe(sample(5700 + second, 100 + second * 100, 5597 + second));
+    }
+    expect(edge.view()).toMatchObject({ state: "stale", staleBecause: "behind", behindSeconds: 103 });
+  });
+
+  it("is the broadcast's quiet for a stream's first session far behind an edge it only just saw", () => {
+    // Nothing says that the broadcast goes on: it may be the old window of one that stopped.
+    const { edge, clock } = edgeWithClock();
+    edge.observe(sample(5010, 100, 4900));
+    expect(edge.view()).toMatchObject({ state: "stale", staleBecause: "quiet", behindSeconds: 110 });
+    // The next session starts from what this one saw, and knows no more.
+    const next = new LiveEdge(SETTINGS, () => clock.now, edge.snapshot());
+    clock.now += 5000;
+    next.observe(sample(5010, 100, 4900));
+    expect(next.view()).toMatchObject({ state: "stale", staleBecause: "quiet" });
+  });
+
   it("stops being the engine's lag once the broadcast was not seen to send new data for the threshold", () => {
     const start = 1_000_000;
-    const seed = { edge: 5040, since: start - 50_000, quietSince: start - 50_000 };
+    const seed = { edge: 5040, since: start - 50_000, quietSince: start - 50_000, newDataAt: start - 50_000 };
     const { edge, clock } = edgeWithClock(seed, start);
     // A newer edge than the previous session's, far ahead of where the engine serves, that never moves.
     edge.observe(sample(5048, 100, 4945));
