@@ -208,10 +208,11 @@ describe("Pipeline", () => {
     // ffmpeg ends: what it printed last is not the frame rate of a stream that has none running.
     exit(children[0], 1);
     expect(instance.status()).toMatchObject({ state: "exited", fps: null });
-    // A block it printed as it ended, read after its exit, changes nothing: no ffmpeg runs.
+    // A block it printed as it ended, read after its exit, still counts its frames, but leaves
+    // the state as it is: no ffmpeg runs.
     (children[0]?.stdout as PassThrough).write("frame=4380\nfps=870.1\nprogress=end\n");
     await nextTurn();
-    expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, fps: null });
+    expect(instance.status()).toMatchObject({ state: "exited", exitCode: 1, fps: null, frames: 4380 });
 
     // The next run has none until it reports its own.
     await instance.start("http://engine-1/play", false);
