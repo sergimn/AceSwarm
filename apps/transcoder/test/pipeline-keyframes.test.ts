@@ -643,6 +643,78 @@ describe("Pipeline decoding key frames only", () => {
     await noMoreRuns(2);
   });
 
+  it("counts the data that came for runs the controller started again, for a broadcast whose data starts late", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(35);
+    await instance.sync();
+    await noMoreRuns(1);
+    // The controller found no video within its grace period and starts the stream again.
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await runsStarted(2);
+    await opened(1);
+    live(1);
+    await instance.sync();
+    moves(9);
+    await instance.sync();
+    await noMoreRuns(2);
+    moves(1);
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "restart", "all-frames"]);
+    expect(skipsFrames(runs[2])).toBe(false);
+  });
+
+  it("starts the wait over for the runs that follow when the data stops coming for a while", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(35);
+    await instance.sync();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await runsStarted(2);
+    await opened(1);
+    live(1);
+    await instance.sync();
+    // The broadcast sends nothing for a while: what came before counts no more.
+    clock.now += 11_000;
+    await instance.sync();
+    moves(1);
+    await instance.sync();
+    moves(KEY_FRAMES_PATIENCE_MS / 1000 - 1);
+    await instance.sync();
+    await noMoreRuns(2);
+    moves(1);
+    await instance.sync();
+    await runsStarted(3);
+  });
+
+  it("swaps a handover's run that flowed only a few seconds as soon as the stream is known to need every frame", async () => {
+    const instance = start();
+    await instance.start("http://e1/play", false, 0, "http://e1/stat");
+    await opened();
+    live();
+    await instance.sync();
+    moves(36);
+    await instance.start("http://e2/play", true, 0, "http://e2/stat");
+    await opened(1);
+    live(1);
+    await instance.sync();
+    moves(7);
+    await instance.sync();
+    await runsStarted(3);
+    expect(reasons).toEqual(["start", "handover", "all-frames"]);
+    // The handover's run has seen the data for a few seconds, and that is enough now.
+    await instance.sync();
+    await runsStarted(4);
+    expect(reasons).toEqual(["start", "handover", "all-frames", "all-frames"]);
+  });
+
   it("opens the source again when the run that decodes every frame fails before any video", async () => {
     const instance = start();
     await instance.start("http://e1/play", false, 0, "http://e1/stat");

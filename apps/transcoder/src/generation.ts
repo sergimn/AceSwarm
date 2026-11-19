@@ -5,13 +5,16 @@ import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
 
 export type Variant = "full" | "preview";
+/** Whether a run's source sends data now: it does, it stopped for a while, or nothing is known yet. */
+export type Flow = "flowing" | "paused" | "unknown";
 export const VARIANTS: readonly Variant[] = ["full", "preview"];
 
 const KILL_GRACE_MS = 3000;
 /**
- * The live edge of a source that sends data moves at least this often. A session only counts as
- * live once its edge kept moving at the broadcast's own pace (see `LiveEdge`), so a verified
- * source's edge moves about once a second, far more often than this.
+ * The live edge of a source that sends data moves at least this often. The engine's live position
+ * moves about once a second as far as the stats showed, and a session only counts as live once its
+ * edge kept moving at the broadcast's own pace (see `LiveEdge`), but this was not measured against
+ * a real engine: if one moved it less often, the wait would keep starting over.
  */
 const EDGE_FRESH_MS = 10_000;
 
@@ -72,8 +75,12 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
-  /** Since when the data comes without a break (see `flowedWithoutFrames`), or none yet. */
-  flowingSince: number | undefined;
+  /** Since when the data comes without a break (see `watchFlow`), or none yet. */
+  private flowingSince: number | undefined;
+  /** The last time the data was seen to come, while `flowingSince` is set. */
+  private flowSeenAt = 0;
+  /** How long the data came for the stream's earlier runs that got no frame, until it stops for a while. */
+  private flowedBefore = 0;
 
   constructor(plan: GenerationPlan) {
     this.number = plan.number;
@@ -97,21 +104,38 @@ export class Generation {
   }
 
   /**
-   * Whether no frame came for `patienceMs` though the data came the whole time: ffmpeg opened the
-   * source (it knows its video), and the broadcast sent new data (the live edge moved lately; a
-   * source without a stat URL has nothing to tell, and counts). It notes when the data began to
-   * come, and starts over when it stopped for a while. With key frames only decoding, no frame
+   * Notes whether the broadcast's data comes at `now`: ffmpeg opened the source (it knows its
+   * video), the run may publish, and the live edge moved lately (a source without a stat URL has
+   * nothing to tell, and counts). It notes when the data began to come, together with how long it
+   * came for the stream's earlier runs (`carried`), and starts over, with that too, when it stopped
+   * for a while: that is the broadcast pausing.
+   */
+  watchFlow(now: number, carried: number): Flow {
+    const idle = this.retired || this.state === "exited" || this.frames > 0;
+    if (idle || this.videoCodec === undefined || !this.publishing()) {
+      this.flowingSince = undefined;
+      return "unknown";
+    }
+    if (!this.edgeMoves()) {
+      this.flowingSince = undefined;
+      this.flowedBefore = 0;
+      return "paused";
+    }
+    if (this.flowingSince === undefined) {
+      this.flowingSince = now;
+      this.flowedBefore = Math.max(this.flowedBefore, carried);
+    }
+    this.flowSeenAt = now;
+    return "flowing";
+  }
+
+  /**
+   * How long the data came without a frame: for this run since it began to come, and for the
+   * stream's earlier runs that ended without one. With key frames only decoding, no frame for long
    * means the broadcast has none ffmpeg can use (see `decodesKeyFramesOnly`).
    */
-  flowedWithoutFrames(now: number, patienceMs: number): boolean {
-    const idle = this.retired || this.state === "exited" || this.frames > 0;
-    const flowing = this.videoCodec !== undefined && this.publishing() && this.edgeMoves();
-    if (idle || !flowing) {
-      this.flowingSince = undefined;
-      return false;
-    }
-    this.flowingSince ??= now;
-    return now - this.flowingSince >= patienceMs;
+  flowedMs(): number {
+    return this.flowedBefore + (this.flowingSince === undefined ? 0 : this.flowSeenAt - this.flowingSince);
   }
 
   /** Whether the broadcast sends data now, as far as the session's live edge tells (see `LiveEdge`). */

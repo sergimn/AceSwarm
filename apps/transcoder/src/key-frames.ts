@@ -5,14 +5,15 @@ import type { ProgressBlock } from "./progress.ts";
 /**
  * How long a run that decodes key frames only may read a source without any frame coming of it
  * before the stream is decoded in full (see `decodesKeyFramesOnly`). With ffmpeg 9 the first frame
- * of a broadcast that has key frames comes after about 3.5 to 4 times their interval, counted from
- * the start of the run (measured: about 17 s for key frames every 5 s, 34 to 40 s for every 10 s,
- * 48 s for every 12 s, 60 s for every 15 s). The wait begins after the run opened and probed the
+ * of a broadcast that has key frames comes after up to about 3.5 to 4 times their interval,
+ * counted from the start of the run (measured on a 720p x264 test source: about 17 s for key
+ * frames every 5 s, 34 to 40 s for every 10 s, 48 s for every 12 s, 60 s for every 15 s; about
+ * twice the interval for a small, fast one, so it depends on bitrate and encoder). The wait begins after the run opened and probed the
  * source, about 5 s in, so key frames up to about 12 s apart get their frame in time and those
- * further apart are decoded in full too. The controller waits 90 s for video, counted from the
- * engine's start: a run that decodes every frame needs about 10 s after the patience, so an engine
- * that takes a long time to start can use up the rest, and the controller then starts the stream's
- * pipeline again, which goes on decoding every frame.
+ * further apart are decoded in full too. The controller waits 90 s for video, counted from when
+ * the session opens, so the swarm's prebuffering uses up part of it: when the data starts late the
+ * controller starts the stream's pipeline again before the fallback or its first frame came. What
+ * came counts for the next run (see `KeyFrames.carried`), so the fallback comes all the same.
  */
 export const KEY_FRAMES_PATIENCE_MS = 45_000;
 
@@ -36,6 +37,12 @@ export class KeyFrames {
   allFrames = false;
   /** A run got a frame with key frames only decoding: a source that gives none is slow, not the trait. */
   private worked = false;
+  /**
+   * How long the data came for the stream's runs that ended without a frame (the controller starts
+   * the stream again when it takes a long time to show video), so that a broadcast whose data
+   * starts late still reaches the patience. The next runs start from it.
+   */
+  carried = 0;
 
   /**
    * Notes a progress block of a run. The last one ffmpeg prints as it is stopped says nothing: it
@@ -51,11 +58,26 @@ export class KeyFrames {
    * and a run that began before this needs no patience.
    */
   fallBack(generation: Generation, plan: FfmpegPlan, now: number): boolean {
+    if (this.worked || !decodesKeyFramesOnly(plan)) {
+      return false;
+    }
+    const flow = generation.watchFlow(now, this.carried);
+    if (flow === "paused") {
+      this.carried = 0;
+    }
     const patience = this.allFrames ? 0 : KEY_FRAMES_PATIENCE_MS;
-    if (this.worked || !decodesKeyFramesOnly(plan) || !generation.flowedWithoutFrames(now, patience)) {
+    if (flow !== "flowing" || generation.flowedMs() < patience) {
       return false;
     }
     this.allFrames = true;
     return true;
+  }
+
+  /**
+   * A run ends: it hands on how long the data came for it (see `carried`). With a frame of key
+   * frames only decoding the fallback is off for good (`worked`), so that does no harm.
+   */
+  ended(generation: Generation): void {
+    this.carried = Math.max(this.carried, generation.flowedMs());
   }
 }

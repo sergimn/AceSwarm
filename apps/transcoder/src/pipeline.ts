@@ -6,6 +6,7 @@ import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
 import { Generation, killProcess, lastErrorLine, modifiedAt, VARIANTS, type Variant } from "./generation.ts";
+import { KeyFrames, REOPENS_AFTER_FALLBACK } from "./key-frames.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
@@ -14,7 +15,6 @@ import {
   type LiveEdgeSettings,
   type WatchLiveEdge,
 } from "./live-edge.ts";
-import { KeyFrames, REOPENS_AFTER_FALLBACK } from "./key-frames.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
 import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
 
@@ -609,6 +609,7 @@ export class Pipeline {
   /** Stops a generation and removes its files once players can no longer reference them. */
   private retire(generation: Generation): void {
     generation.retired = true;
+    this.keyFrames.ended(generation);
     this.lastEdge = this.newestEdge(generation);
     generation.watch?.stop();
     killProcess(generation.process);
