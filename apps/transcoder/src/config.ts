@@ -54,7 +54,8 @@ const schema = z.object({
    * segment it writes in memory until it can start the next one, and a copied video can only start
    * one at a key frame, so a broadcast that stops sending those leaves fullscreen without new video
    * while ffmpeg's memory grows. It has to be longer than the broadcasts' longest gap between key
-   * frames, and well under the controller's STARTUP_GRACE_SECONDS, which has to cover two stalls.
+   * frames plus SEGMENT_SECONDS (a copied segment ends at the first key frame after its time is up),
+   * and well under the controller's STARTUP_GRACE_SECONDS, which has to cover two stalls.
    */
   FULL_OUTPUT_STALL_SECONDS: z.coerce.number().int().min(10).default(30),
   /**

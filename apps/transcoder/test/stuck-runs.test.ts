@@ -257,10 +257,11 @@ describe("StuckRuns", () => {
 
   it("goes by its own clock: when the files say they were written makes no difference", async () => {
     const watch = runs();
-    // The system's clock steps an hour on: the files' times jump, while a second passes each time.
+    // The system's clock steps an hour on between a full segment and a preview segment: the
+    // preview's file looks an hour newer, while a second passes each time.
     for (let second = 0; second <= 60; second += 2) {
-      mark += second === 30 ? 3600 : 0;
       await fullSegment();
+      mark += second === 30 ? 3600 : 0;
       await previewSegment();
       expect(watch.check(generation)).toBeUndefined();
       after(2);
@@ -307,6 +308,23 @@ describe("StuckRuns", () => {
       await fullSegment();
       await previewSegment();
       expect(watch.check(generation)).toBeUndefined();
+    }
+  });
+
+  it("reads no memory before a run's first video: ffmpeg sets up its encoders once data comes", async () => {
+    // While ffmpeg waits for the engine it holds little; once video comes, its encoders take more.
+    let memory = 20 * MB;
+    const watch = runs(30, 512, () => memory);
+    for (let second = 0; second < 20; second += 2) {
+      expect(watch.check(generation)).toBeUndefined();
+      after(2);
+    }
+    memory = 700 * MB;
+    for (let second = 0; second <= 120; second += 2) {
+      await fullSegment();
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+      after(2);
     }
   });
 

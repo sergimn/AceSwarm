@@ -109,7 +109,20 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
         String(offset),
         encoded,
       ]);
-      ffmpeg(["-i", encoded, "-map", "0", "-c", "copy", "-bsf:v", "filter_units=remove_types=6", "-f", "mpegts", path]);
+      // Its timestamps go on from the part before it, as in a broadcast.
+      const remux = [
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-bsf:v",
+        "filter_units=remove_types=6",
+        "-muxdelay",
+        "0",
+        "-muxpreload",
+        "0",
+      ];
+      ffmpeg(["-copyts", "-i", encoded, ...remux, "-f", "mpegts", path]);
     };
     ffmpeg([...lavfi(WITH_KEY_FRAMES), "-c:v", "libx264", "-preset", "veryfast", "-g", "50", ...audio, first]);
     // Then I frames every 2 s that are no key frames to ffmpeg, with several reference frames.
