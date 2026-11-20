@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { Snapshot } from "../../packages/shared/src/api-types.ts";
-import { addStreamList, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
+import { addStreamList, openApp, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -64,7 +64,7 @@ async function detailsShown(page: Page): Promise<string[]> {
 }
 
 test("moves between tiles with the arrow keys", async ({ page }) => {
-  await page.goto("/");
+  await openApp(page);
   const tiles = page.locator(".tile");
   await expect(tiles).toHaveCount(3);
   await tiles.first().focus();
@@ -84,7 +84,7 @@ test("reaches the rail from the grid on a large screen too", async ({ page }) =>
   // At this size the footer link is just left of the first column's centre and scrolls with the
   // tiles, while the rail stays put. Left must still pick the rail beside the tile.
   await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto("/");
+  await openApp(page);
   await page.locator(".tile").first().focus();
   await page.keyboard.press("ArrowLeft");
   await expect(page.locator(".rail-button:focus")).toHaveCount(1);
@@ -106,7 +106,7 @@ test("leaves full screen when Back comes before the browser went full screen", a
       return request;
     };
   }`);
-  await page.goto("/");
+  await openApp(page);
   const tile = page.locator(".tile", { hasText: "Channel 12" });
   await tile.focus();
   await page.keyboard.press("Enter");
@@ -125,7 +125,7 @@ test("leaves full screen when Back comes before the browser went full screen", a
 });
 
 test("opens a stream full screen and goes back with the remote's Back key", async ({ page }) => {
-  await page.goto("/");
+  await openApp(page);
   const tile = page.locator(".tile", { hasText: "Channel 12" });
   await tile.focus();
   await page.keyboard.press("Enter");
@@ -175,7 +175,7 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
 });
 
 test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {
-  await page.goto("/");
+  await openApp(page);
   await page.locator(".tile", { hasText: "Channel 12" }).click();
   const player = page.getByRole("dialog", { name: "Player" });
   await expect(player).toBeVisible();
@@ -206,7 +206,7 @@ test("shows the details of one tile only: the one under the mouse, or the one th
 });
 
 test("closes dialogs with Back and returns focus", async ({ page }) => {
-  await page.goto("/");
+  await openApp(page);
   const network = page.getByRole("button", { name: "Network", exact: true });
   await network.focus();
   await page.keyboard.press("Enter");
@@ -236,7 +236,7 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
     }
     await expect(settings).toBeFocused();
   };
-  await page.goto("/");
+  await openApp(page);
   await toSettings();
   await page.keyboard.press("Enter");
 
@@ -356,7 +356,7 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
       saved.push(sent.url());
     }
   });
-  await page.goto("/");
+  await openApp(page);
   await expect(page.locator(".tile")).toHaveCount(3);
   await expect(page.locator(".tile").first()).toBeFocused();
   // The test above reaches Settings with the remote; this one is about what it shows.

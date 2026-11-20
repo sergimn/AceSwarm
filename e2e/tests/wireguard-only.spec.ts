@@ -6,6 +6,7 @@ import {
   gatewayAssignments,
   gatewayRequest,
   networkDialog,
+  openApp,
   openNetwork,
   resetStack,
   streamById,
@@ -178,7 +179,7 @@ test("streams wait instead of going direct while no WireGuard path is up", async
     await expectOutage();
     await dialog.getByRole("button", { name: "Close" }).click();
     await expect(dialog).toBeHidden();
-    await page.goto("/");
+    await openApp(page);
     await expect(page.locator("#summary")).toContainText("0/1 network paths up", { timeout: 60_000 });
     await expectOutage();
 

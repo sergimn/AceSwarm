@@ -3,6 +3,7 @@ import type { StreamView } from "../../packages/shared/src/api-types.ts";
 import {
   addStream,
   engineContainers,
+  openApp,
   reportedEngines,
   resetStack,
   sharedEngineContainers,
@@ -72,7 +73,7 @@ async function whileBystanderPlays(
 
 /** Opens the first stream in the full screen player, as a viewer would. */
 async function watch(page: Page): Promise<void> {
-  await page.goto("/");
+  await openApp(page);
   await page.locator(".tile", { hasText: "Watched" }).click();
   await expect(page.getByRole("dialog", { name: "Player" })).toBeVisible();
 }
@@ -93,7 +94,7 @@ test("turning it on in the Settings dialog moves playing streams onto one engine
   expect(before.engine?.shared).toBe(false);
   expect(engineContainers(watched.id)).toHaveLength(1);
 
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const toggle = page.getByRole("dialog", { name: "Settings" }).getByRole("switch", { name: "One engine per path" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
