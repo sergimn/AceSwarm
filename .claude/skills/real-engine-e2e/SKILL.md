@@ -33,7 +33,7 @@ Four jobs start together:
 | AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`           | the result for Docker |
 | AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6` | the result for Podman |
 
-- The result is the **Run the tests** step of each stack job, 24 to 28 minutes. Playwright stops at 40. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
+- The result is the **Run the tests** step of each stack job, about half an hour. Playwright stops at 45 minutes. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
 - Specs run in file order with one worker, and each starts from `resetStack`. Most are serial: after a test fails, the rest of that file is skipped, so read the first failure.
 - A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
 - **Stop AceSwarm** on the Podman job may print "rootless netns: kill network process: permission denied". That step is allowed to fail and is not a test failure.

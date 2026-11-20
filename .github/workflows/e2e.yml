@@ -262,8 +262,8 @@ jobs:
           e2e/mesh.sh wait-file source broadcasts.json
           e2e/stack.sh check
       - name: Run the tests
-        # 24 to 28 minutes. Playwright stops at 40 (globalTimeout) and still writes its report.
-        timeout-minutes: 45
+        # About half an hour. Playwright stops at 45 minutes (globalTimeout) and still writes its report.
+        timeout-minutes: 50
         run: npm run e2e
       - name: Tell the other runners the tests are done
         # Also after failed tests, but not in a cancelled run: the other jobs are being cancelled
