@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,38 +16,13 @@ import {
   type LiveEdgeSettings,
   type WatchLiveEdge,
 } from "./live-edge.ts";
+import type { PipelineEvents, PipelineOptions, PipelineSettings, Spawner } from "./pipeline-settings.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
 import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
+import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
-
-export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode" | "allFrames">;
-
-export interface PipelineSettings {
-  hlsDir: string;
-  ffmpegPath: string;
-  handoverTimeoutMs: number;
-  plan: PlanSettings;
-  /**
-   * When a source's live edge counts as stale (see `LiveEdge`). Published segments older than its
-   * `staleAfterMs` also leave the playlist, so a player never starts on old video.
-   */
-  liveEdge?: LiveEdgeSettings;
-}
-
-export interface PipelineEvents {
-  generationStarted: (id: string, reason: string) => void;
-  handover: (id: string, result: "promoted" | "failed") => void;
-}
-
-export type Spawner = (command: string, args: string[]) => ChildProcess;
-
-/** What tests replace: how ffmpeg starts, the clock, and how a source's live edge is followed. */
-export interface PipelineOptions {
-  spawner?: Spawner | undefined;
-  now?: () => number;
-  watchLiveEdge?: WatchLiveEdge;
-}
+export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, Spawner } from "./pipeline-settings.ts";
 
 const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -85,6 +60,9 @@ export class Pipeline {
   private forceTranscode = false;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
+  private readonly stuck: StuckRuns;
+  /** When it last started ffmpeg again by itself, as its run was stuck (see `PipelineStatus.restartedAt`). */
+  private restartedAt: number | undefined;
   /**
    * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
    * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
@@ -110,6 +88,7 @@ export class Pipeline {
     this.now = options.now ?? Date.now;
     this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
     this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
+    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -171,6 +150,7 @@ export class Pipeline {
   status(): PipelineStatus {
     const generation = this.active;
     const pendingSource = this.pending?.source ?? null;
+    const restartedAt = this.restartedAt === undefined ? null : new Date(this.restartedAt).toISOString();
     if (generation === undefined) {
       return {
         id: this.id,
@@ -186,6 +166,7 @@ export class Pipeline {
         error: "not started",
         pendingSource,
         liveEdge: null,
+        restartedAt,
       };
     }
     return {
@@ -205,6 +186,7 @@ export class Pipeline {
       error: generation.error,
       pendingSource,
       liveEdge: generation.watch?.edge.view() ?? null,
+      restartedAt,
     };
   }
 
@@ -242,6 +224,13 @@ export class Pipeline {
     return existsSync(path) ? path : undefined;
   }
 
+  /**
+   * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
+   * stop by itself and it writes out what it holds first, a whole segment or a stalled full
+   * output's backlog, into a directory that is going. A file it writes while it dies can still
+   * land in a directory that `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm`
+   * tries again for that.
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.syncTimer !== undefined) {
@@ -249,13 +238,13 @@ export class Pipeline {
     }
     for (const generation of [this.active, this.pending]) {
       if (generation !== undefined) {
-        killProcess(generation.process);
+        generation.process?.kill("SIGKILL");
         generation.watch?.stop();
       }
     }
     this.active = undefined;
     this.pending = undefined;
-    await rm(this.root, { recursive: true, force: true });
+    await rm(this.root, { recursive: true, force: true, maxRetries: 3 });
   }
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */
@@ -267,6 +256,9 @@ export class Pipeline {
       return;
     }
     this.stopIfStale(active);
+    if (this.restartIfStuck(active)) {
+      return;
+    }
     if (this.mayReopenNow(active)) {
       this.reopen(active);
       return;
@@ -280,9 +272,10 @@ export class Pipeline {
         const prefix = `../g${String(active.number)}/${variant}/`;
         const added = this.playlists[variant].append(active.number, segments, prefix, this.now());
         if (variant === "full" && added > 0 && !active.published) {
-          // Its video counts from now on: players can get it.
+          // Its video counts from now on: players can get it. One that has no frame of its own yet
+          // leaves the last one of the run it replaced (see `swap`).
           active.published = true;
-          active.publishedFrameAt = active.lastFrameAt;
+          active.publishedFrameAt = active.lastFrameAt ?? active.publishedFrameAt;
         }
       }
     }
@@ -352,6 +345,29 @@ export class Pipeline {
     }
   }
 
+  /**
+   * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`), with
+   * the full stream re-encoded from then on when a copy can't be cut (`StuckRuns.copyFails`). The
+   * old run is killed outright: as it stops, ffmpeg would write out all it holds. A full output
+   * that stalled shows the broadcast's key frames are gone, which decoding key frames only needs
+   * too: the stream's later runs decode every frame (see `KeyFrames`). Until the new run has video
+   * of its own, the stream's last video is the old run's, and the controller gives the new run
+   * time to start (see `PipelineStatus.restartedAt`).
+   */
+  private restartIfStuck(generation: Generation): boolean {
+    const stuck = this.stuck.check(generation);
+    if (stuck === undefined) {
+      return false;
+    }
+    this.logger.warn({ generation: generation.number, ...stuck.details }, stuck.message);
+    generation.process?.kill("SIGKILL");
+    this.keyFrames.allFrames ||= stuck.reason === "full-output-stalled";
+    this.restartedAt = this.now();
+    const { source, inputTimeoutSeconds, stat } = generation;
+    this.swap(generation, this.prepare(source, inputTimeoutSeconds, REOPENS_AFTER_FALLBACK, stat), stuck.reason);
+    return true;
+  }
+
   /** Promotes the pending generation once it has a segment, or gives up on it. */
   private async syncPending(): Promise<void> {
     const pending = this.pending;
@@ -415,6 +431,8 @@ export class Pipeline {
    */
   private swap(generation: Generation, next: Generation, reason: string): void {
     next.handoverSince = generation.handoverSince;
+    // The last frame players got of this source, until `next` has one (see `restartIfStuck`).
+    next.publishedFrameAt = generation.publishedFrameAt;
     this[generation === this.pending ? "pending" : "active"] = next;
     this.retire(generation);
     void this.run(next, reason).catch((error: unknown) => {
@@ -473,7 +491,7 @@ export class Pipeline {
     const number = this.nextNumber;
     this.nextNumber += 1;
     const directory = join(this.root, `g${String(number)}`);
-    const mode = this.forceTranscode ? "transcode" : "copy";
+    const mode = this.forceTranscode || this.stuck.copyFails ? "transcode" : "copy";
     const generation = new Generation({
       number,
       source,
@@ -585,25 +603,16 @@ export class Pipeline {
   }
 
   private async relaunchAsTranscode(generation: Generation): Promise<void> {
-    if (generation === this.active) {
-      this.retire(generation);
-      this.active = await this.launch(
-        generation.source,
-        "transcode",
-        generation.inputTimeoutSeconds,
-        0,
-        generation.stat,
-      );
-    } else if (generation === this.pending) {
-      this.retire(generation);
-      this.pending = await this.launch(
-        generation.source,
-        "transcode",
-        generation.inputTimeoutSeconds,
-        0,
-        generation.stat,
-      );
+    const slot = generation === this.active ? "active" : generation === this.pending ? "pending" : undefined;
+    if (slot === undefined) {
+      return;
     }
+    this.retire(generation);
+    const { source, inputTimeoutSeconds, stat } = generation;
+    const next = await this.launch(source, "transcode", inputTimeoutSeconds, 0, stat);
+    // As in `swap`: a run started again for being stuck may find its codec only now.
+    next.publishedFrameAt = generation.publishedFrameAt;
+    this[slot] = next;
   }
 
   /** Stops a generation and removes its files once players can no longer reference them. */

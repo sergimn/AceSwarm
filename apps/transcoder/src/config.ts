@@ -48,6 +48,23 @@ const schema = z.object({
    * published once its live edge moves. Published video older than this leaves the playlist.
    */
   STALE_SOURCE_SECONDS: z.coerce.number().int().min(10).default(60),
+  /**
+   * An ffmpeg run whose full output wrote no segment for this long, while it still makes video (a
+   * frame, a preview segment or a thumbnail), starts again on the same source. ffmpeg holds the
+   * segment it writes in memory until it can start the next one, and a copied video can only start
+   * one at a key frame, so a broadcast that stops sending those leaves fullscreen without new video
+   * while ffmpeg's memory grows. It has to be longer than the broadcasts' longest gap between key
+   * frames plus SEGMENT_SECONDS (a copied segment ends at the first key frame after its time is up),
+   * and well under the controller's STARTUP_GRACE_SECONDS, which has to cover two stalls.
+   */
+  FULL_OUTPUT_STALL_SECONDS: z.coerce.number().int().min(10).default(30),
+  /**
+   * An ffmpeg run whose memory (resident and swapped out) grows by more than this many MB over what
+   * it settled at a minute after its first video starts again, whatever the cause. The compose file
+   * gives the transcoder no memory limit, so nothing else stops it. How much a run needs depends on
+   * the host (more cores start more threads), so the limit is on the growth. 0 turns it off.
+   */
+  FFMPEG_MAX_MEMORY_GROWTH_MB: z.coerce.number().int().min(0).default(512),
 });
 
 export type Config = z.infer<typeof schema>;

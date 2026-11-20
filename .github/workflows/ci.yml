@@ -56,7 +56,11 @@ jobs:
           docker cp "$container:/ffmpeg" "$RUNNER_TEMP/ffmpeg"
           docker rm "$container"
           "$RUNNER_TEMP/ffmpeg" -version | head -n 1
-      - run: npx vitest run apps/transcoder/test/ffmpeg-gaps.test.ts
+      # Also runs the full output that stops on a broadcast without key frames, on the same binary.
+      # One file at a time: both time real ffmpeg runs, which must not compete for the CPU.
+      - run: >-
+          npx vitest run --no-file-parallelism
+          apps/transcoder/test/ffmpeg-gaps.test.ts apps/transcoder/test/ffmpeg-full-stall.test.ts
         env:
           FFMPEG_BIN: ${{ runner.temp }}/ffmpeg
 
