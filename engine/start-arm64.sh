@@ -1,6 +1,6 @@
 #!/bin/sh
-# Starts the Acestream Android engine (arm64) through its Linux wrapper. The cache stays in memory,
-# unless ACESWARM_CACHE_DIR names a folder for it (see below).
+# Starts the Acestream Android engine (arm64) through its Linux wrapper. Its cache is always in
+# memory: this engine cannot keep it on disk (see below).
 set -eu
 cd /acestream
 # ACESWARM_MEMORY_CACHE_BYTES caps the stream data the engine keeps in memory (--memory-cache-limit).
@@ -15,11 +15,12 @@ case "$cache_bytes" in
     ;;
   *[!0]*) cache_limit="--memory-cache-limit $cache_bytes" ;;
 esac
-# ACESWARM_CACHE_DIR is the folder the entrypoint made for this engine when the cache goes to disk
-# (ENGINE_CACHE_DIR), and ACESWARM_DISK_CACHE_BYTES the most the engine keeps in it. The engine then
-# writes the stream to a file there that it overwrites in place, and uses no memory cache.
-# --cache-auto 0 keeps the engine from sizing the cache by itself, which made the x86 engine ignore
-# the limit.
+# ACESWARM_DISK_CACHE_BYTES asks for the cache on disk (ENGINE_CACHE_DIR). The Android engine
+# cannot do that: when it starts it sets its stream cache to memory, whatever --live-cache-type
+# says, and its wrapper lacks the Android calls it asks for free disk space with. It would take
+# the options and keep everything in memory, so it is refused here, with the entrypoint's exit
+# code for a cache that cannot be set up. The controller refuses the setting on arm64 before any
+# engine starts.
 disk_bytes="${ACESWARM_DISK_CACHE_BYTES:-0}"
 case "$disk_bytes" in
   *[!0-9]*)
@@ -27,16 +28,12 @@ case "$disk_bytes" in
     exit 64
     ;;
   *[!0]*)
-    if [ -z "${ACESWARM_CACHE_DIR:-}" ]; then
-      echo "ACESWARM_DISK_CACHE_BYTES is set, but ACESWARM_CACHE_DIR names no folder for the cache" >&2
-      exit 64
-    fi
-    cache_flags="--cache-dir $ACESWARM_CACHE_DIR --live-cache-type disk --disk-cache-limit $disk_bytes --cache-auto 0"
-    ;;
-  *)
-    cache_flags="--live-cache-type memory --live-mem-cache-size ${ACESWARM_LIVE_CACHE_BYTES:-104857600}"
+    echo "engine cache on disk: the arm64 engine cannot keep its stream cache on disk. ENGINE_CACHE_DIR" \
+      "works on x86_64 only: leave it empty here, and lower ENGINE_MEMORY_CACHE_MB to use less memory." >&2
+    exit 78
     ;;
 esac
+cache_flags="--live-cache-type memory --live-mem-cache-size ${ACESWARM_LIVE_CACHE_BYTES:-104857600}"
 # cache_flags, cache_limit and ACESWARM_ENGINE_FLAGS hold space separated engine options, so they are
 # split on purpose. None of them holds a value with a space: the entrypoint names the cache folder.
 # shellcheck disable=SC2086

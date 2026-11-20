@@ -198,8 +198,29 @@ const schema = z
 
 export type Config = z.infer<typeof schema>;
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  return parseEnv(schema, env);
+/**
+ * The arm64 engine is the Android build of Acestream, which cannot keep a stream's cache on disk:
+ * it sets its cache to memory when it starts, whatever its options say (docs/architecture.md).
+ * Engines run on the machine the controller runs on, so the controller's own architecture tells.
+ */
+function engineCachesOnDisk(arch: string): boolean {
+  return arch !== "arm64";
+}
+
+export function loadConfig(env: Record<string, string | undefined> = process.env, arch: string = process.arch): Config {
+  const config = parseEnv(schema, env);
+  if (config.ENGINE_CACHE_DIR !== "" && !engineCachesOnDisk(arch)) {
+    // Refused instead of ignored: nothing would reach the folder, and the engines would keep the
+    // memory use this setting is there to save.
+    throw new Error(
+      "invalid configuration:\n" +
+        "✖ ENGINE_CACHE_DIR does not work on this machine (arm64, such as a Raspberry Pi): the arm64 engine keeps " +
+        "its stream cache in memory whatever it is told. Leave ENGINE_CACHE_DIR empty; to use less memory, lower " +
+        "ENGINE_MEMORY_CACHE_MB\n" +
+        "  → at ENGINE_CACHE_DIR",
+    );
+  }
+  return config;
 }
 
 const cleanupSchema = z.object({ DOCKER_HOST: dockerHost, STACK_NAME: stackName });
