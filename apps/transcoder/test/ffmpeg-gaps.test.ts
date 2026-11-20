@@ -1,9 +1,9 @@
 /**
  * Runs the real ffmpeg of the transcoder image on a stream with gaps in its video timestamps, fed at
  * a pace like a live engine. Unit tests with a fake ffmpeg cannot see what this checks: ffmpeg 9 can
- * stop for good when a filter graph of the preview repeats a frame (see the architecture notes on
- * ffmpeg freezing at timestamp gaps), and only when its input comes at a pace; a file read at full
- * speed passes.
+ * stop for good when a filter graph of the preview repeats a frame (see "ffmpeg and gaps in the
+ * video's timestamps" in docs/architecture.md), and only when its input comes at a pace; a file read
+ * at full speed passes.
  *
  * It only runs with `FFMPEG_BIN` set to the ffmpeg 9.0.2 binary of the transcoder image (the CI job
  * "ffmpeg with timestamp gaps" takes it out of the image the Dockerfile names):
@@ -236,6 +236,9 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with gaps in the video's timestamp
     "half a second missing at 12 s": () => dropSpan(sample, 12, 12.5),
   };
 
+  // On the arguments from before the fix, only a single missing frame with a re-encoded full stream
+  // froze on every run. The other cases passed then (a copied full stream froze with an older
+  // thumbnail filter) and stay as cover, so the arguments can change without the race coming back.
   for (const fullMode of ["copy", "transcode"] as const) {
     for (const [name, make] of Object.entries(gaps)) {
       it(`goes on and exits when the full stream is ${fullMode === "copy" ? "copied" : "re-encoded"} and ${name}`, async () => {
@@ -258,7 +261,9 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with gaps in the video's timestamp
     // workaround in ffmpeg-args.ts (and these tests) can go.
     let frozen = 0;
     const log: string[] = [];
-    for (const [name, make] of Object.entries(gaps)) {
+    // A missing frame with a re-encoded full stream froze every run; a missing stretch did not.
+    const frameGaps = Object.entries(gaps).filter(([gap]) => gap.includes("frame"));
+    for (const [name, make] of frameGaps) {
       const reencoded = buildFfmpegArgs(plan("transcode", `control-${name.replaceAll(" ", "-")}`));
       const outcome = await feed(withFpsFilter(reencoded), make());
       log.push(`${name}: ${outcome.stuck ? "frozen" : `exit ${String(outcome.exitCode)}`}`);

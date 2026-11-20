@@ -200,7 +200,7 @@ describe("Pipeline decoding key frames only", () => {
     expect(children[0]?.killed).toBe(true);
     expect(skipsFrames(runs[1])).toBe(false);
     // With every frame decoded, the preview thins them out as in video mode.
-    expect(previewFilter(runs[1])).toContain(
+    expect(previewFilter(runs[1])).toBe(
       "select='isnan(prev_selected_t)+gt(floor(t*15),floor(prev_selected_t*15))',scale=-2:270",
     );
     expect(reasons).toEqual(["start", "all-frames"]);

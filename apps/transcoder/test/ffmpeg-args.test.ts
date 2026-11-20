@@ -107,9 +107,9 @@ describe("buildFfmpegArgs", () => {
 
   it("never lets a filter graph repeat frames of the video, apart from the thumbnail's", () => {
     // ffmpeg 9's scheduler can deadlock when a graph with a repeating fps filter shares the decoder
-    // with another graph while the full stream is copied or re-encoded first: see the architecture
-    // notes on ffmpeg freezing at timestamp gaps. The previews and the full video leave the repeating to
-    // the output's frame rate, which acts after the graph.
+    // with another graph while the full stream is copied or re-encoded first: see "ffmpeg and gaps in
+    // the video's timestamps" in docs/architecture.md. The preview leaves the repeating to the output's
+    // frame rate, which acts after the graph.
     for (const fullMode of ["copy", "transcode"] as const) {
       for (const previewMode of ["video", "keyframes", "thumbnails"] as const) {
         for (const allFrames of [false, true]) {
