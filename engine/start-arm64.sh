@@ -1,6 +1,6 @@
 #!/bin/sh
-# Starts the Acestream Android engine (arm64) through its Linux wrapper. The cache stays in memory:
-# this engine did not keep it on disk when told to (see below).
+# Starts the Acestream Android engine (arm64) through its Linux wrapper. The stream cache stays in
+# memory unless ACESWARM_CACHE_DIR names a folder for it (see below).
 set -eu
 cd /acestream
 # ACESWARM_MEMORY_CACHE_BYTES caps the stream data the engine keeps in memory (--memory-cache-limit).
@@ -15,31 +15,37 @@ case "$cache_bytes" in
     ;;
   *[!0]*) cache_limit="--memory-cache-limit $cache_bytes" ;;
 esac
-# ACESWARM_DISK_CACHE_BYTES asks for the cache on disk (ENGINE_CACHE_DIR). In testing the Android
-# engine took the options for that and kept the stream in memory all the same: when it starts it
-# sets its stream cache to memory, and its wrapper lacks the Android calls it asks for free disk
-# space with. So a disk cache is refused here, with the entrypoint's exit code for a cache that
-# cannot be set up. The controller refuses the setting on arm64 before any engine starts.
-case "${ACESWARM_DISK_CACHE_BYTES:-0}" in
+# ACESWARM_CACHE_DIR is the folder the entrypoint made for this engine when the cache goes to disk
+# (ENGINE_CACHE_DIR), and ACESWARM_DISK_CACHE_BYTES the most the engine keeps in it. The same options
+# as on x86_64 (see start-amd64.sh). The bridge of the arm64 engine lacks the disk-space calls the
+# engine makes for the cache folder, so arm64-shim.py answers them.
+disk_bytes="${ACESWARM_DISK_CACHE_BYTES:-0}"
+case "$disk_bytes" in
   *[!0-9]*)
-    echo "ACESWARM_DISK_CACHE_BYTES must be a number of bytes, got '$ACESWARM_DISK_CACHE_BYTES'" >&2
+    echo "ACESWARM_DISK_CACHE_BYTES must be a number of bytes, got '$disk_bytes'" >&2
     exit 64
     ;;
   *[!0]*)
-    echo "engine cache on disk: the arm64 engine does not keep its stream cache on disk. ENGINE_CACHE_DIR" \
-      "is for x86_64 only: leave it empty here, and lower ENGINE_MEMORY_CACHE_MB to use less memory." >&2
-    exit 78
+    if [ -z "${ACESWARM_CACHE_DIR:-}" ]; then
+      echo "ACESWARM_DISK_CACHE_BYTES is set, but ACESWARM_CACHE_DIR names no folder for the cache" >&2
+      exit 64
+    fi
+    cache_flags="--cache-dir $ACESWARM_CACHE_DIR --live-cache-type disk --disk-cache-limit $disk_bytes --cache-auto 0"
+    ;;
+  *)
+    cache_flags="--live-cache-type memory --live-mem-cache-size ${ACESWARM_LIVE_CACHE_BYTES:-104857600}"
     ;;
 esac
-# cache_limit and ACESWARM_ENGINE_FLAGS hold space separated engine options, so they are split on purpose.
+# cache_flags, cache_limit and ACESWARM_ENGINE_FLAGS hold space separated engine options, so they are
+# split on purpose. None of them holds a value with a space: the entrypoint names the cache folder.
+# The shim answers the disk-space calls and then runs the engine's main.py with these options.
 # shellcheck disable=SC2086
-exec python main.py \
+exec python /usr/local/lib/aceswarm/arm64-shim.py \
   --bind-all \
   --log-stdout \
   --disable-sentry \
   --disable-upnp \
-  --live-cache-type memory \
-  --live-mem-cache-size "${ACESWARM_LIVE_CACHE_BYTES:-104857600}" \
+  $cache_flags \
   $cache_limit \
   ${ACESWARM_ENGINE_FLAGS:-} \
   "$@"
