@@ -15,6 +15,46 @@ const SYNC_GRACE_MS = 30_000;
 
 export function registerMetrics(service: Service, gateway: Gateway): void {
   const registers = [service.registry];
+  // The client calls collect() on every scrape; one gauge refreshes all of them. It is registered
+  // before the gauges it fills, because a scrape reads each metric in turn: the ones before it
+  // would show the previous scrape's values.
+  const total: Gauge = new Gauge({
+    name: "aceswarm_paths",
+    help: "Number of network paths (direct plus tunnels)",
+    registers,
+    collect: () => {
+      for (const gauge of [up, rtt, loss, score, handshake, engines, peers]) {
+        gauge.reset();
+      }
+      const paths = gateway.paths();
+      for (const path of paths) {
+        const labels = { path: path.id };
+        up.set(labels, path.up ? 1 : 0);
+        score.set(labels, path.score);
+        if (path.rttMs !== null) {
+          rtt.set(labels, path.rttMs / 1000);
+        }
+        if (path.loss !== null) {
+          loss.set(labels, path.loss);
+        }
+        if (path.handshakeAgeSeconds !== null) {
+          handshake.set(labels, path.handshakeAgeSeconds);
+        }
+        engines.set(labels, gateway.router.list().filter((assignment) => assignment.path === path.id).length);
+      }
+      for (const stats of gateway.peers.all()) {
+        peers.set({ engine_ip: stats.ip, kind: "connected" }, stats.connected);
+        if (stats.active !== null) {
+          peers.set({ engine_ip: stats.ip, kind: "active" }, stats.active);
+        }
+        if (stats.uploading !== null) {
+          peers.set({ engine_ip: stats.ip, kind: "uploading" }, stats.uploading);
+        }
+      }
+      total.set(paths.length);
+    },
+  });
+
   const up = new Gauge({
     name: "aceswarm_path_up",
     help: "1 when the path passes its probes",
@@ -63,42 +103,6 @@ export function registerMetrics(service: Service, gateway: Gateway): void {
     registers,
     collect: () => {
       wireguardOnly.set(gateway.policy().wireguardOnly ? 1 : 0);
-    },
-  });
-  const total: Gauge = new Gauge({
-    name: "aceswarm_paths",
-    help: "Number of network paths (direct plus tunnels)",
-    registers,
-    collect: () => {
-      for (const gauge of [up, rtt, loss, score, handshake, engines, peers]) {
-        gauge.reset();
-      }
-      const paths = gateway.paths();
-      for (const path of paths) {
-        const labels = { path: path.id };
-        up.set(labels, path.up ? 1 : 0);
-        score.set(labels, path.score);
-        if (path.rttMs !== null) {
-          rtt.set(labels, path.rttMs / 1000);
-        }
-        if (path.loss !== null) {
-          loss.set(labels, path.loss);
-        }
-        if (path.handshakeAgeSeconds !== null) {
-          handshake.set(labels, path.handshakeAgeSeconds);
-        }
-        engines.set(labels, gateway.router.list().filter((assignment) => assignment.path === path.id).length);
-      }
-      for (const stats of gateway.peers.all()) {
-        peers.set({ engine_ip: stats.ip, kind: "connected" }, stats.connected);
-        if (stats.active !== null) {
-          peers.set({ engine_ip: stats.ip, kind: "active" }, stats.active);
-        }
-        if (stats.uploading !== null) {
-          peers.set({ engine_ip: stats.ip, kind: "uploading" }, stats.uploading);
-        }
-      }
-      total.set(paths.length);
     },
   });
 }
