@@ -181,6 +181,8 @@ The engine only reads HTTP sources (`--source -` for stdin isn't supported). ffm
 
 The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only, engine sharing and hot standby off, so each stream has one engine). It returns only once the controller has removed every engine: on Docker, removing a container deletes its network interface on the host, and the browser aborts the requests in flight when that happens (`net::ERR_NETWORK_CHANGED`).
 
+The same event can cut a page load that comes a second or two after a container started, restarted or was removed: Chromium fails the requests that are still waiting for a connection, and a stylesheet that was lost is not asked for again, so the page runs with no styles. The specs open the page with `openApp` (`helpers.ts`), never `page.goto("/")`. It loads the page again when a request of it failed with that error or a stylesheet has no rules, up to 3 tries, and notes it as "page loaded again" in the report and the log. A stylesheet that is missing for good fails every try, so the spec fails with "the page did not load whole".
+
 ```mermaid
 flowchart LR
   CR[controller-restart] --> I[isolation] --> N[navigation] --> P[paths] --> R[recovery] --> SE[shared-engines] --> SB[standby] --> S[streams] --> W[wireguard-only]
@@ -419,6 +421,7 @@ sequenceDiagram
 - **"STUN servers saw different public addresses" in `mesh.sh prepare`** means that runner's NAT picks a port per destination, so it can't hole punch, and the run was cancelled. Recent runs often get at least one such runner. The **E2E retry** workflow re-runs the run by itself, up to 50 attempts (see "Workflow" above). GitHub allows 50 re-runs of a run, so after that one re-run by hand is left; a new commit starts a new run.
 - **"downloading the … runner's artifact failed (try …)" in `mesh.sh join`** is the retry for the race described under "Workflow" above ("A new artifact can take a few seconds to become downloadable"): the join goes on once the artifact can be downloaded. If it ends with "could not download the … runner's artifact", the artifact stayed undownloadable for a minute: read the peer job's `upload-artifact` step and the error that `gh` printed on the line before.
 - **"no connectivity to …" in `mesh.sh join`** means hole punching failed although STUN looked fine. Check that both STUN servers answered (two entries in `mappings` in each runner's "public UDP address" line): with one answer the check can't see a mismatch.
+- **"the page was loaded again" in a job's log** (an annotation "page loaded again" in a spec's report) is not a failure: `openApp` saw a page load cut by a change of the host's network (see "Tests") and loaded it again. A spec that fails with "the page did not load whole in 3 tries" is: the stylesheet or the page was lost on every try, so look at what it lists.
 - **Tests time out waiting for playback** while the mesh is fine: check the tracker log in the source job. Each engine should announce and get its source as a peer.
 
 ## Files

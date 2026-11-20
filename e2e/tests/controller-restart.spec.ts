@@ -7,6 +7,7 @@ import {
   composeAsync,
   composeAsyncWithin,
   engineContainers,
+  openApp,
   resetStack,
   sharedEngineContainers,
   snapshot,
@@ -142,7 +143,7 @@ function longestWithoutNewSegment(samples: PlaylistSample[]): number {
 
 /** Opens the stream full screen and, when the browser decodes H.264, records the video's progress. */
 async function openPlayer(page: Page, name: string): Promise<boolean> {
-  await page.goto("/");
+  await openApp(page);
   await page.locator(".tile", { hasText: name }).click();
   await expect(page.getByRole("dialog", { name: "Player" })).toBeVisible();
   const canPlay = await page.evaluate<boolean>(

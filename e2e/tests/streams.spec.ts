@@ -5,6 +5,7 @@ import {
   docker,
   engineContainers,
   metricValue,
+  openApp,
   resetStack,
   snapshot,
   streamById,
@@ -24,7 +25,7 @@ test.beforeAll(async ({ request }) => {
 
 test("adds a stream by its acestream:// link from the UI and shows its live stats", async ({ page, request }) => {
   const { contentId } = bc[0]!;
-  await page.goto("/");
+  await openApp(page);
   await expect(page.locator("#empty")).toBeVisible();
 
   await page.getByRole("button", { name: "Add a stream" }).click();
@@ -61,7 +62,7 @@ test("shows ages by the controller's clock when the browser's clock is wrong", a
     const real = Date.now.bind(Date);
     Date.now = () => real() + 5 * 60_000;
   });
-  await page.goto("/");
+  await openApp(page);
   // The page's clock really is that far off the controller's.
   const skewMs = await page.evaluate(async () => {
     const generatedAt = ((await (await fetch("/api/snapshot")).json()) as { generatedAt: string }).generatedAt;
@@ -88,7 +89,7 @@ test("says when it hears nothing from the controller, and recovers when it does 
   // Every connection to the event stream is refused, as a reverse proxy does while the controller
   // restarts: the browser gives up on the stream for good, and the page opens new ones.
   await page.route("**/api/events", (route) => route.fulfill({ status: 502, body: "bad gateway" }));
-  await page.goto("/");
+  await openApp(page);
   const tile = page.locator(".tile", { hasText: "Test pattern" });
   await expect(tile).toHaveAttribute("data-state", "playing", { timeout: 60_000 });
   await tile.hover();
@@ -177,7 +178,7 @@ test("detects infohashes without being told", async ({ page, request }) => {
   expect(magnet.aceIdKind).toBe("infohash");
   await waitForPlaying(request, magnet.id);
 
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Streams", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Streams" });
   await expect(dialog.locator(".row", { hasText: bare.aceId })).toContainText("infohash");
@@ -185,7 +186,7 @@ test("detects infohashes without being told", async ({ page, request }) => {
 });
 
 test("rejects text that is not a stream ID", async ({ page }) => {
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Add", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add stream" });
   await dialog.getByLabel("Acestream ID or infohash").fill("not an id");
@@ -210,7 +211,7 @@ test("adds a pasted list with the remote: wrong lines stay to correct, known str
 }) => {
   // Two streams nobody broadcasts. They are added disabled, so no engine starts for them.
   const fresh = ["1".repeat(40), "2".repeat(40)];
-  await page.goto("/");
+  await openApp(page);
   // Once the page has its streams it has also moved the focus to the first tile, as it does when
   // it opens: from here on the focus is the test's.
   await expect(page.locator(".tile")).toHaveCount(3);
@@ -403,7 +404,7 @@ test("disables a stream, says how long ago it had video, and plays it again once
   expect(playing.lastFrameAt).not.toBeNull();
   expect(playing.path).toBe("direct");
 
-  await page.goto("/");
+  await openApp(page);
   const streams = page.getByRole("button", { name: "Streams", exact: true });
   await streams.click();
   const row = page.getByRole("dialog", { name: "Streams" }).locator(".row", { hasText: target!.aceId });
@@ -543,7 +544,7 @@ test("removes a stream from the manage dialog, and its engine", async ({ page, r
   expect(target).toBeDefined();
   expect(engineContainers(target!.id).length).toBeGreaterThan(0);
 
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Streams", exact: true }).click();
   const row = page.getByRole("dialog", { name: "Streams" }).locator(".row", { hasText: target!.aceId });
   const remove = row.getByRole("button", { name: "Remove" });

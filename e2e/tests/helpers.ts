@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page, type Request } from "@playwright/test";
 import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
@@ -152,9 +152,87 @@ export function networkDialog(page: Page): NetworkDialog {
   return { dialog, section, toggle: dialog.getByRole("switch", { name: "WireGuard only" }) };
 }
 
+const NETWORK_CHANGED = "net::ERR_NETWORK_CHANGED";
+
+/**
+ * The stylesheets of the page that have no rules, which is what one that failed to load looks like:
+ * its link keeps an empty sheet, and the browser doesn't let a page read the rules of a sheet that
+ * failed, as it doesn't of one from another origin. The app's own stylesheet is from its origin.
+ */
+const STYLESHEETS_WITHOUT_RULES = `[...document.querySelectorAll('link[rel="stylesheet"]')].filter((link) => {
+  try {
+    return link.sheet === null || link.sheet.cssRules.length === 0;
+  } catch {
+    return true;
+  }
+}).map((link) => link.href)`;
+
+/** How many times `openApp` loads the page before it gives up. */
+const APP_LOAD_ATTEMPTS = 3;
+
+/**
+ * Opens the app, and loads it again if the load was cut. Use it instead of `page.goto("/")`.
+ *
+ * On Docker, a container that starts, restarts or is removed changes the host's network
+ * interfaces. A moment later Chromium hears of it and fails the requests that are still waiting for
+ * a connection (`net::ERR_NETWORK_CHANGED`); the ones that were being answered go on. A page that
+ * loads in that moment can lose a request that nothing asks for again. When it is the stylesheet,
+ * `page.goto` returns as if all were well and the page runs with no styles: what only the
+ * stylesheet hides, such as the Restart button in the row of a disabled stream, stays on the
+ * screen. Rootless Podman's containers have a network namespace of their own, which the host
+ * doesn't see change.
+ *
+ * A load is whole when no request of it failed with that error and every stylesheet has its rules.
+ * If not, the page is loaded again, up to `APP_LOAD_ATTEMPTS` times in all. A fault that doesn't
+ * go away, a stylesheet that really is missing for one, fails on every try and fails the test.
+ */
+export async function openApp(page: Page): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    const lost: string[] = [];
+    const onFailed = (request: Request): void => {
+      if (request.failure()?.errorText === NETWORK_CHANGED) {
+        lost.push(`${request.method()} ${request.url()}`);
+      }
+    };
+    page.on("requestfailed", onFailed);
+    try {
+      await page.goto("/");
+    } catch (error) {
+      // The document itself can be the request that was lost.
+      if (!(error instanceof Error && error.message.includes(NETWORK_CHANGED))) {
+        throw error;
+      }
+      if (lost.length === 0) {
+        lost.push("the page itself");
+      }
+    } finally {
+      page.off("requestfailed", onFailed);
+    }
+    // The specs run in Node without DOM types, so browser-side code is passed as a string. `goto`
+    // returns once the stylesheets are in or have failed.
+    const unstyled = lost.length > 0 ? [] : await page.evaluate<string[]>(STYLESHEETS_WITHOUT_RULES);
+    if (lost.length === 0 && unstyled.length === 0) {
+      return;
+    }
+    const problem = [
+      ...lost.map((what) => `${what} failed with ${NETWORK_CHANGED}`),
+      ...unstyled.map((href) => `${href} has no rules`),
+    ];
+    expect(
+      attempt,
+      `the page did not load whole in ${String(APP_LOAD_ATTEMPTS)} tries: ${problem.join("; ")}`,
+    ).toBeLessThan(APP_LOAD_ATTEMPTS);
+    const note = `the page was loaded again: ${problem.join("; ")}`;
+    test.info().annotations.push({ type: "page loaded again", description: note });
+    process.stdout.write(`${note}\n`);
+    // A change of the network can be heard twice, a moment apart.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 /** Opens the Network dialog from the home screen. */
 export async function openNetwork(page: Page): Promise<NetworkDialog> {
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Network", exact: true }).click();
   return networkDialog(page);
 }
