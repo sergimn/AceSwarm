@@ -56,6 +56,8 @@ export class Pipeline {
   private readonly playlists: Record<Variant, VirtualPlaylist>;
   private active: Generation | undefined;
   private pending: Generation | undefined;
+  /** Runs that were retired and whose files are still to be removed (see `retire`). */
+  private readonly retiredRuns = new Set<Generation>();
   private nextNumber = 1;
   private forceTranscode = false;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
@@ -227,20 +229,17 @@ export class Pipeline {
   /**
    * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
    * stop by itself and it writes out what it holds first, a whole segment or a stalled full
-   * output's backlog, into a directory that is going. A file it writes while it dies can still
-   * land in a directory that `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm`
-   * tries again for that.
+   * output's backlog, into a directory that is going. That goes for the runs that were retired
+   * moments ago and still stop. A file it writes while it dies can still land in a directory that
+   * `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm` tries again for that.
    */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.syncTimer !== undefined) {
       clearInterval(this.syncTimer);
     }
-    for (const generation of [this.active, this.pending]) {
-      if (generation !== undefined) {
-        generation.process?.kill("SIGKILL");
-        generation.watch?.stop();
-      }
+    for (const generation of [this.active, this.pending, ...this.retiredRuns]) {
+      generation?.stopNow();
     }
     this.active = undefined;
     this.pending = undefined;
@@ -615,16 +614,19 @@ export class Pipeline {
     this[slot] = next;
   }
 
-  /** Stops a generation and removes its files once players can no longer reference them. */
+  /**
+   * Stops a generation and removes its files once players can no longer reference them. Once the
+   * pipeline has stopped, its stop has removed them all: a timer could then only remove the files
+   * of the stream's next pipeline, which starts with the same names.
+   */
   private retire(generation: Generation): void {
     generation.retired = true;
     this.keyFrames.ended(generation);
     this.lastEdge = this.newestEdge(generation);
     generation.watch?.stop();
     killProcess(generation.process);
-    const timer = setTimeout(() => {
-      void rm(generation.directory, { recursive: true, force: true });
-    }, OLD_GENERATION_TTL_MS);
-    timer.unref();
+    if (!this.stopped) {
+      generation.removeLater(OLD_GENERATION_TTL_MS, this.retiredRuns);
+    }
   }
 }
