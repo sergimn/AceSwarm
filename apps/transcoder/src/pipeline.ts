@@ -88,7 +88,7 @@ export class Pipeline {
     this.now = options.now ?? Date.now;
     this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
     this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
-    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, options.memoryOf, options.now);
+    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -602,7 +602,10 @@ export class Pipeline {
     }
     this.retire(generation);
     const { source, inputTimeoutSeconds, stat } = generation;
-    this[slot] = await this.launch(source, "transcode", inputTimeoutSeconds, 0, stat);
+    const next = await this.launch(source, "transcode", inputTimeoutSeconds, 0, stat);
+    // As in `swap`: a run started again for being stuck may find its codec only now.
+    next.publishedFrameAt = generation.publishedFrameAt;
+    this[slot] = next;
   }
 
   /** Stops a generation and removes its files once players can no longer reference them. */

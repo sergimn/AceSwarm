@@ -23,7 +23,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildFfmpegArgs, type FfmpegPlan } from "../src/ffmpeg-args.ts";
-import { Pipeline } from "../src/pipeline.ts";
+import { Pipeline, type PipelineSettings, type PlanSettings } from "../src/pipeline.ts";
 import { parseMediaPlaylist } from "../src/playlist.ts";
 
 const FFMPEG = process.env["FFMPEG_BIN"];
@@ -33,6 +33,9 @@ const WITH_KEY_FRAMES = 12;
 const WITHOUT_KEY_FRAMES = 120;
 /** How many times faster than its own pace the sample is fed: a live engine sends it at 1. */
 const PACE = 4;
+/** A broadcast with key frames far apart: this many stream seconds between two, and this many of them. */
+const KEY_FRAMES_APART = 28;
+const FAR_APART_GOPS = 4;
 
 const PLAN_SETTINGS = {
   previewMode: "video",
@@ -61,6 +64,21 @@ function playlistEnd(path: string): number {
   return mediaSequence * 2 + segments.reduce((total, segment) => total + segment.duration, 0);
 }
 
+/** A test picture with a tone, for `seconds`. */
+const lavfi = (seconds: number): string[] => [
+  "-f",
+  "lavfi",
+  "-i",
+  "testsrc2=size=480x270:rate=25",
+  "-f",
+  "lavfi",
+  "-i",
+  "sine=frequency=440:sample_rate=48000",
+  "-t",
+  String(seconds),
+];
+const audio = ["-c:a", "aac", "-b:a", "128k"];
+
 function ffmpeg(args: string[]): void {
   execFileSync(FFMPEG ?? "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args]);
 }
@@ -68,48 +86,56 @@ function ffmpeg(args: string[]): void {
 describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sending key frames", () => {
   let directory: string;
   let sample: Buffer;
+  /** Key frames every `KEY_FRAMES_APART` s, and I frames between them that are none to ffmpeg. */
+  let farApart: Buffer;
 
   beforeAll(() => {
     directory = mkdtempSync(join(tmpdir(), "aceswarm-full-stall-"));
-    const lavfi = (seconds: number): string[] => [
-      "-f",
-      "lavfi",
-      "-i",
-      "testsrc2=size=480x270:rate=25",
-      "-f",
-      "lavfi",
-      "-i",
-      "sine=frequency=440:sample_rate=48000",
-      "-t",
-      String(seconds),
-    ];
-    const audio = ["-c:a", "aac", "-b:a", "128k"];
     const first = join(directory, "first.ts");
-    const openGop = join(directory, "open-gop.ts");
     const second = join(directory, "second.ts");
+    // An open GOP whose I frames have no recovery point (x264 writes one, so it is taken out).
+    const withoutRecoveryPoints = (seconds: number, offset: number, path: string): void => {
+      const encoded = `${path}.encoded.ts`;
+      ffmpeg([
+        ...lavfi(seconds),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-x264-params",
+        "open-gop=1:keyint=50:min-keyint=50:scenecut=0",
+        ...audio,
+        "-output_ts_offset",
+        String(offset),
+        encoded,
+      ]);
+      ffmpeg(["-i", encoded, "-map", "0", "-c", "copy", "-bsf:v", "filter_units=remove_types=6", "-f", "mpegts", path]);
+    };
     ffmpeg([...lavfi(WITH_KEY_FRAMES), "-c:v", "libx264", "-preset", "veryfast", "-g", "50", ...audio, first]);
-    // Then I frames every 2 s that are no key frames to ffmpeg: an open GOP whose I frames have
-    // no recovery point (x264 writes one, so it is taken out), with several reference frames.
-    ffmpeg([
-      ...lavfi(WITHOUT_KEY_FRAMES),
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-x264-params",
-      "open-gop=1:keyint=50:min-keyint=50:scenecut=0",
-      ...audio,
-      "-output_ts_offset",
-      String(WITH_KEY_FRAMES),
-      openGop,
-    ]);
-    ffmpeg(["-i", openGop, "-map", "0", "-c", "copy", "-bsf:v", "filter_units=remove_types=6", "-f", "mpegts", second]);
+    // Then I frames every 2 s that are no key frames to ffmpeg, with several reference frames.
+    withoutRecoveryPoints(WITHOUT_KEY_FRAMES, WITH_KEY_FRAMES, second);
     sample = Buffer.concat([readFileSync(first), readFileSync(second)]);
     writeFileSync(join(directory, "sample.ts"), sample);
+    // Each encode starts with a key frame, and has only such I frames after it.
+    const gops = Array.from({ length: FAR_APART_GOPS }, (_, index) => {
+      const path = join(directory, `gop-${String(index)}.ts`);
+      withoutRecoveryPoints(KEY_FRAMES_APART, index * KEY_FRAMES_APART, path);
+      return readFileSync(path);
+    });
+    farApart = Buffer.concat(gops);
   }, 120_000);
 
   afterAll(() => {
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  /** A pipeline's settings for these tests. */
+  const settings = (previewMode: PlanSettings["previewMode"], stallMs: number): PipelineSettings => ({
+    hlsDir: join(directory, "hls"),
+    ffmpegPath: FFMPEG ?? "ffmpeg",
+    handoverTimeoutMs: 120_000,
+    plan: { ...PLAN_SETTINGS, previewMode },
+    stuck: { fullOutputStallMs: stallMs, maxMemoryGrowthBytes: 512 * 1024 * 1024 },
   });
 
   const bytesPerSecond = (): number => (sample.length / (WITH_KEY_FRAMES + WITHOUT_KEY_FRAMES)) * PACE;
@@ -156,20 +182,28 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
   describe("in a pipeline", () => {
     let server: Server;
     let url: string;
-    /** When the broadcast began: each test plays it from its start. */
+    /** When the broadcast began: each test plays it from its start, or near it. */
     let liveSince = Date.now();
+    /** What the broadcast sends, and how many bytes of it a second at `PACE`. */
+    let live: { data: Buffer; rate: number } = { data: Buffer.alloc(0), rate: 0 };
+
+    function plays(data: Buffer, seconds: number, joinedAt = 0): void {
+      live = { data, rate: (data.length / seconds) * PACE };
+      liveSince = Date.now() - (joinedAt / PACE) * 1000;
+    }
 
     beforeAll(async () => {
       // An engine of a live broadcast: every connection gets the stream from where it is now.
       server = createServer((request, response) => {
         response.writeHead(200, { "content-type": "video/mp2t" });
+        const { data, rate } = live;
         const elapsed = (Date.now() - liveSince) / 1000;
-        let at = Math.floor((elapsed * bytesPerSecond()) / PACKET) * PACKET;
+        let at = Math.floor((elapsed * rate) / PACKET) * PACKET;
         const timer = setInterval(() => {
-          const next = Math.min(sample.length, at + Math.round(bytesPerSecond() / 50));
-          response.write(sample.subarray(at, next));
+          const next = Math.min(data.length, at + Math.round(rate / 50));
+          response.write(data.subarray(at, next));
           at = next;
-          if (at < sample.length) {
+          if (at < data.length) {
             return;
           }
           clearInterval(timer);
@@ -196,24 +230,13 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       async (previewMode) => {
         const started: { reason: string; at: number }[] = [];
         const id = `stall-${previewMode}`;
-        liveSince = Date.now();
-        const pipeline = new Pipeline(
-          id,
-          {
-            hlsDir: join(directory, "hls"),
-            ffmpegPath: FFMPEG ?? "ffmpeg",
-            handoverTimeoutMs: 120_000,
-            plan: { ...PLAN_SETTINGS, previewMode },
-            stuck: { fullOutputStallMs: 8000, maxMemoryGrowthBytes: 512 * 1024 * 1024 },
+        plays(sample, WITH_KEY_FRAMES + WITHOUT_KEY_FRAMES);
+        const pipeline = new Pipeline(id, settings(previewMode, 8000), createLogger("test", "silent"), {
+          generationStarted: (_id, reason) => {
+            started.push({ reason, at: (Date.now() - liveSince) / 1000 });
           },
-          createLogger("test", "silent"),
-          {
-            generationStarted: (_id, reason) => {
-              started.push({ reason, at: (Date.now() - liveSince) / 1000 });
-            },
-            handover: () => undefined,
-          },
-        );
+          handover: () => undefined,
+        });
         try {
           await pipeline.start(url, false);
           const keyFramesStop = WITH_KEY_FRAMES / PACE;
@@ -253,5 +276,32 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       },
       90_000,
     );
+
+    // A copy starts at a key frame, and its first segment ends at the next one: the stall time
+    // counts from its first frame, not from the decoder's first picture, which an I frame between
+    // the key frames gives a key frame earlier.
+    it("leaves a copy alone whose key frames are far apart, joined between two", async () => {
+      const started: string[] = [];
+      const id = "far-apart";
+      plays(farApart, KEY_FRAMES_APART * FAR_APART_GOPS, 1);
+      // 10 s here is 40 s of the broadcast: more than its 28 s between key frames, not two of them.
+      const pipeline = new Pipeline(id, settings("video", 10_000), createLogger("test", "silent"), {
+        generationStarted: (_id, reason) => {
+          started.push(reason);
+        },
+        handover: () => undefined,
+      });
+      try {
+        await pipeline.start(url, false);
+        const full = join(directory, "hls", id, "g1", "full", "index.m3u8");
+        // Until a second after its third key frame, at 84 s, when the second full segment is out.
+        await sleep(((KEY_FRAMES_APART * 3 - 1) / PACE + 2) * 1000);
+        expect(started).toEqual(["start"]);
+        expect(pipeline.status().mode).toBe("copy");
+        expect(parseMediaPlaylist(readFileSync(full, "utf8")).segments).toHaveLength(2);
+      } finally {
+        await pipeline.stop();
+      }
+    }, 90_000);
   });
 });

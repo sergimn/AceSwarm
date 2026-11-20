@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 
 const H264 = "  Stream #0:0[0x100]: Video: h264 (High), yuv420p(progressive), 1920x1080, 25 fps\n";
+const HEVC = "  Stream #0:0[0x100]: Video: hevc (Main), yuv420p(tv), 1920x1080, 25 fps\n";
 const MB = 1024 * 1024;
 
 /** An ffmpeg process that runs until the test ends it, and notes how it was stopped. */
@@ -287,6 +288,33 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     });
     expect(fullCodec(runs[2])).toBe("libx264");
     expect(runs[2]).not.toContain("-skip_frame");
+  });
+
+  it("keeps the stream's last frame when the run started again finds that the video is not H.264", async () => {
+    const instance = start();
+    await instance.start("http://engine-1/play", false);
+    (children[0]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 10; at += 1) {
+      await second(0, true, at * 25);
+    }
+    for (let at = 11; at <= 40; at += 1) {
+      await second(0, false, at * 25);
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(2);
+    });
+    const { lastFrameAt, restartedAt } = instance.status();
+    expect(lastFrameAt).not.toBeNull();
+    // The broadcast moved on to HEVC: the run is replaced by one that re-encodes it, which the
+    // controller waits for as well.
+    (children[1]?.stderr as PassThrough).write(HEVC);
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(fullCodec(runs[2])).toBe("libx264");
+    await vi.waitFor(() => {
+      expect(instance.status()).toMatchObject({ mode: "transcode", lastFrameAt, restartedAt });
+    });
   });
 
   it("leaves a run alone whose source stopped: nothing makes video, and the controller deals with it", async () => {

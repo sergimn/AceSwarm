@@ -63,7 +63,7 @@ function lateReason(edge: LiveEdgeView): string {
  * after the stream's last video, and within the startup grace of that video. Its new run starts like
  * one the controller started: it may take a while, as a broadcast whose copy can't be cut takes two
  * restarts and a re-encode. Undefined otherwise. A restart long after the stream's last video counts
- * for nothing: the transcoder restarts a run that makes no video of its own only for so long.
+ * for nothing: a run that makes no video of its own gets that wait once, not after each restart.
  */
 function restartedAfterVideo(
   pipeline: PipelineStatus | undefined,

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Generation } from "../src/generation.ts";
-import { MEMORY_SETTLES_MS, processMemory, StuckRuns, type MemoryReader } from "../src/stuck-runs.ts";
+import { MEMORY_SETTLES_MS, processMemory, StuckRuns, type MemoryReader, type Stuck } from "../src/stuck-runs.ts";
 
 const MB = 1024 * 1024;
 
@@ -36,7 +36,7 @@ describe("StuckRuns", () => {
 
   function runs(stallSeconds = 30, growthMb = 512, memoryOf: MemoryReader = () => 100 * MB): StuckRuns {
     const limits = { fullOutputStallMs: stallSeconds * 1000, maxMemoryGrowthBytes: growthMb * MB };
-    return new StuckRuns(limits, memoryOf, () => clock.now);
+    return new StuckRuns(limits, 10, { memoryOf, now: () => clock.now });
   }
 
   beforeEach(async () => {
@@ -67,14 +67,33 @@ describe("StuckRuns", () => {
     clock.now += seconds * 1000;
   }
 
-  /** The first run plays, then its full output stalls for 30 s: it is started again. */
-  async function firstStalls(watch: StuckRuns): Promise<void> {
+  /**
+   * `count` checks, `every` seconds apart, each once the run of `of` made what `make` writes: none
+   * may find it stuck but the last, and what that one found is returned.
+   */
+  async function play(
+    watch: StuckRuns,
+    count: number,
+    every: number,
+    make: () => Promise<void>,
+    of = generation,
+  ): Promise<Stuck | undefined> {
+    for (let check = 1; check < count; check += 1) {
+      after(every);
+      await make();
+      expect(watch.check(of)).toBeUndefined();
+    }
+    after(every);
+    await make();
+    return watch.check(of);
+  }
+
+  /** The first run plays, then its full output stalls for the stall time: it is started again. */
+  async function firstStalls(watch: StuckRuns, stallSeconds = 30): Promise<void> {
     await fullSegment();
     await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    after(30);
-    await previewSegment();
-    expect(watch.check(generation)?.reencode).toBe(false);
+    expect((await play(watch, stallSeconds / 2, 2, previewSegment))?.reencode).toBe(false);
   }
 
   it("leaves a run alone while its full output keeps writing segments", async () => {
@@ -113,17 +132,18 @@ describe("StuckRuns", () => {
     await fullSegment();
     generation.frames = 25;
     expect(watch.check(generation)).toBeUndefined();
-    after(31);
-    generation.frames = 1500;
-    expect(watch.check(generation)?.details).toEqual({ seconds: 31, frames: 1500 });
+    const counted = async (): Promise<void> => {
+      generation.frames += 25;
+      await Promise.resolve();
+    };
+    expect((await play(watch, 30, 1, counted))?.details).toEqual({ seconds: 30, frames: 775 });
 
+    // A thumbnail every 10 s, its interval, and nothing else: no pause of the source.
     const thumbnails = runs();
     const other = run(directory, 4243);
     await wrote("thumbnail.jpg");
     expect(thumbnails.check(other)).toBeUndefined();
-    after(40);
-    await wrote("thumbnail.jpg");
-    expect(thumbnails.check(other)?.reason).toBe("full-output-stalled");
+    expect((await play(thumbnails, 3, 10, () => wrote("thumbnail.jpg"), other))?.reason).toBe("full-output-stalled");
   });
 
   it("leaves a run alone that makes no video at all: its source stopped, which the controller handles", async () => {
@@ -147,15 +167,11 @@ describe("StuckRuns", () => {
     expect(watch.check(generation)).toBeUndefined();
     await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    after(20);
-    await previewSegment();
-    expect(watch.check(generation)).toBeUndefined();
-    after(2);
+    expect(await play(watch, 11, 2, previewSegment)).toBeUndefined();
+    after(1);
     await fullSegment();
     expect(watch.check(generation)).toBeUndefined();
-    after(18);
-    await previewSegment();
-    expect(watch.check(generation)).toBeUndefined();
+    expect(await play(watch, 14, 2, previewSegment)).toBeUndefined();
   });
 
   it("finds a run whose full output never wrote a segment while its preview went on", async () => {
@@ -163,9 +179,67 @@ describe("StuckRuns", () => {
     after(5);
     await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    after(30);
+    expect((await play(watch, 15, 2, previewSegment))?.details).toEqual({ seconds: 30, frames: 0 });
+  });
+
+  it("counts a run with no full segment yet from its first frame: its copy can start no earlier", async () => {
+    const watch = runs();
+    // The decoder shows pictures from an I frame that a copy can't start at: ffmpeg counts no frame
+    // until the next key frame, 20 s on, and the full output's first segment ends at the one after.
     await previewSegment();
-    expect(watch.check(generation)?.details).toEqual({ seconds: 30, frames: 0 });
+    expect(watch.check(generation)).toBeUndefined();
+    expect(await play(watch, 10, 2, previewSegment)).toBeUndefined();
+    const counted = async (): Promise<void> => {
+      generation.frames += 50;
+      await previewSegment();
+    };
+    expect(await play(watch, 12, 2, counted)).toBeUndefined();
+    after(1);
+    await fullSegment();
+    expect(watch.check(generation)).toBeUndefined();
+
+    // Without that segment, it is stuck the stall time after its first frame.
+    const late = runs();
+    const lateDirectory = await mkdtemp(join(tmpdir(), "stuck-runs-late-"));
+    await mkdir(join(lateDirectory, "preview"));
+    const other = run(lateDirectory, 4243);
+    const preview = (): Promise<void> => previewSegment(lateDirectory);
+    await preview();
+    expect(late.check(other)).toBeUndefined();
+    expect(await play(late, 10, 2, preview, other)).toBeUndefined();
+    const frames = async (): Promise<void> => {
+      other.frames += 50;
+      await preview();
+    };
+    expect((await play(late, 16, 2, frames, other))?.details).toEqual({ seconds: 30, frames: 800 });
+    await rm(lateDirectory, { recursive: true, force: true });
+  });
+
+  it("leaves a pause of the source out: the full output writes on once it is back", async () => {
+    const watch = runs();
+    for (let second = 0; second <= 20; second += 2) {
+      await fullSegment();
+      await previewSegment();
+      generation.frames = second * 25;
+      expect(watch.check(generation)).toBeUndefined();
+      after(2);
+    }
+    // Nothing for 35 s: more than the 10 s between thumbnails, and then some.
+    for (let second = 0; second < 35; second += 1) {
+      after(1);
+      expect(watch.check(generation)).toBeUndefined();
+    }
+    // Back: its first frames come before its next key frame, which the full output's segment ends at.
+    const counted = async (): Promise<void> => {
+      generation.frames += 25;
+      await previewSegment();
+    };
+    expect(await play(watch, 3, 1, counted)).toBeUndefined();
+    await fullSegment();
+    expect(watch.check(generation)).toBeUndefined();
+
+    // Its full output stops later on: that is found, the stall time after its last segment.
+    expect((await play(watch, 30, 1, counted))?.reason).toBe("full-output-stalled");
   });
 
   it("uses the stall time it is given", async () => {
@@ -275,9 +349,7 @@ describe("StuckRuns", () => {
     generation.state = "starting";
     await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    after(30);
-    await previewSegment();
-    expect(watch.check(generation)?.reason).toBe("full-output-stalled");
+    expect((await play(watch, 15, 2, previewSegment))?.reason).toBe("full-output-stalled");
   });
 
   describe("when the run that replaced a stalled one stalls too", () => {
@@ -296,17 +368,21 @@ describe("StuckRuns", () => {
       await rm(nextDirectory, { recursive: true, force: true });
     });
 
+    const nextPreview = (): Promise<void> => previewSegment(nextDirectory);
+
+    /** The new run makes previews from 5 s on, but its copy gets no frame: no key frame comes. */
+    async function nextStalls(watch: StuckRuns, stallSeconds = 30): Promise<Stuck | undefined> {
+      after(5);
+      await nextPreview();
+      expect(watch.check(next)).toBeUndefined();
+      return play(watch, stallSeconds / 2, 2, nextPreview, next);
+    }
+
     it("re-encodes the full stream when its copy never wrote a segment, and so do the stream's later runs", async () => {
       const watch = runs();
       await firstStalls(watch);
       expect(watch.copyFails).toBe(false);
-      // The new run makes previews from 5 s on, but the copy gets no frame: no key frame comes.
-      after(5);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)).toBeUndefined();
-      after(30);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)).toEqual({
+      expect(await nextStalls(watch)).toEqual({
         reason: "full-output-stalled",
         reencode: true,
         message:
@@ -316,33 +392,56 @@ describe("StuckRuns", () => {
       expect(watch.copyFails).toBe(true);
     });
 
+    it("re-encodes with a long stall time too: the new run has that long, and 5 minutes more", async () => {
+      const watch = runs(300);
+      await firstStalls(watch, 300);
+      expect((await nextStalls(watch, 300))?.reencode).toBe(true);
+    });
+
     it("starts a copy again when the new run had full segments before it stalled", async () => {
       const watch = runs();
       await firstStalls(watch);
       after(5);
-      await previewSegment(nextDirectory);
+      await nextPreview();
       after(2);
       await fullSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
-      after(30);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)?.reencode).toBe(false);
+      expect((await play(watch, 15, 2, nextPreview, next))?.reencode).toBe(false);
+      expect(watch.copyFails).toBe(false);
+    });
+
+    it("starts a copy again once a later run wrote a full segment, whatever stalls after", async () => {
+      const watch = runs();
+      await firstStalls(watch);
+      // The new run plays: the copy can be cut after all. Another one replaces it (a new source,
+      // say), and its copy gets nothing.
+      after(5);
+      await nextPreview();
+      await fullSegment(nextDirectory);
+      expect(watch.check(next)).toBeUndefined();
+      const third = run(directory, 4545);
+      await rm(join(directory, "full", "index.m3u8"));
+      after(5);
+      await previewSegment();
+      expect(watch.check(third)).toBeUndefined();
+      expect((await play(watch, 15, 2, previewSegment, third))?.reencode).toBe(false);
       expect(watch.copyFails).toBe(false);
     });
 
     it("starts a copy again when the new run stalls long after", async () => {
-      const watch = runs();
-      await firstStalls(watch);
-      // Its first video comes so late that it is found stalled a second after the 5 minutes.
-      after(5 * 60 - 29);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)).toBeUndefined();
-      after(29);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)).toBeUndefined();
-      after(1);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)?.reencode).toBe(false);
+      // Its first video comes so late that it is found stalled a second after the stall time and
+      // the 5 minutes; with a second less, it re-encodes.
+      for (const [late, reencode] of [
+        [5 * 60, true],
+        [5 * 60 + 1, false],
+      ] as const) {
+        const watch = runs();
+        await firstStalls(watch);
+        after(late);
+        await nextPreview();
+        expect(watch.check(next)).toBeUndefined();
+        expect((await play(watch, 15, 2, nextPreview, next))?.reencode).toBe(reencode);
+      }
     });
 
     it("never re-encodes for a run that re-encodes already, nor after a run whose memory grew", async () => {
@@ -357,20 +456,13 @@ describe("StuckRuns", () => {
       memory = 2000 * MB;
       expect(watch.check(generation)?.reason).toBe("memory");
       memory = 100 * MB;
-      after(5);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)).toBeUndefined();
-      after(30);
-      await previewSegment(nextDirectory);
-      expect(watch.check(next)?.reencode).toBe(false);
+      expect((await nextStalls(watch))?.reencode).toBe(false);
 
       const transcoding = run(nextDirectory, 4444, "transcode");
       after(5);
-      await previewSegment(nextDirectory);
+      await nextPreview();
       expect(watch.check(transcoding)).toBeUndefined();
-      after(30);
-      await previewSegment(nextDirectory);
-      expect(watch.check(transcoding)?.reencode).toBe(false);
+      expect((await play(watch, 15, 2, nextPreview, transcoding))?.reencode).toBe(false);
       expect(watch.copyFails).toBe(false);
     });
   });
