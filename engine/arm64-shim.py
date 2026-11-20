@@ -2,9 +2,9 @@
 # the engine's own main.py, which then runs unchanged from its folder.
 #
 # The engine asks its Android bridge (app_bridge.py, in the engine's folder) for the free space of
-# the cache folder, through getAvailableBlocks, getBlockSize and getBlockCount. The image's bridge
-# does not answer those calls, so the engine's disk cache cannot be used there. This file answers
-# them from the file system itself, and passes every other call on to the bridge.
+# its cache folder through getAvailableBlocks, getBlockSize and getBlockCount, which the image's
+# bridge does not answer. This file answers those three calls from the file system, and passes
+# every other call on to the bridge.
 #
 # Nothing of the engine or of its wrapper is copied into this file: it only changes what they call.
 
@@ -15,14 +15,15 @@ import sys
 ENGINE_DIR = '/acestream'
 ENGINE_MAIN = os.path.join(ENGINE_DIR, 'main.py')
 
-# Calls answered from the file system, with the free and total space of the folder they name.
-DISK_CALLS = ('getAvailableBlocks', 'getBlockSize', 'getBlockCount', 'getAvailableBytes',
-              'getFreeBytes', 'getTotalBytes')
+# The calls answered here. The engine names the folder it asks about as the first argument.
+DISK_CALLS = ('getAvailableBlocks', 'getBlockSize', 'getBlockCount')
+
+_announced = False
 
 
 def existing_folder(path):
     # The engine may name a folder it has not made yet: ask about the closest one that exists.
-    path = os.path.abspath(path or '/')
+    path = os.path.abspath(path)
     while not os.path.isdir(path):
         parent = os.path.dirname(path)
         if parent == path:
@@ -31,22 +32,32 @@ def existing_folder(path):
     return path
 
 
+def disk_folder(method, args):
+    if args and isinstance(args[0], str) and args[0]:
+        return args[0]
+    # Without a folder argument, the cache folder the entrypoint made for this engine.
+    folder = os.environ.get('ACESWARM_CACHE_DIR', '')
+    if not folder:
+        raise ValueError('%s: no folder was given and ACESWARM_CACHE_DIR is not set' % method)
+    return folder
+
+
 def disk_call(method, args):
-    folder = args[0] if args and isinstance(args[0], str) else '/'
+    global _announced
+    folder = disk_folder(method, args)
     st = os.statvfs(existing_folder(folder))
+    if not _announced:
+        _announced = True
+        sys.stderr.write('arm64-shim: answering disk-space calls for %s\n' % folder)
     if method == 'getAvailableBlocks':
         return st.f_bavail
     if method == 'getBlockSize':
         return st.f_frsize
-    if method == 'getBlockCount':
-        return st.f_blocks
-    if method in ('getAvailableBytes', 'getFreeBytes'):
-        return st.f_bavail * st.f_frsize
-    return st.f_blocks * st.f_frsize  # getTotalBytes
+    return st.f_blocks  # getBlockCount
 
 
 def install_disk_calls():
-    # The bridge module the engine imports (its folder is first on sys.path, see main below).
+    # The bridge module the engine imports: its folder is first on sys.path once main() runs.
     import app_bridge
     bridge = app_bridge.Android
     fake_rpc = bridge._fake_rpc

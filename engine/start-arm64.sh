@@ -6,6 +6,13 @@ cd /acestream
 # ACESWARM_MEMORY_CACHE_BYTES caps the stream data the engine keeps in memory (--memory-cache-limit).
 # Without a cap that cache grows for over an hour, past what an engine needs. 0 leaves the size to
 # the engine, which picks it from the host's RAM (1 GiB on hosts with 4 GB or more).
+live_bytes="${ACESWARM_LIVE_CACHE_BYTES:-104857600}"
+case "$live_bytes" in
+  ""|*[!0-9]*)
+    echo "ACESWARM_LIVE_CACHE_BYTES must be a number of bytes, got '$live_bytes'" >&2
+    exit 64
+    ;;
+esac
 cache_bytes="${ACESWARM_MEMORY_CACHE_BYTES:-134217728}"
 cache_limit=""
 case "$cache_bytes" in
@@ -33,7 +40,7 @@ case "$disk_bytes" in
     cache_flags="--cache-dir $ACESWARM_CACHE_DIR --live-cache-type disk --disk-cache-limit $disk_bytes --cache-auto 0"
     ;;
   *)
-    cache_flags="--live-cache-type memory --live-mem-cache-size ${ACESWARM_LIVE_CACHE_BYTES:-104857600}"
+    cache_flags="--live-cache-type memory --live-mem-cache-size $live_bytes"
     ;;
 esac
 # cache_flags, cache_limit and ACESWARM_ENGINE_FLAGS hold space separated engine options, so they are
