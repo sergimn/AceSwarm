@@ -317,6 +317,8 @@ export interface PipelineStatus {
    * When the source players get last changed its layout mid-stream (its video moved to another
    * PID or codec, or the like); null if it never did. A new ffmpeg run takes over right at the
    * change, so `state` is `starting` and `lastFrameAt` stands still for a few seconds after it.
+   * Only a change after a run that showed video counts here: changes over a stream that has no
+   * video move nothing, so they can't keep it from being taken for stalled.
    */
   layoutChangedAt: string | null;
   exitCode: number | null;

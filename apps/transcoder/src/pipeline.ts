@@ -311,12 +311,11 @@ export class Pipeline {
         const prefix = `../g${String(generation.number)}/${variant}/`;
         const added = this.playlists[variant].append(generation.number, segments, prefix, this.now());
         if (variant === "full" && added > 0 && !generation.published) {
-          // Its video counts from now on: players can get it. A run that took over mid-stream has
-          // a segment out before ffmpeg first reports its frames: that is the stream's new video.
-          // Any other run that has no frame yet leaves the last one it carries, if any (see `swap`).
-          const { lastFrameAt, midStream, publishedFrameAt } = generation;
+          // Its video counts from now on: players can get it. A run that has no frame of its own
+          // yet leaves the last one it carries, if any (see `swap`, and `Generation.takeOver`):
+          // a segment alone is no video, it may hold nothing but sound.
           generation.published = true;
-          generation.publishedFrameAt = lastFrameAt ?? (midStream ? this.now() : publishedFrameAt);
+          generation.publishedFrameAt = generation.lastFrameAt ?? generation.publishedFrameAt;
         }
       }
     }
@@ -529,7 +528,7 @@ export class Pipeline {
    * found at its start, so it would get no more video). Starts a run in its place that reads on
    * from here, on the same connection: the reader ends the old run's input and gives the new one
    * the stream's tables and everything after them. With `how.drain`, what the old run still writes
-   * out is published before the new run's output, so players lose nothing.
+   * out is published before the new run's output, so players get the old run to its last frame.
    */
   private succeed(old: Generation, how: Succession, reason: string): Generation | undefined {
     const slot = [this.active, this.pending].indexOf(old);
@@ -540,8 +539,10 @@ export class Pipeline {
     const next = this.create({ source, stat, inputTimeoutSeconds, mode: how.mode, midStream: how.midStream });
     next.takeOver(old, how.layout);
     this[slot === 0 ? "active" : "pending"] = next;
-    if (how.change !== undefined && slot === 0) {
-      // Players get no new video until the new run has some out: the controller allows for that.
+    if (how.change !== undefined && slot === 0 && old.frames > 0) {
+      // Players get no new video until the new run has some out: the controller allows for that
+      // (see `PipelineStatus.layoutChangedAt`), but only after a run that had video of its own.
+      // Tables that keep changing over a stream without video must not look like one that has it.
       this.layoutChangedAt = this.now();
     }
     try {

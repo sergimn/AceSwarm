@@ -4,6 +4,7 @@ import {
   changeKind,
   crc32,
   describeLayout,
+  formatOf,
   LayoutChanges,
   streamPids,
   TsTables,
@@ -56,6 +57,10 @@ function feed(tables: TsTables, ...parts: Uint8Array[]): Layout[] {
 const codec = (type: number, descriptors: number[] = []): string | undefined =>
   videoCodecOf({ pid: 256, type, descriptors: Uint8Array.from(descriptors) });
 
+/** What a demuxer takes a stream of this type with these descriptors for. */
+const format = (type: number, descriptors: number[] = []): string | undefined =>
+  formatOf({ pid: 256, type, descriptors: Uint8Array.from(descriptors) });
+
 /** A language descriptor ("eng"), then a registration descriptor with these four letters. */
 const LANGUAGE = [0x0a, 0x04, 0x65, 0x6e, 0x67, 0x00];
 const registration = (letters: string): number[] => [...LANGUAGE, 0x05, 0x04, ...Buffer.from(letters)];
@@ -92,9 +97,6 @@ describe("TsTables", () => {
     expect(describeLayout(layout!)).toBe("program 1 [256:h264 257:0x0f]");
     expect(videoCodecOfLayout(layout!)).toBe("h264");
     expect([...streamPids(layout!)]).toEqual([256, 257]);
-    expect(tables.carriesTables(0)).toBe(true);
-    expect(tables.carriesTables(REAL_PMT_PID)).toBe(true);
-    expect(tables.carriesTables(256)).toBe(false);
   });
 
   it("tells of a layout once, however often the same tables come", () => {
@@ -141,6 +143,74 @@ describe("TsTables", () => {
     expect(changeKind(before!, after!)).toBe("other");
     const more = [...H264, { pid: 300, type: 0x06, descriptors: [0x59, 0x00] }];
     expect(feed(tables, pmtPackets(more, 2))).toHaveLength(1);
+  });
+
+  it("takes what tells a reader of video and audio nothing for no change, and still knows of it", () => {
+    const tables = new TsTables();
+    const [first] = feed(tables, tablePackets(H264));
+    // Subtitles come, the audio says its language, and cue messages come: nothing a reader follows.
+    const subtitles = { pid: 300, type: 0x06, descriptors: [0x59, 0x00] };
+    const spoken = { pid: 257, type: 0x0f, descriptors: LANGUAGE };
+    const cues = { pid: 301, type: 0x86 };
+    expect(feed(tables, pmtPackets([...H264, subtitles], 1))).toEqual([]);
+    expect(describeLayout(tables.layout!)).toBe("program 1 [256:h264 257:0x0f 300:0x06]");
+    expect(feed(tables, pmtPackets([H264[0]!, spoken, subtitles, cues], 2))).toEqual([]);
+    expect(describeLayout(tables.layout!)).toBe("program 1 [256:h264 257:0x0f 300:0x06 301:0x86]");
+    expect(streamPids(tables.layout!)).toEqual(new Set([256, 257, 300, 301]));
+    // They go again, and the tables are the first ones: the same layout all along.
+    expect(feed(tables, pmtPackets(H264, 3))).toEqual([]);
+    expect(tables.layout?.key).toBe(first?.key);
+  });
+
+  it("tells of a stream that may be video or audio, though its table doesn't say which", () => {
+    const tables = new TsTables();
+    feed(tables, tablePackets(H264));
+    // A private stream that says nothing about itself: a demuxer finds out from its data.
+    const unnamed = { pid: 300, type: 0x06 };
+    expect(feed(tables, pmtPackets([...H264, unnamed], 1))).toHaveLength(1);
+    // It names its format, and then another one: both are changes.
+    const ac3 = { pid: 300, type: 0x06, descriptors: [...LANGUAGE, 0x6a, 0x01, 0x00] };
+    expect(feed(tables, pmtPackets([...H264, ac3], 2))).toHaveLength(1);
+    const dts = { pid: 300, type: 0x06, descriptors: [...LANGUAGE, 0x7b, 0x00] };
+    expect(feed(tables, pmtPackets([...H264, dts], 3))).toHaveLength(1);
+    // More about the same format (here the AC-3 descriptor's own details) is none.
+    feed(tables, pmtPackets([...H264, ac3], 4));
+    const ac3Again = { pid: 300, type: 0x06, descriptors: [0x6a, 0x02, 0x80, 0x42] };
+    expect(feed(tables, pmtPackets([...H264, ac3Again], 5))).toEqual([]);
+  });
+
+  it("says what a demuxer takes a stream for", () => {
+    expect(format(0x1b)).toBe("27:");
+    expect(format(0x1b, LANGUAGE)).toBe("27:");
+    expect(format(0x06, registration("HEVC"))).toBe(`6:0504${Buffer.from("HEVC").toString("hex")}`);
+    expect(format(0x06, registration("HEVC"))).not.toBe(format(0x06, registration("AV01")));
+    expect(format(0x06, [0x6a, 0x01, 0x00])).toBe("6:6a");
+    expect(format(0x06)).toBe("6:");
+    // Neither video nor audio: by their type, or by what a private stream's descriptors say.
+    for (const type of [0x05, 0x0b, 0x15, 0x86]) {
+      expect(format(type, registration("CUEI"))).toBeUndefined();
+    }
+    expect(format(0x06, [0x56, 0x00])).toBeUndefined();
+    expect(format(0x06, [...LANGUAGE, 0x59, 0x00])).toBeUndefined();
+    // A private stream that names a format is that, whatever else it says.
+    expect(format(0x06, [0x59, 0x00, 0x7a, 0x00])).toBe("6:7a");
+  });
+
+  it("leaves a PAT in more than one section alone: the layout stays what it was, or unknown", () => {
+    const body = Uint8Array.of(0x00, 0x01, 0xf0, 0x00);
+    const firstOfTwo = sectionPackets(0, section(0x00, 1, body, 0, true, 1));
+    const unknown = new TsTables();
+    expect(feed(unknown, firstOfTwo, pmtPackets(H264))).toEqual([]);
+    expect(unknown.layout).toBeUndefined();
+    // The same section as the only one is a table like any other.
+    const whole = sectionPackets(0, section(0x00, 1, body));
+    expect(feed(new TsTables(), whole, pmtPackets(H264))).toHaveLength(1);
+
+    const known = new TsTables();
+    feed(known, tablePackets(H264));
+    const elsewhere = section(0x00, 1, Uint8Array.of(0x00, 0x02, 0xf0, 0x10), 1, true, 1);
+    expect(feed(known, sectionPackets(0, elsewhere, 1))).toEqual([]);
+    expect(describeLayout(known.layout!)).toBe("program 1 [256:h264 257:0x0f]");
   });
 
   it("leaves the layout as it is when a section is damaged", () => {
@@ -229,7 +299,6 @@ describe("TsTables", () => {
     feed(tables, tablePackets(H264, 0x10_00));
     // The PAT points elsewhere: what the old PMT said no longer counts, and its PID carries no tables.
     expect(feed(tables, patPackets([[1, 0x10_10]], 1))).toEqual([]);
-    expect(tables.carriesTables(0x10_00)).toBe(false);
     expect(feed(tables, pmtPackets(HEVC, 1))).toEqual([]);
     const [layout] = feed(tables, pmtPackets(H264, 0, 0x10_10));
     expect(layout?.programs[0]?.pmtPid).toBe(0x10_10);

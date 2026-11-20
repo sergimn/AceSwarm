@@ -65,6 +65,8 @@ function lateReason(edge: LiveEdgeView): string {
  * transcoder then needs a few seconds to show video from the new layout. The change itself tells
  * that the broadcast is back, so the time without frames counts from it: the stream is not taken
  * for stalled, or moved to a standby, for a pause that the transcoder is already getting over.
+ * The transcoder only reports a change that followed video (a run that showed frames of its own),
+ * so tables that keep changing over a stream without video don't hold a stall off.
  * Undefined while the stream showed no video yet.
  */
 export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | undefined {

@@ -57,27 +57,44 @@ function fakeEngine() {
   const requests: { url: string; aborted: () => boolean }[] = [];
   const bodies: ReadableStreamDefaultController<Uint8Array>[] = [];
   const answers: Response[] = [];
+  /** Called when the reader next asks for more of a stream and has to wait: it is done with all it got. */
+  let wake: (() => void) | undefined;
+  const nextWait = (): Promise<unknown> => {
+    const { promise, resolve } = Promise.withResolvers<unknown>();
+    wake = () => {
+      resolve(undefined);
+    };
+    return promise;
+  };
   const fetch = (url: string, init: RequestInit): Promise<Response> => {
     requests.push({ url, aborted: () => init.signal?.aborted === true });
     const answer = answers.shift();
     if (answer !== undefined) {
       return Promise.resolve(answer);
     }
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        bodies.push(controller);
-        init.signal?.addEventListener("abort", () => {
-          try {
-            controller.error(new Error("aborted"));
-          } catch {
-            // Already closed.
-          }
-        });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          bodies.push(controller);
+          init.signal?.addEventListener("abort", () => {
+            try {
+              controller.error(new Error("aborted"));
+            } catch {
+              // Already closed.
+            }
+          });
+        },
+        pull() {
+          wake?.();
+          wake = undefined;
+        },
       },
-    });
+      // Nothing is asked for ahead of the reader: `pull` is only called when it waits for more.
+      { highWaterMark: 0 },
+    );
     return Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "video/mp2t" } }));
   };
-  return { fetch, requests, bodies, answers };
+  return { fetch, requests, bodies, answers, nextWait };
 }
 
 interface Opened {
@@ -119,21 +136,17 @@ function open(overrides: Partial<SourceRequest> = {}, engine = fakeEngine()): Op
     await vi.waitFor(() => {
       expect(engine.bodies.length).toBeGreaterThan(0);
     });
-    const before = reader.status().bytes;
-    const bytes = concatBytes(...parts);
-    engine.bodies.at(-1)?.enqueue(bytes);
-    await vi.waitFor(() => {
-      expect(reader.status().bytes).toBe(before + bytes.length);
-    });
-    // The reader passes a chunk on in the turns after it counted it.
-    await sleep(5);
+    // It asks for more once it passed on all of this.
+    const done = engine.nextWait();
+    engine.bodies.at(-1)?.enqueue(concatBytes(...parts));
+    await done;
   };
   return { engine, sink, layouts, ends, next, clock, reader, feed };
 }
 
 describe("readSource", () => {
   it("holds the stream back until its tables came, and passes it on with the tables first", async () => {
-    const { sink, layouts, reader, feed } = open();
+    const { sink, layouts, feed } = open();
     await feed(tsPackets(20, 256));
     expect(sink.chunks).toEqual([]);
     expect(layouts).toEqual([]);
@@ -141,7 +154,7 @@ describe("readSource", () => {
     await feed(tablePackets(H264), tsPackets(10, 256));
     expect(layouts).toHaveLength(1);
     expect(layouts[0]).toMatchObject({ previous: undefined, delivered: false });
-    expect(describeLayout(reader.status().layout ?? { programs: [], key: "" })).toBe("program 1 [256:h264 257:0x0f]");
+    expect(describeLayout(layouts[0]?.layout ?? { programs: [], key: "" })).toBe("program 1 [256:h264 257:0x0f]");
     // The tables, what came before them, then the stream as it is (its own tables included).
     expect(sink.pids()).toEqual([
       0,
@@ -251,14 +264,66 @@ describe("readSource", () => {
     expect(layouts).toHaveLength(3);
     const third = recordingSink();
     next.sink = third;
+    // That one came within a minute of the one before it: the next waits twice as long.
     clock.now += 1000;
     await feed(tablePackets(H264, 0x10_00, 5), tsPackets(2, 256));
+    expect(layouts).toHaveLength(3);
+    clock.now += 2500;
+    await feed(tsPackets(4, 256));
     expect(layouts).toHaveLength(3);
     clock.now += 2500;
     await feed(tsPackets(4, 256));
     expect(layouts).toHaveLength(4);
     expect(describeLayout(layouts[3]?.layout ?? { programs: [], key: "" })).toBe("program 1 [256:h264 257:0x0f]");
     expect(third.pids()).toEqual([0, 0x10_00, 256, 256, 256, 256]);
+  });
+
+  it("starts ffmpeg over less and less often for tables that never settle, and at once again when they did", async () => {
+    const { layouts, clock, feed } = open();
+    await feed(tablePackets(H264), tsPackets(3, 256));
+    clock.now += 100_000;
+    const start = clock.now;
+    // The tables take turns every second, for four minutes.
+    const followed: number[] = [];
+    for (let second = 0; second < 240; second += 1) {
+      await feed(tablePackets(second % 2 === 0 ? MOVED : H264, 0x10_00, second + 1), tsPackets(1, 256));
+      if (layouts.length > followed.length + 1) {
+        followed.push((clock.now - start) / 1000);
+      }
+      clock.now += 1000;
+    }
+    // The first change at once, then after waits that double up to a minute.
+    expect(followed).toEqual([0, 3, 9, 21, 45, 93, 153, 213]);
+
+    // The tables said the same for a minute: their next change is followed at once, and one more three seconds later.
+    clock.now += 60_000;
+    const before = layouts.length;
+    await feed(tablePackets(MOVED, 0x10_00, 1), tsPackets(1, 211));
+    expect(layouts).toHaveLength(before + 1);
+    clock.now += 1000;
+    await feed(tablePackets(H264, 0x10_00, 2), tsPackets(1, 256));
+    expect(layouts).toHaveLength(before + 1);
+    clock.now += 2000;
+    await feed(tsPackets(1, 256));
+    expect(layouts).toHaveLength(before + 2);
+  });
+
+  it("goes on as it is when the tables change in what no reader of video and audio follows", async () => {
+    const { sink, layouts, next, clock, feed } = open();
+    await feed(tablePackets(H264), tsPackets(3, 256));
+    clock.now += 60_000;
+    next.sink = recordingSink();
+    // Subtitles come, and the audio names its language.
+    const more: TableStream[] = [
+      H264[0]!,
+      { pid: 257, type: 0x0f, descriptors: [0x0a, 0x04, 0x65, 0x6e, 0x67, 0x00] },
+      { pid: 300, type: 0x06, descriptors: [0x59, 0x00] },
+    ];
+    await feed(tablePackets(more, 0x10_00, 1), tsPackets(2, 256), tsPackets(1, 300));
+    expect(layouts).toHaveLength(1);
+    expect(sink.ended).toBe(false);
+    // The run gets the new tables as they came, and the new stream's packets.
+    expect(sink.pids().slice(-5)).toEqual([0, 0x10_00, 256, 256, 300]);
   });
 
   it("passes on what is not MPEG-TS as it comes", async () => {
@@ -400,17 +465,5 @@ describe("readSource", () => {
       await sleep(5);
     }
     expect(got.reduce((total, bytes) => total + bytes, 0)).toBe((2 + 2 + 4 + 5) * 188);
-  });
-
-  it("counts only the stream's own data as data", async () => {
-    const { reader, clock, feed } = open();
-    await feed(tablePackets(H264), tsPackets(3, 256));
-    expect(reader.status()).toMatchObject({ bytes: 5 * 188, lastDataAt: 1_000_000 });
-    clock.now += 5000;
-    // Tables and padding keep coming while the broadcast sends no video.
-    await feed(tablePackets(H264, 0x10_00, 1), tsPackets(3, NULL_PID));
-    expect(reader.status().lastDataAt).toBe(1_000_000);
-    await feed(tsPackets(1, 257));
-    expect(reader.status().lastDataAt).toBe(1_005_000);
   });
 });

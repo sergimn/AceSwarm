@@ -14,18 +14,27 @@ const HEVC = 0x24;
 /** A stream type the tables give no codec for (private data, without a descriptor that names it). */
 const UNNAMED = 0x06;
 
-/** An ffmpeg process that takes its input and says nothing by itself. */
-function quietProcess(): ChildProcess {
-  const child = new EventEmitter() as ChildProcess;
+/** A fake ffmpeg, and whether it was signalled while its input was still open. */
+type FakeChild = ChildProcess & { signalledWhileReading: boolean };
+
+/**
+ * An ffmpeg process that takes its input and says nothing by itself. The real one reads its input
+ * from a pipe, and while it waits there for more it acts on no signal: a stop must end the input
+ * first, or ffmpeg stays until it is killed three seconds later.
+ */
+function quietProcess(): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  const stdin = new PassThrough();
   Object.assign(child, {
-    stdin: new PassThrough(),
+    stdin,
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     exitCode: null,
     signalCode: null,
     killed: false,
+    signalledWhileReading: false,
     kill: () => {
-      Object.assign(child, { killed: true });
+      Object.assign(child, { killed: true, signalledWhileReading: !stdin.writableEnded });
       return true;
     },
   });
@@ -39,7 +48,7 @@ describe("Pipeline following what its source carries", () => {
   let pipeline: Pipeline | undefined;
   /** The arguments of every ffmpeg run, in order, and the processes. */
   const runs: string[][] = [];
-  const children: ChildProcess[] = [];
+  const children: FakeChild[] = [];
   /** Why each ffmpeg run started, in the same order. */
   const reasons: string[] = [];
   const handovers: string[] = [];
@@ -60,6 +69,8 @@ describe("Pipeline following what its source carries", () => {
     vi.useRealTimers();
     await pipeline?.stop();
     await rm(hlsDir, { recursive: true, force: true });
+    // Whatever a test did, no ffmpeg was left waiting for input with only a signal to end it.
+    expect(children.map((child) => child.signalledWhileReading)).toEqual(children.map(() => false));
   });
 
   function start(): Pipeline {
@@ -384,14 +395,70 @@ describe("Pipeline following what its source carries", () => {
       expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3", "g2:0"]);
       // The old run's end is not the source's: the new run reads on.
       expect(opened[0]?.stopped).toBe(false);
-      // Players have the new run's video, though ffmpeg has not counted its frames yet.
-      expect(instance.status()).toMatchObject({ state: "starting", lastFrameAt: iso(clock.now) });
+      // Players have a segment of the new run, but ffmpeg has counted no frame of it yet: a
+      // segment alone is no video (sound fills one too), so the last frame is the old run's.
+      expect(instance.status()).toMatchObject({ state: "starting", lastFrameAt: iso(lastFrame) });
 
       clock.now += 2000;
       await frames(40, 1);
       await wrote(2, 2);
       expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3", "g2:0", "g2:1"]);
       expect(instance.status()).toMatchObject({ state: "running", lastFrameAt: iso(clock.now), frames: 40 });
+    });
+
+    it("counts the frames the old run still writes out as the stream's, until the new run has its own", async () => {
+      const instance = await playing();
+      clock.now += 5000;
+      opened[0]?.layout(layoutOf(211));
+      // The old run's input ended: it reports the frames it still had, and writes its last segment.
+      clock.now += 400;
+      await frames(112, 0);
+      const written = clock.now;
+      await wrote(1, 4);
+      clock.now += 300;
+      await instance.sync();
+      expect(instance.status()).toMatchObject({ state: "starting", frames: 0, lastFrameAt: iso(written) });
+
+      clock.now += 2000;
+      await frames(30, 1);
+      expect(instance.status()).toMatchObject({ state: "running", frames: 30, lastFrameAt: iso(written) });
+      // The new run's frames count once players can get them.
+      exit(0);
+      await wrote(2, 1);
+      await instance.sync();
+      expect(instance.status()).toMatchObject({ lastFrameAt: iso(clock.now) });
+    });
+
+    it("takes a change for a sign of video only after a run that had video of its own", async () => {
+      const instance = await playing();
+      const lastFrame = clock.now;
+      clock.now += 5000;
+      opened[0]?.layout(layoutOf(211));
+      const first = clock.now;
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(first) });
+
+      // The video is gone, and the tables keep changing: every run ends without a frame.
+      for (const pid of [256, 211, 256]) {
+        clock.now += 3000;
+        expect(opened[0]?.layout(layoutOf(pid))).toBe(true);
+        expect(instance.status()).toMatchObject({ layoutChangedAt: iso(first), lastFrameAt: iso(lastFrame) });
+      }
+      expect(reasons).toEqual(["start", "layout", "layout", "layout", "layout"]);
+      // Sound alone fills segments: they are published, and are no video either.
+      await wrote(5, 2);
+      for (const run of [0, 1, 2, 3]) {
+        exit(run);
+      }
+      await instance.sync();
+      expect((await playlist(instance)).slice(-2)).toEqual(["g5:0", "g5:1"]);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(first), lastFrameAt: iso(lastFrame), frames: 0 });
+
+      // Once a run shows video again, the next change counts from its own time.
+      clock.now += 2000;
+      await frames(25, 4);
+      clock.now += 4000;
+      expect(opened[0]?.layout(layoutOf(211))).toBe(true);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
     });
 
     it("starts the run the new video needs", async () => {
@@ -554,6 +621,17 @@ describe("Pipeline following what its source carries", () => {
       await instance.stop();
       expect(opened.map((source) => source.stopped)).toEqual([true, true, true]);
       expect(children.map((child) => child.killed)).toEqual([false, true, true, true]);
+    });
+
+    it("ends the input of every ffmpeg it stops, which acts on no signal while it waits for input", async () => {
+      const instance = await playing();
+      // A source waits to take over, and the stream stops: both runs are stopped.
+      await instance.start("http://e2/play", true);
+      expect(children.map((_child, run) => inputEnded(run))).toEqual([false, false]);
+      await instance.stop();
+      expect(children.map((child) => child.killed)).toEqual([true, true]);
+      expect(children.map((_child, run) => inputEnded(run))).toEqual([true, true]);
+      expect(children.map((child) => child.signalledWhileReading)).toEqual([false, false]);
     });
   });
 });

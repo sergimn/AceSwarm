@@ -30,7 +30,7 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
         sink: request.sink,
         told: undefined,
         layout: (layout, delivered = source.told !== undefined) => {
-          const next = request.onLayout({ layout, previous: source.told, delivered, quietMs: 0 });
+          const next = request.onLayout({ layout, previous: source.told, delivered });
           source.told = layout;
           if (next === undefined || next === source.sink) {
             return false;
@@ -50,7 +50,6 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
         stop: () => {
           source.stopped = true;
         },
-        status: () => ({ bytes: 0, lastDataAt: undefined, layout: source.told }),
       };
     },
   };

@@ -91,7 +91,6 @@ function connected(): { run: Generation; reader: { stopped: boolean } } {
       stop: () => {
         reader.stopped = true;
       },
-      status: () => ({ bytes: 0, lastDataAt: undefined, layout: undefined }),
     },
   };
   return { run, reader };

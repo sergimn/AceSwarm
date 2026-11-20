@@ -32,13 +32,20 @@ export interface Program {
 
 /**
  * What an MPEG-TS stream says it carries: its programs and their elementary streams. Two layouts
- * with the same `key` are the same to a demuxer; a different one means that something it reads
- * moved, went, came or changed kind, and that a demuxer which follows the old one loses it.
+ * with the same `key` are the same to a reader of the stream's video and audio; a different one
+ * means that a stream it may read moved, went, came or changed format, and that a demuxer which
+ * follows the old one may lose it.
  */
 export interface Layout {
   /** The programs whose tables were seen, in the order the stream lists them. */
   programs: Program[];
-  /** Tells layouts apart: every program's number and PMT PID, and every stream's PID, type and descriptors. */
+  /**
+   * Tells layouts apart: every program's number and PMT PID, and the PID and format of every
+   * stream that is, or may be, video or audio (see `formatOf`). What tells a reader of those
+   * nothing is left out: streams of other data (subtitles, teletext, cue messages), and
+   * descriptors that don't name a format (a language, say). A broadcast changes such details
+   * without anything a reader would have to follow.
+   */
   key: string;
 }
 
@@ -73,6 +80,16 @@ const VIDEO_REGISTRATIONS: ReadonlyMap<string, string> = new Map([
 
 const REGISTRATION_DESCRIPTOR = 0x05;
 const PRIVATE_STREAM_TYPE = 0x06;
+/**
+ * Descriptors that name the format of a private stream (type 6) which is audio: AC-3, E-AC-3,
+ * DTS and AAC, and the extension descriptor newer formats use. A registration descriptor names
+ * any format by four letters.
+ */
+const AUDIO_DESCRIPTORS = new Set([0x6a, 0x7a, 0x7b, 0x7c, 0x7f]);
+/** Descriptors of private streams that are neither video nor audio: VBI data, teletext, subtitles. */
+const DATA_DESCRIPTORS = new Set([0x45, 0x46, 0x56, 0x59]);
+/** Stream types that are neither: private sections, DSM-CC, metadata, cue messages (SCTE-35). */
+const DATA_TYPES = new Set([0x05, 0x0a, 0x0b, 0x0c, 0x0d, 0x15, 0x86]);
 
 /** The codec of a stream entry that is known to be video, as ffmpeg names it; undefined otherwise. */
 export function videoCodecOf(entry: StreamEntry): string | undefined {
@@ -130,15 +147,43 @@ export function streamPids(layout: Layout): Set<number> {
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length).toString("hex");
 
+/**
+ * What a demuxer takes a stream entry for, as far as its tables tell: its type, and the
+ * descriptors that name a format (the others say things like the language, which no reader has
+ * to follow). Undefined for a stream that is known to be neither video nor audio.
+ */
+export function formatOf(entry: StreamEntry): string | undefined {
+  const { descriptors, type } = entry;
+  const names: string[] = [];
+  let data = false;
+  for (let at = 0; at + 2 <= descriptors.length; at += 2 + (descriptors[at + 1] ?? 0)) {
+    const tag = descriptors[at] ?? 0;
+    if (tag === REGISTRATION_DESCRIPTOR) {
+      names.push(hex(descriptors.subarray(at, at + 6)));
+    } else if (AUDIO_DESCRIPTORS.has(tag)) {
+      names.push(tag.toString(16));
+    }
+    data ||= DATA_DESCRIPTORS.has(tag);
+  }
+  // A private stream is data when a descriptor says so and none names a format.
+  const isData = DATA_TYPES.has(type) || (type === PRIVATE_STREAM_TYPE && data && names.length === 0);
+  return isData ? undefined : `${String(type)}:${names.join("+")}`;
+}
+
 function keyOf(programs: readonly Program[]): string {
   return programs
     .map((program) => {
-      const streams = program.streams.map(
-        (entry) => `${String(entry.pid)}:${String(entry.type)}:${hex(entry.descriptors)}`,
-      );
+      const streams = program.streams.flatMap((entry) => {
+        const format = formatOf(entry);
+        return format === undefined ? [] : `${String(entry.pid)}:${format}`;
+      });
       return `${String(program.number)}@${String(program.pmtPid)}[${streams.join(",")}]`;
     })
     .join(";");
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array | undefined): boolean {
+  return a.length === b?.length && a.every((byte, index) => byte === b[index]);
 }
 
 /** A short description of a layout for logs: per program, its streams as `pid:type` (and the codec of video). */
@@ -287,11 +332,6 @@ export class TsTables {
     return this.current;
   }
 
-  /** Whether the PID carries program tables (the PAT, or a PMT it lists), not a stream's data. */
-  carriesTables(pid: number): boolean {
-    return this.tablePids.has(pid);
-  }
-
   /**
    * Feeds the packet at `at` in `data`. Returns the stream's layout when this packet made it known
    * or changed it, undefined otherwise.
@@ -328,7 +368,11 @@ export class TsTables {
 
   private onPat(section: Uint8Array): boolean {
     const header = tableHeader(section);
-    if (header.tableId !== PAT_TABLE_ID || !header.current) {
+    // A PAT in more than one section (it takes hundreds of programs) is left alone: each section
+    // would look like the whole table. Such a stream's layout stays unknown, and readers get it
+    // as it comes.
+    const sections = 1 + (section[7] ?? 0);
+    if (header.tableId !== PAT_TABLE_ID || !header.current || sections > 1) {
       return false;
     }
     const pat = new Map<number, number>();
@@ -361,9 +405,14 @@ export class TsTables {
     return true;
   }
 
+  /** Takes a PMT section. Returns whether it says anything else than the program's last one. */
   private onPmt(pid: number, section: Uint8Array): boolean {
     const header = tableHeader(section);
     if (header.tableId !== PMT_TABLE_ID || !header.current || this.pat.get(header.id) !== pid) {
+      return false;
+    }
+    if (this.programs.has(header.id) && sameBytes(section, this.pmtSections.get(header.id))) {
+      // The same table again, as it comes several times a second.
       return false;
     }
     const end = section.length - 4;
@@ -392,14 +441,16 @@ export class TsTables {
       // A program without streams gives a reader nothing to go on: what is known stays.
       return false;
     }
-    const program: Program = { number: header.id, pmtPid: pid, pcrPid, streams };
-    const before = this.programs.get(header.id);
-    this.programs.set(header.id, program);
+    this.programs.set(header.id, { number: header.id, pmtPid: pid, pcrPid, streams });
     this.pmtSections.set(header.id, section);
-    return before === undefined || keyOf([before]) !== keyOf([program]);
+    return true;
   }
 
-  /** The layout as the tables stand, when it is known and differs from the one before. */
+  /**
+   * Makes the layout what the tables say now, and returns it when it is known and differs from
+   * the one before for a reader (see `Layout.key`): a change of details that tell a reader nothing
+   * is kept, and is no change.
+   */
   private settle(): Layout | undefined {
     const programs = this.pat
       .keys()
@@ -419,11 +470,9 @@ export class TsTables {
       return undefined;
     }
     const key = keyOf(programs);
-    if (this.current?.key === key) {
-      return undefined;
-    }
+    const changed = this.current?.key !== key;
     this.current = { programs, key };
-    return this.current;
+    return changed ? this.current : undefined;
   }
 
   /**

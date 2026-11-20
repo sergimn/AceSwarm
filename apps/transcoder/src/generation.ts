@@ -104,6 +104,8 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
+  /** The run that took over from this one mid-stream, if one did (see `takeOver`). */
+  successor: Generation | undefined;
   /** Since when the data comes without a break (see `watchFlow`), or none yet. */
   private flowingSince: number | undefined;
   /** The last time the data was seen to come, while `flowingSince` is set. */
@@ -129,10 +131,12 @@ export class Generation {
    * run from here on, and it is the same attempt on the same session. So it gets what belongs to
    * the session rather than to one ffmpeg run: the live edge's watch, the handover it is part of,
    * the tries left, and the last frame players got (until its own first one, the stream's last
-   * frame is still that one). Where `old` could already publish, all of this run's output can:
+   * frame is still that one, which `old` moves on while it writes out what it has: see
+   * `SourceFeeds.drain`). Where `old` could already publish, all of this run's output can:
    * everything it reads comes after what was published.
    */
   takeOver(old: Generation, layout: Layout): void {
+    old.successor = this;
     this.layout = layout;
     this.connection = old.connection;
     old.connection = undefined;
@@ -153,11 +157,16 @@ export class Generation {
     }
   }
 
-  /** Stops its ffmpeg, and the reading of its source while that feeds this run. */
+  /**
+   * Stops its ffmpeg, and the reading of its source while that feeds this run. ffmpeg reads the
+   * source from a pipe, and while it waits there for more it acts on no signal: its input ends
+   * first, which it notices at once. Otherwise every stop would take until it is killed.
+   */
   halt(): void {
     if (this.connection?.run === this) {
       this.connection.reader?.stop();
     }
+    this.sink.end();
     killProcess(this.process);
   }
 

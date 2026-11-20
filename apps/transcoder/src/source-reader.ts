@@ -20,8 +20,6 @@ export interface LayoutChange {
   previous: Layout | undefined;
   /** Whether the sink already got some of the stream: if so, the reader ends it when another takes over. */
   delivered: boolean;
-  /** How long no stream data had come when the layout changed: the broadcast's own pause, if any. */
-  quietMs: number;
 }
 
 /** Why a reader is done with its source. */
@@ -49,18 +47,9 @@ export interface SourceRequest {
   onEnd: (end: SourceEnd) => void;
 }
 
-/** What a reader knows about its source. */
-export interface SourceStatus {
-  bytes: number;
-  /** When the stream's data last came. */
-  lastDataAt: number | undefined;
-  layout: Layout | undefined;
-}
-
 export interface SourceReader {
   /** Closes the connection at once. Nothing is reported after it. */
   stop: () => void;
-  status: () => SourceStatus;
 }
 
 /** Starts reading a source; replaceable in tests. */
@@ -79,10 +68,16 @@ const FORMAT_PATIENCE_BYTES = 64 * 1024;
 const TABLES_PATIENCE_BYTES = 2 * 1024 * 1024;
 /**
  * A stream whose layout changes again this soon after ffmpeg started over on it waits until then,
- * and gets the layout it has by then: tables that flip back and forth start ffmpeg once, not on
- * every flip.
+ * and gets the layout it has by then. A change is followed at once; tables that flip on after it
+ * start ffmpeg once more, for what they say when the wait is over, not at every flip.
  */
 const MIN_FOLLOW_INTERVAL_MS = 3000;
+/**
+ * Tables that said the same for this long have settled. Until they do, every change that is
+ * followed doubles the wait above, up to this long: tables that never settle get a new ffmpeg
+ * run once a minute in the end, not every three seconds for as long as they go on.
+ */
+const SETTLED_MS = 60_000;
 const NULL_PID = 0x1f_ff;
 /** What an engine says instead of video is short; more than this of it tells nothing. */
 const MAX_ANSWER_BYTES = 200;
@@ -98,9 +93,9 @@ type Piece = { sink: Sink; bytes: Uint8Array } | { sink: Sink; end: true };
  *   began on the old layout gets no more video: it stays on the streams it found at its start. The
  *   reader's owner is told right where the change is in the stream and can hand over a new sink:
  *   the old run's input ends there, so it writes out its last frames, and the new run begins with
- *   the stream's tables followed by everything after the change. Nothing is lost and the engine's
- *   session stays as it is. Packets on PIDs that only the old layout had are left out from then
- *   on, as they would only look like more streams to the new run.
+ *   the stream's tables followed by everything after the change. Neither run misses a byte of
+ *   its layout, and the engine's session stays as it is. Packets on PIDs that only the old layout
+ *   had are left out from then on, as they would only look like more streams to the new run.
  * - The first tables come before any of the stream is passed on, so the owner can start the right
  *   kind of ffmpeg run for what the stream carries before it reads a byte.
  * - An engine that is not ready to serve its session answers with a short text instead of video
@@ -128,11 +123,12 @@ class EngineReader implements SourceReader {
   /** The layout the sink's run reads, once known. */
   private fed: Layout | undefined;
   private followedAt = -Infinity;
+  /** How many changes were followed since the tables last settled (see `SETTLED_MS`), and when they last changed. */
+  private restless = 0;
+  private changedAt = -Infinity;
   /** PIDs of a layout the stream left, which the new one doesn't use. */
   private dropped = new Set<number>();
-  private bytes = 0;
   private delivered = false;
-  private lastDataAt: number | undefined;
 
   constructor(request: SourceRequest, fetchImpl: Fetch, now: () => number) {
     this.request = request;
@@ -144,10 +140,6 @@ class EngineReader implements SourceReader {
 
   stop(): void {
     this.closed.abort();
-  }
-
-  status(): SourceStatus {
-    return { bytes: this.bytes, lastDataAt: this.lastDataAt, layout: this.tables.layout };
   }
 
   /** A method, so that a check after an `await` sees `stop()` calls made meanwhile. */
@@ -239,9 +231,7 @@ class EngineReader implements SourceReader {
   }
 
   private async take(chunk: Uint8Array): Promise<void> {
-    this.bytes += chunk.byteLength;
     if (this.format === "other") {
-      this.lastDataAt = this.now();
       await this.pass(this.sink, chunk);
       return;
     }
@@ -284,11 +274,9 @@ class EngineReader implements SourceReader {
    */
   private sort(chunk: Uint8Array): Piece[] {
     const out: Piece[] = [];
-    const quietSince = this.lastDataAt ?? this.now();
     let data = chunk;
     let from = -1;
     let to = -1;
-    let streamPackets = 0;
     const flush = (): void => {
       if (from < 0) {
         return;
@@ -303,24 +291,26 @@ class EngineReader implements SourceReader {
       this.earlyBytes += bytes.byteLength;
     };
     // A change that came too soon after the last one is followed now, with the layout as it is by now.
-    if (this.fed !== undefined && this.now() - this.followedAt >= MIN_FOLLOW_INTERVAL_MS) {
-      this.follow(this.tables.layout, out, this.now() - quietSince);
+    if (this.fed !== undefined && this.mayFollow()) {
+      this.follow(this.tables.layout, out);
     }
     this.packets.push(chunk, (buffer, at) => {
       data = buffer;
       const pid = (((buffer[at + 1] ?? 0) & 0x1f) << 8) | (buffer[at + 2] ?? 0);
       const layout = this.tables.packet(buffer, at);
-      if (layout !== undefined && (this.fed === undefined || this.now() - this.followedAt >= MIN_FOLLOW_INTERVAL_MS)) {
+      if (layout !== undefined) {
+        // Tables that held long enough before this have settled: the waits start over.
+        this.restless = this.now() - this.changedAt >= SETTLED_MS ? 0 : this.restless;
+        this.changedAt = this.now();
+      }
+      if (layout !== undefined && (this.fed === undefined || this.mayFollow())) {
         flush();
-        this.follow(layout, out, this.now() - quietSince);
+        this.follow(layout, out);
       }
       if (pid === NULL_PID || this.dropped.has(pid)) {
         // Padding carries nothing, and a PID the stream left would look like one more stream.
         flush();
         return;
-      }
-      if (!this.tables.carriesTables(pid)) {
-        streamPackets += 1;
       }
       if (from >= 0 && at === to) {
         to += PACKET_BYTES;
@@ -331,9 +321,6 @@ class EngineReader implements SourceReader {
       to = at + PACKET_BYTES;
     });
     flush();
-    if (streamPackets > 0) {
-      this.lastDataAt = this.now();
-    }
     if (this.early !== undefined && this.earlyBytes >= TABLES_PATIENCE_BYTES) {
       // No tables: the stream goes on as it comes, and ffmpeg makes of it what it can.
       out.push(...this.early.map((bytes) => ({ sink: this.sink, bytes })));
@@ -342,16 +329,23 @@ class EngineReader implements SourceReader {
     return out;
   }
 
+  /** Whether a change of layout is followed now: the last one that was is long enough ago. */
+  private mayFollow(): boolean {
+    const wait = Math.min(MIN_FOLLOW_INTERVAL_MS * 2 ** Math.max(this.restless - 1, 0), SETTLED_MS);
+    return this.now() - this.followedAt >= wait;
+  }
+
   /**
    * The stream's layout is `layout` from here on. Asks the owner for the sink of what follows; with
    * another one, the old one ends here and the new one begins with the stream's tables.
    */
-  private follow(layout: Layout | undefined, out: Piece[], quietMs: number): void {
+  private follow(layout: Layout | undefined, out: Piece[]): void {
     if (layout === undefined || layout.key === this.fed?.key) {
       return;
     }
     const previous = this.fed;
-    const next = this.request.onLayout({ layout, previous, delivered: this.delivered, quietMs });
+    const next = this.request.onLayout({ layout, previous, delivered: this.delivered });
+    this.restless += previous === undefined ? 0 : 1;
     this.fed = layout;
     this.followedAt = this.now();
     const held = this.early ?? [];
@@ -360,8 +354,8 @@ class EngineReader implements SourceReader {
       if (this.delivered) {
         out.push({ sink: this.sink, end: true });
       }
-      const now = streamPids(layout);
-      this.dropped = new Set(previous === undefined ? [] : streamPids(previous).difference(now));
+      const kept = streamPids(layout);
+      this.dropped = new Set(previous === undefined ? [] : streamPids(previous).difference(kept));
       this.sink = next;
       this.delivered = false;
     }

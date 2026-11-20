@@ -58,7 +58,8 @@ export interface FeedHost {
  *   own finding decides, and where the two disagree, ffmpeg's finding wins for that layout from
  *   then on (see `found`): the mode never goes back and forth between what each of them says.
  * - When the broadcast changes its layout mid-stream, a new run takes over at the change, on the
- *   same connection: no engine session is opened, and nothing of the stream is left out. The old
+ *   same connection: no engine session is opened, and neither run misses a byte of its layout
+ *   (players get the new one from its first key frame, where every ffmpeg run begins). The old
  *   run's input ends there; what it still writes out is published first (see `drain`).
  */
 export class SourceFeeds {
@@ -189,6 +190,11 @@ export class SourceFeeds {
       }
       const done = run.state === "exited" || this.now() - (run.handedOverAt ?? 0) >= DRAIN_TIMEOUT_MS;
       await this.host.publish(run);
+      // The frames it still wrote out are the stream's newest, until the run after it has its own.
+      const { successor, publishedFrameAt } = run;
+      if (successor !== undefined && publishedFrameAt !== undefined) {
+        successor.publishedFrameAt = Math.max(successor.publishedFrameAt ?? 0, publishedFrameAt);
+      }
       if (!done) {
         return true;
       }

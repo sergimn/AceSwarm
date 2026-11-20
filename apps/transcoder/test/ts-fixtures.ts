@@ -48,10 +48,11 @@ export function packetOf(hex: string): Uint8Array {
 }
 
 /**
- * The program tables of three streams as ffmpeg's MPEG-TS muxer wrote them: one PAT (program 1,
- * PMT on PID 4095), and the PMT of H.264 video on PID 256 with AAC on 257, of the same on PIDs 211
- * and 221, and of HEVC video on 211 with AAC on 221. All three PMTs carry version 0: a broadcast
- * that switches between such streams changes its layout without changing the version.
+ * The program tables of three streams as ffmpeg's MPEG-TS muxer wrote them when told to put the
+ * PMT on PID 4095 (`-mpegts_pmt_start_pid`; it uses 4096 by itself): one PAT (program 1), and the
+ * PMT of H.264 video on PID 256 with AAC on 257, of the same on PIDs 211 and 221, and of HEVC video
+ * on 211 with AAC on 221. All three PMTs carry version 0: a broadcast that switches between such
+ * streams changes its layout without changing the version.
  */
 export const REAL_TABLES = {
   pat: packetOf("474000100000b00d0001c100000001efff3690e23d"),
@@ -73,12 +74,20 @@ function crcOf(bytes: Uint8Array): number {
   return crc >>> 0;
 }
 
-/** A table section: its header, `body` and the CRC. */
-export function section(tableId: number, id: number, body: Uint8Array, version = 0, current = true): Uint8Array {
+/** A table section: its header, `body` and the CRC. It is the first of `1 + lastSection` sections of its table. */
+export function section(
+  tableId: number,
+  id: number,
+  body: Uint8Array,
+  version = 0,
+  current = true,
+  lastSection = 0,
+): Uint8Array {
   const length = 5 + body.length + 4;
   const bytes = new Uint8Array(3 + length);
   bytes.set([tableId, 0xb0 | (length >> 8), length & 0xff, id >> 8, id & 0xff]);
   bytes[5] = 0xc0 | ((version & 0x1f) << 1) | (current ? 1 : 0);
+  bytes[7] = lastSection;
   bytes.set(body, 8);
   new DataView(bytes.buffer).setUint32(bytes.length - 4, crcOf(bytes.subarray(0, -4)));
   return bytes;
