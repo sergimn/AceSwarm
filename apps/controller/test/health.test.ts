@@ -188,6 +188,18 @@ describe("a broadcast that changes its layout mid-stream", () => {
     });
   });
 
+  it("takes a transcoder that doesn't report layout changes yet as one whose stream had none", () => {
+    // An older transcoder's status has no such field at all.
+    const older = pipeline({ lastFrameAt: ago(5000) });
+    delete older.layoutChangedAt;
+    expect(lastSignOfVideo(older)).toBe(NOW - 5000);
+    expect(evaluateHealth(inputs({ pipeline: older }))).toEqual({
+      state: "playing",
+      healthy: true,
+      reason: "receiving video",
+    });
+  });
+
   it("is no sign of video for a stream that showed none yet", () => {
     const starting = pipeline({ state: "starting", layoutChangedAt: ago(1000) });
     expect(lastSignOfVideo(starting)).toBeUndefined();

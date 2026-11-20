@@ -99,7 +99,7 @@ export class Generation {
   exitCode: number | null = null;
   error: string | null = null;
   readonly stderrTail: string[] = [];
-  /** How many more times ffmpeg opens the source again when this run fails before any video. */
+  /** How many more times the source is opened again, by a new run, when this one fails before any video. */
   reopens = 0;
   /** When the handover this run is for began: the first run's start, for a run that reopened. */
   handoverSince: number;
@@ -227,7 +227,7 @@ export class Generation {
   }
 
   /**
-   * Notes whether the broadcast's data comes at `now`: ffmpeg opened the source (it knows its
+   * Notes whether the broadcast's data comes at `now`: ffmpeg got the stream (it knows its
    * video), the run may publish, and the live edge moved lately (a source without a stat URL has
    * nothing to tell, and counts). It notes when the data began to come, together with how long it
    * came for the stream's earlier runs (`carried`), and starts over, with that too, when it stopped
@@ -271,7 +271,7 @@ export class Generation {
     return edge === undefined || edge.state() === "none" || edge.movedWithin(EDGE_FRESH_MS);
   }
 
-  /** Whether ffmpeg failed before any video, and opens the source again. */
+  /** Whether its ffmpeg failed before any video, and a new run opens the source again. */
   willReopen(): boolean {
     // A stale source is not opened again: it would only serve the same old window.
     return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired && !this.staleStopped;

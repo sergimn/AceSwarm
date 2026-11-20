@@ -318,9 +318,10 @@ export interface PipelineStatus {
    * PID or codec, or the like); null if it never did. A new ffmpeg run takes over right at the
    * change, so `state` is `starting` and `lastFrameAt` stands still for a few seconds after it.
    * Only a change after a run that showed video counts here: changes over a stream that has no
-   * video move nothing, so they can't keep it from being taken for stalled.
+   * video move nothing, so they can't keep it from being taken for stalled. A transcoder older
+   * than this field doesn't send it.
    */
-  layoutChangedAt: string | null;
+  layoutChangedAt?: string | null;
   exitCode: number | null;
   error: string | null;
   /** Source waiting to take over (make-before-break handover), if any. */

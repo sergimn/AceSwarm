@@ -388,7 +388,7 @@ describe("readSource", () => {
       () => clock.now,
     );
     await vi.waitFor(() => {
-      expect(ends).toEqual([{ reason: 'the engine answered "failed to seek" instead of video', delivered: false }]);
+      expect(ends).toEqual([{ reason: 'the engine answered "failed to seek" instead of video' }]);
     });
     expect(engine.requests).toHaveLength(6);
   });
@@ -398,7 +398,7 @@ describe("readSource", () => {
     engine.answers.push(new Response("no", { status: 500 }));
     const { ends } = open({}, engine);
     await vi.waitFor(() => {
-      expect(ends).toEqual([{ reason: "the engine answered 500", delivered: false }]);
+      expect(ends).toEqual([{ reason: "the engine answered 500" }]);
     });
     expect(engine.requests).toHaveLength(1);
   });
@@ -406,7 +406,7 @@ describe("readSource", () => {
   it("gives up on an engine that sends nothing for the idle timeout", async () => {
     const { ends, engine } = open({ idleTimeoutMs: 40 });
     await vi.waitFor(() => {
-      expect(ends).toEqual([{ reason: "no data from the engine for 0s", delivered: false }]);
+      expect(ends).toEqual([{ reason: "no data from the engine for 0s" }]);
     });
     expect(engine.requests[0]?.aborted()).toBe(true);
   });
@@ -417,7 +417,7 @@ describe("readSource", () => {
     expect(sink.chunks).toEqual([]);
     engine.bodies[0]?.close();
     await vi.waitFor(() => {
-      expect(ends).toEqual([{ reason: "the engine ended the stream", delivered: true }]);
+      expect(ends).toEqual([{ reason: "the engine ended the stream" }]);
     });
     expect(sink.pids()).toHaveLength(8);
   });
@@ -434,6 +434,41 @@ describe("readSource", () => {
     expect(ends).toEqual([]);
     expect(sink.pids()).toHaveLength(got);
     expect(sink.ended).toBe(false);
+  });
+
+  it("asks an engine that is not ready no more once it was stopped", async () => {
+    const engine = fakeEngine();
+    engine.answers.push(notReady(), notReady(), notReady(), notReady());
+    const { ends, reader } = open({ retryMs: 40 }, engine);
+    await vi.waitFor(
+      () => {
+        expect(engine.requests.length).toBeGreaterThan(0);
+      },
+      { interval: 1 },
+    );
+    reader.stop();
+    const asked = engine.requests.length;
+    await sleep(150);
+    expect(engine.requests).toHaveLength(asked);
+    expect(ends).toEqual([]);
+  });
+
+  it("follows no layout on a chunk that comes in as it is stopped", async () => {
+    const { engine, sink, layouts, clock, reader, feed } = open();
+    await feed(tablePackets(H264), tsPackets(3, 256));
+    expect(layouts).toHaveLength(1);
+    const got = sink.pids().length;
+    // Long after the first layout: a change would be followed at once.
+    clock.now += 10_000;
+
+    // The chunk is already on its way to the reader when its owner stops it.
+    engine.bodies[0]?.enqueue(concatBytes(tablePackets(HEVC, 0x10_00, 1), tsPackets(3, 211)));
+    reader.stop();
+    await sleep(20);
+
+    // The owner is asked for no run on the new layout, and nothing more is passed on.
+    expect(layouts).toHaveLength(1);
+    expect(sink.pids()).toHaveLength(got);
   });
 
   it("reads the engine no faster than its sink takes the data", async () => {

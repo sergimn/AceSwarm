@@ -86,7 +86,6 @@ describe("TsTables", () => {
       {
         number: 1,
         pmtPid: REAL_PMT_PID,
-        pcrPid: 256,
         streams: [
           { pid: 256, type: 0x1b, descriptors: new Uint8Array(0) },
           { pid: 257, type: 0x0f, descriptors: new Uint8Array(0) },
@@ -216,8 +215,10 @@ describe("TsTables", () => {
   it("leaves the layout as it is when a section is damaged", () => {
     const tables = new TsTables();
     feed(tables, tablePackets(H264));
+    // One bit of the video's PID: the table still adds up, and only its CRC tells that it is not
+    // what was sent. Taken as it is, the video would be on PID 210.
     const damaged = pmtPackets(HEVC, 1);
-    damaged[20] = (damaged[20] ?? 0) ^ 0x01;
+    damaged[19] = (damaged[19] ?? 0) ^ 0x01;
     expect(feed(tables, damaged)).toEqual([]);
     expect(describeLayout(tables.layout!)).toBe("program 1 [256:h264 257:0x0f]");
     // The next one that is whole counts.
@@ -317,31 +318,82 @@ describe("TsTables", () => {
     expect(describeLayout(layout!)).toBe("program 1 [256:h264 257:0x0f]; program 2 [211:h264 221:0x0f]");
   });
 
-  it("goes on without the tables of programs that never come", () => {
+  it("waits for a program's table that comes a little later than the others", () => {
+    const tables = new TsTables();
+    const programs = [
+      [1, 0x10_00],
+      [2, 0x10_01],
+    ] as const;
+    expect(feed(tables, patPackets(programs), pmtPackets(H264))).toEqual([]);
+    // The first program's table comes again twice before the second one's comes at all.
+    expect(feed(tables, tsPackets(40), patPackets(programs, 1), pmtPackets(H264, 1))).toEqual([]);
+    expect(feed(tables, tsPackets(40), patPackets(programs, 2), pmtPackets(H264, 2))).toEqual([]);
+    const told = feed(tables, pmtPackets(MOVED, 0, 0x10_01, 2));
+    expect(told.map((layout) => describeLayout(layout))).toEqual([
+      "program 1 [256:h264 257:0x0f]; program 2 [211:h264 221:0x0f]",
+    ]);
+  });
+
+  it("goes on without the table of a program that doesn't come, once the others came again three times", () => {
+    const tables = new TsTables();
+    const programs = [
+      [1, 0x10_00],
+      [2, 0x10_01],
+    ] as const;
+    // A broadcast whose PAT lists a program it doesn't send: its tables come several times a second.
+    const again = (counter: number): Uint8Array =>
+      concatBytes(tsPackets(40), patPackets(programs, counter), pmtPackets(H264, counter));
+    expect(feed(tables, patPackets(programs), pmtPackets(H264))).toEqual([]);
+    expect(feed(tables, again(1), again(2))).toEqual([]);
+    // The third time settles it: after some 130 packets, however fast the stream is.
+    const told = feed(tables, again(3));
+    expect(told.map((layout) => describeLayout(layout))).toEqual(["program 1 [256:h264 257:0x0f]"]);
+    expect(feed(tables, again(4))).toEqual([]);
+    // The late one is a change like any other.
+    expect(feed(tables, pmtPackets(MOVED, 0, 0x10_01, 2))).toHaveLength(1);
+  });
+
+  it("gives every table that came three more turns before it goes on without the missing ones", () => {
+    const tables = new TsTables();
+    const programs = [
+      [1, 0x10_00],
+      [2, 0x10_01],
+      [3, 0x10_02],
+    ] as const;
+    const again = (counter: number): Uint8Array =>
+      concatBytes(patPackets(programs, counter), pmtPackets(H264, counter), pmtPackets(MOVED, counter, 0x10_01, 2));
+    expect(feed(tables, again(0))).toEqual([]);
+    // Two tables came: three turns are six of them.
+    expect(feed(tables, again(1), again(2), patPackets(programs, 3), pmtPackets(H264, 3))).toEqual([]);
+    expect(feed(tables, pmtPackets(MOVED, 3, 0x10_01, 2))).toHaveLength(1);
+  });
+
+  it("starts the wait over when the PAT lists other programs", () => {
+    const tables = new TsTables();
+    const first = [
+      [1, 0x10_00],
+      [2, 0x10_01],
+    ] as const;
+    const second = [
+      [1, 0x10_00],
+      [3, 0x10_02],
+    ] as const;
+    feed(tables, patPackets(first), pmtPackets(H264), pmtPackets(H264, 1), pmtPackets(H264, 2));
+    // Two turns under the first PAT don't count under the second.
+    expect(feed(tables, patPackets(second, 1), pmtPackets(H264, 3), pmtPackets(H264, 4))).toEqual([]);
+    expect(feed(tables, pmtPackets(H264, 5))).toHaveLength(1);
+  });
+
+  it("goes on without them after about 2 MB too, for a stream whose tables don't come again", () => {
     const tables = new TsTables();
     const pat = patPackets([
       [1, 0x10_00],
       [2, 0x10_01],
     ]);
     expect(feed(tables, pat, pmtPackets(H264))).toEqual([]);
-    // The packet the patience ends on is a table's own: the next one of the stream settles it.
-    expect(
-      feed(
-        tables,
-        tsPackets(10_998),
-        patPackets(
-          [
-            [1, 0x10_00],
-            [2, 0x10_01],
-          ],
-          1,
-        ),
-      ),
-    ).toEqual([]);
-    const told = feed(tables, tsPackets(3));
+    expect(feed(tables, tsPackets(10_999))).toEqual([]);
+    const told = feed(tables, tsPackets(1));
     expect(told.map((layout) => describeLayout(layout))).toEqual(["program 1 [256:h264 257:0x0f]"]);
-    // The late one is a change like any other.
-    expect(feed(tables, pmtPackets(MOVED, 0, 0x10_01, 2))).toHaveLength(1);
   });
 
   it("writes its tables out as packets that a new reader learns the same layout from", () => {

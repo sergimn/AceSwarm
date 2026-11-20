@@ -18,7 +18,7 @@ import type { ProgressBlock } from "./progress.ts";
 export const KEY_FRAMES_PATIENCE_MS = 45_000;
 
 /**
- * How many times ffmpeg opens the source again when its run that decodes every frame fails before
+ * How many times the source is opened again when the run that decodes every frame fails before
  * any video: the engine allows one reader per session, and may still refuse a new one for a
  * moment after the run it replaces let go.
  */

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
@@ -19,6 +19,7 @@ import {
 } from "./live-edge.ts";
 import type { PipelineEvents, PipelineOptions, PipelineSettings, Spawner } from "./pipeline-settings.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
+import { makeRunDirectory, makeRunDirectoryNow, removeStreamFiles } from "./run-files.ts";
 import { SourceFeeds, type Succession } from "./source-feeds.ts";
 import { readSource } from "./source-reader.ts";
 import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
@@ -31,7 +32,7 @@ export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, S
 const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
 
 const OLD_GENERATION_TTL_MS = 60_000;
-/** How long after a run that failed before any video ffmpeg opens its source again (see `start`). */
+/** How long after a run that failed before any video its source is opened again (see `start`). */
 const REOPEN_DELAY_MS = 1000;
 
 /**
@@ -119,14 +120,15 @@ export class Pipeline {
   }
 
   /**
-   * Points the pipeline at a (new) source. With `handover`, ffmpeg's input timeout (how long any
-   * read may wait, for the whole run) is at least the handover timeout, even when there is no
-   * picture left to keep: a new engine on a slow swarm can take longer than the usual input timeout
-   * to deliver its first data, and the controller waits the whole handover for it.
+   * Points the pipeline at a (new) source. With `handover`, the input timeout (how long the
+   * source's reader waits for data, at any time of the run) is at least the handover timeout, even
+   * when there is no picture left to keep: a new engine on a slow swarm can take longer than the
+   * usual input timeout to deliver its first data, and the controller waits the whole handover
+   * for it.
    *
-   * With `reopens`, ffmpeg opens the source again up to that many times when it fails before any
-   * video: an engine that has just lost another reader of the session may refuse a new one for a
-   * moment (it allows one reader per session).
+   * With `reopens`, the source is opened again up to that many times, each time by a new ffmpeg
+   * run, when a run fails before any video: an engine that has just lost another reader of the
+   * session may refuse a new one for a moment (it allows one reader per session).
    *
    * With `stat`, the session's stat URL, its output is only published while its live edge moves.
    */
@@ -195,7 +197,7 @@ export class Pipeline {
     const tableCodec = layout === undefined ? undefined : videoCodecOfLayout(layout);
     return {
       id: this.id,
-      // A run that failed before any video and opens its source again is still starting.
+      // A run that failed before any video, and whose source is opened again, is still starting.
       state: generation.willReopen() ? "starting" : generation.state,
       source: generation.source,
       startedAt: new Date(generation.startedAt).toISOString(),
@@ -254,8 +256,9 @@ export class Pipeline {
    * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
    * stop by itself and it writes out what it holds first, a whole segment or a stalled full
    * output's backlog, into a directory that is going. That goes for the runs that were retired
-   * moments ago and still stop. A file it writes while it dies can still land in a directory that
-   * `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm` tries again for that.
+   * moments ago and still stop, and for the ones that still write out what they had when a
+   * layout change ended their input (see `SourceFeeds.drain`). The stop does not fail over files
+   * that could not be removed (see `removeStreamFiles`).
    */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -268,7 +271,7 @@ export class Pipeline {
     this.feeds.stop();
     this.active = undefined;
     this.pending = undefined;
-    await rm(this.root, { recursive: true, force: true, maxRetries: 3 });
+    await removeStreamFiles(this.root, this.logger);
   }
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */
@@ -563,9 +566,7 @@ export class Pipeline {
       this.layoutChangedAt = this.now();
     }
     try {
-      for (const variant of VARIANTS) {
-        mkdirSync(join(next.directory, variant), { recursive: true });
-      }
+      makeRunDirectoryNow(next.directory);
       this.spawn(next, reason);
     } catch (error) {
       next.state = "exited";
@@ -602,8 +603,7 @@ export class Pipeline {
 
   /** Starts the generation's ffmpeg on its source, unless it was retired or the pipeline stopped meanwhile. */
   private async run(generation: Generation, reason: string): Promise<void> {
-    await mkdir(join(generation.directory, "full"), { recursive: true });
-    await mkdir(join(generation.directory, "preview"), { recursive: true });
+    await makeRunDirectory(generation.directory);
     if (generation.retired || this.stopped) {
       generation.state = "exited";
       return;

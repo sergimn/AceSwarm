@@ -597,7 +597,7 @@ describe("Pipeline following what its source carries", () => {
       vi.useFakeTimers();
       const instance = start();
       await instance.start("http://e1/play", false);
-      opened[0]?.end("no data from the engine for 60s", false);
+      opened[0]?.end("no data from the engine for 60s");
       await vi.advanceTimersByTimeAsync(4900);
       expect(killed(0)).toBe(false);
       await vi.advanceTimersByTimeAsync(200);

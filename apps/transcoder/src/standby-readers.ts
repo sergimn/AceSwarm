@@ -9,6 +9,7 @@ import {
   type DecodeChecker,
   type DecodeResult,
 } from "./decode-check.ts";
+import { FollowBrake } from "./follow-brake.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS, LiveEdge, type LiveEdgeSettings, type WatchLiveEdge } from "./live-edge.ts";
 import { TsPackets } from "./ts-packets.ts";
 import { LayoutChanges } from "./ts-tables.ts";
@@ -20,7 +21,7 @@ export interface StandbyReaderSettings {
   retryMs: number;
   /**
    * How long a reader that lets go of its source for ffmpeg waits after closing the connection,
-   * so that the engine notices before ffmpeg connects (it allows one reader per session).
+   * so that the engine notices before the pipeline's reader connects (it allows one reader per session).
    */
   releaseGraceMs?: number;
 }
@@ -93,6 +94,10 @@ class StandbyReader {
   private nextCheckAt = 0;
   /** The check that is running ended because the broadcast changed its layout (see `relaidOut`). */
   private endedByLayout = false;
+  /** The broadcast changed its layout, and no check started on the new one yet. */
+  private relaid = false;
+  /** Holds back how often a check starts for tables that keep changing. */
+  private readonly brake: FollowBrake;
 
   constructor(source: StandbySource, settings: StandbyReaderSettings, logger: Logger, deps: ReaderDeps) {
     const { liveEdge, now } = deps;
@@ -101,6 +106,7 @@ class StandbyReader {
     this.logger = logger;
     this.fetch = deps.fetch;
     this.now = now;
+    this.brake = new FollowBrake(now);
     this.decoder = deps.decoder;
     this.watch =
       source.stat === undefined || liveEdge === undefined
@@ -226,9 +232,12 @@ class StandbyReader {
     if (this.decoder === undefined) {
       return;
     }
-    if (this.check === undefined && video && this.now() >= this.nextCheckAt) {
+    const due = this.now() >= this.nextCheckAt && (!this.relaid || this.brake.mayFollow());
+    if (this.check === undefined && video && due) {
       const check = this.decoder.start(this, this.checkPriority());
       if (check !== undefined) {
+        this.brake.followed(this.relaid);
+        this.relaid = false;
         this.check = check;
         void check.result.then((result) => {
           this.checked(check, result);
@@ -242,9 +251,13 @@ class StandbyReader {
    * The broadcast changed its layout mid-stream: its video moved to another PID or codec (see
    * `TsTables`). ffmpeg stays on the streams it found when it started, so a check that is running
    * would get no more video and fail a standby that is fine: it ends without an answer. The next
-   * check comes at once, as what the last one found may not hold for the new layout.
+   * check comes at once, as what the last one found may not hold for the new layout; for tables
+   * that keep changing it comes later each time, as a pipeline's ffmpeg does (see `FollowBrake`),
+   * so that they don't start a check at every change.
    */
   private relaidOut(): void {
+    this.brake.changed();
+    this.relaid = true;
     this.nextCheckAt = this.now();
     this.endedByLayout = this.check !== undefined;
     this.check?.stop();

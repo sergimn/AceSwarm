@@ -2620,6 +2620,41 @@ describe("hot standby on the other paths", () => {
     expect(fake.handovers).toEqual([play(standbyEngine)]);
   });
 
+  test("counts the time without video from a layout change, though a standby has newer data by then", async () => {
+    const fake = await withStandby();
+    // No frame for longer than a failover takes, but the broadcast changed its layout five seconds
+    // ago. The standby got data since, so it would do for a failover: it is only too soon for one.
+    fake.sources.delete(play(main));
+    fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+    fake.real.layoutChangedAt = new Date(fake.clock.now - 5000).toISOString();
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+    expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+  });
+
+  test("does not fail over to a standby whose data stopped with the layout change", async () => {
+    const standbyData = new Set([play(standbyEngine)]);
+    const fake = await withStandby({ standbyData });
+    const lastFrameAt = fake.clock.now;
+    // The stream's video stops; the standby still gets data five seconds later.
+    fake.sources.delete(play(main));
+    fake.clock.now = lastFrameAt + 5000;
+    await fake.instance.tick();
+    expect(fake.instance.path).toBe("direct");
+
+    // Then the broadcast changes its layout, and nothing comes of it on any path. Long enough
+    // after the change for a failover, the standby is still hot, and its data is newer than the
+    // stream's last frame: but not newer than the change, so it stopped with the stream.
+    standbyData.clear();
+    fake.real.layoutChangedAt = new Date(lastFrameAt + 6000).toISOString();
+    fake.clock.now = lastFrameAt + 6000 + DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 500;
+    await fake.instance.tick();
+    expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "hot" }]);
+    expect(fake.instance.path).toBe("direct");
+    expect(fake.handovers).toEqual([]);
+  });
+
   test("remembers the engine and session it failed over to, for a restarted controller", async () => {
     const fake = await withStandby();
     expect(fake.saved()).toMatchObject({ ownEngine: main.name, session: { playbackUrl: play(main) } });

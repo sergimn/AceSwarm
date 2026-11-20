@@ -1,5 +1,6 @@
 import { setTimeout as wait } from "node:timers/promises";
 import { describeError } from "@aceswarm/shared/http";
+import { FollowBrake } from "./follow-brake.ts";
 import { PACKET_BYTES, TsPackets } from "./ts-packets.ts";
 import { streamPids, TsTables, type Layout } from "./ts-tables.ts";
 
@@ -25,8 +26,6 @@ export interface LayoutChange {
 /** Why a reader is done with its source. */
 export interface SourceEnd {
   reason: string;
-  /** Whether the sink it fed last got any of the stream. */
-  delivered: boolean;
 }
 
 export interface SourceRequest {
@@ -66,18 +65,6 @@ const FORMAT_PATIENCE_BYTES = 64 * 1024;
  * second, so only a stream that has none gets here; it is passed on without a known layout.
  */
 const TABLES_PATIENCE_BYTES = 2 * 1024 * 1024;
-/**
- * A stream whose layout changes again this soon after ffmpeg started over on it waits until then,
- * and gets the layout it has by then. A change is followed at once; tables that flip on after it
- * start ffmpeg once more, for what they say when the wait is over, not at every flip.
- */
-const MIN_FOLLOW_INTERVAL_MS = 3000;
-/**
- * Tables that said the same for this long have settled. Until they do, every change that is
- * followed doubles the wait above, up to this long: tables that never settle get a new ffmpeg
- * run once a minute in the end, not every three seconds for as long as they go on.
- */
-const SETTLED_MS = 60_000;
 const NULL_PID = 0x1f_ff;
 /** What an engine says instead of video is short; more than this of it tells nothing. */
 const MAX_ANSWER_BYTES = 200;
@@ -122,10 +109,8 @@ class EngineReader implements SourceReader {
   private earlyBytes = 0;
   /** The layout the sink's run reads, once known. */
   private fed: Layout | undefined;
-  private followedAt = -Infinity;
-  /** How many changes were followed since the tables last settled (see `SETTLED_MS`), and when they last changed. */
-  private restless = 0;
-  private changedAt = -Infinity;
+  /** Holds back how often a new run starts for tables that keep changing. */
+  private readonly brake: FollowBrake;
   /** PIDs of a layout the stream left, which the new one doesn't use. */
   private dropped = new Set<number>();
   private delivered = false;
@@ -134,6 +119,7 @@ class EngineReader implements SourceReader {
     this.request = request;
     this.fetch = fetchImpl;
     this.now = now;
+    this.brake = new FollowBrake(now);
     this.sink = request.sink;
     void this.run();
   }
@@ -157,7 +143,7 @@ class EngineReader implements SourceReader {
       reason = describeError(error);
     }
     if (!this.stopped()) {
-      this.request.onEnd({ reason, delivered: this.delivered });
+      this.request.onEnd({ reason });
     }
   }
 
@@ -166,15 +152,13 @@ class EngineReader implements SourceReader {
     const since = this.now();
     const retryMs = this.request.retryMs ?? NOT_READY_RETRY_MS;
     for (;;) {
+      // A reader that was stopped connects no more: `connect` ends the asking.
       const outcome = await this.connect();
       const waited = this.now() - since;
-      if (outcome.ready || this.stopped() || waited + retryMs >= this.request.idleTimeoutMs) {
+      if (outcome.ready || waited + retryMs >= this.request.idleTimeoutMs) {
         return outcome.reason;
       }
       await wait(retryMs, undefined, { signal: this.closed.signal }).catch(() => undefined);
-      if (this.stopped()) {
-        return outcome.reason;
-      }
     }
   }
 
@@ -231,6 +215,11 @@ class EngineReader implements SourceReader {
   }
 
   private async take(chunk: Uint8Array): Promise<void> {
+    if (this.stopped()) {
+      // Its owner let go of it, and a chunk that was already on its way still came in: no layout
+      // is followed on it, which would start an ffmpeg run for a stream that stopped.
+      return;
+    }
     if (this.format === "other") {
       await this.pass(this.sink, chunk);
       return;
@@ -291,7 +280,7 @@ class EngineReader implements SourceReader {
       this.earlyBytes += bytes.byteLength;
     };
     // A change that came too soon after the last one is followed now, with the layout as it is by now.
-    if (this.fed !== undefined && this.mayFollow()) {
+    if (this.fed !== undefined && this.brake.mayFollow()) {
       this.follow(this.tables.layout, out);
     }
     this.packets.push(chunk, (buffer, at) => {
@@ -299,11 +288,9 @@ class EngineReader implements SourceReader {
       const pid = (((buffer[at + 1] ?? 0) & 0x1f) << 8) | (buffer[at + 2] ?? 0);
       const layout = this.tables.packet(buffer, at);
       if (layout !== undefined) {
-        // Tables that held long enough before this have settled: the waits start over.
-        this.restless = this.now() - this.changedAt >= SETTLED_MS ? 0 : this.restless;
-        this.changedAt = this.now();
+        this.brake.changed();
       }
-      if (layout !== undefined && (this.fed === undefined || this.mayFollow())) {
+      if (layout !== undefined && (this.fed === undefined || this.brake.mayFollow())) {
         flush();
         this.follow(layout, out);
       }
@@ -329,12 +316,6 @@ class EngineReader implements SourceReader {
     return out;
   }
 
-  /** Whether a change of layout is followed now: the last one that was is long enough ago. */
-  private mayFollow(): boolean {
-    const wait = Math.min(MIN_FOLLOW_INTERVAL_MS * 2 ** Math.max(this.restless - 1, 0), SETTLED_MS);
-    return this.now() - this.followedAt >= wait;
-  }
-
   /**
    * The stream's layout is `layout` from here on. Asks the owner for the sink of what follows; with
    * another one, the old one ends here and the new one begins with the stream's tables.
@@ -345,9 +326,8 @@ class EngineReader implements SourceReader {
     }
     const previous = this.fed;
     const next = this.request.onLayout({ layout, previous, delivered: this.delivered });
-    this.restless += previous === undefined ? 0 : 1;
+    this.brake.followed(previous !== undefined);
     this.fed = layout;
-    this.followedAt = this.now();
     const held = this.early ?? [];
     this.early = undefined;
     if (next !== undefined && next !== this.sink) {

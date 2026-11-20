@@ -7,10 +7,14 @@ const PMT_TABLE_ID = 0x02;
 /** A section is at most 4096 bytes long (private ones; program tables at most 1024). */
 const MAX_SECTION_BYTES = 4096;
 /**
- * How many packets after the first program table a stream may take to send the tables of its
- * other programs before its layout counts as known without them. Streams with one program, as
- * nearly all are, never wait: about 2 MB otherwise, far more than any table interval.
+ * How long a stream may take to send the tables of the other programs its PAT lists, before its
+ * layout counts as known without them: until the tables that did come have each come again this
+ * many times. A stream sends all of its tables about as often, several times a second, so one
+ * that still misses by then is not coming soon, and the wait is a fraction of a second whatever
+ * the bitrate. A stream whose PAT lists one program, as nearly all do, never waits.
  */
+const OTHER_PROGRAMS_PATIENCE_REPEATS = 3;
+/** The same in packets (about 2 MB), for a stream whose tables don't come again either. */
 const OTHER_PROGRAMS_PATIENCE_PACKETS = 11_000;
 
 /** One elementary stream of a program, as its program map table (PMT) lists it. */
@@ -26,7 +30,6 @@ export interface StreamEntry {
 export interface Program {
   number: number;
   pmtPid: number;
-  pcrPid: number;
   streams: StreamEntry[];
 }
 
@@ -323,6 +326,8 @@ export class TsTables {
   private current: Layout | undefined;
   /** Packets since the first program's table came while others are still missing. */
   private waited = 0;
+  /** How many times a table that is known came again meanwhile. */
+  private repeats = 0;
   /** The PAT and PMT sections as they came, to start a reader with (see `tablePackets`). */
   private patSection: Uint8Array | undefined;
   private readonly pmtSections = new Map<number, Uint8Array>();
@@ -363,7 +368,8 @@ export class TsTables {
     for (const section of complete) {
       changed = (pid === PAT_PID ? this.onPat(section) : this.onPmt(pid, section)) || changed;
     }
-    return changed ? this.settle() : undefined;
+    // Without a layout yet, a table that came again may be what ends the wait for the others.
+    return changed || this.current === undefined ? this.settle() : undefined;
   }
 
   private onPat(section: Uint8Array): boolean {
@@ -390,6 +396,7 @@ export class TsTables {
       return false;
     }
     this.pat = pat;
+    this.repeats = 0;
     this.tablePids = new Set([PAT_PID, ...pat.values()]);
     for (const [number, program] of this.programs) {
       if (pat.get(number) !== program.pmtPid) {
@@ -413,10 +420,10 @@ export class TsTables {
     }
     if (this.programs.has(header.id) && sameBytes(section, this.pmtSections.get(header.id))) {
       // The same table again, as it comes several times a second.
+      this.repeats += 1;
       return false;
     }
     const end = section.length - 4;
-    const pcrPid = (((section[8] ?? 0) & 0x1f) << 8) | (section[9] ?? 0);
     const programInfo = (((section[10] ?? 0) & 0x0f) << 8) | (section[11] ?? 0);
     const streams: StreamEntry[] = [];
     let at = 12 + programInfo;
@@ -441,7 +448,7 @@ export class TsTables {
       // A program without streams gives a reader nothing to go on: what is known stays.
       return false;
     }
-    this.programs.set(header.id, { number: header.id, pmtPid: pid, pcrPid, streams });
+    this.programs.set(header.id, { number: header.id, pmtPid: pid, streams });
     this.pmtSections.set(header.id, section);
     return true;
   }
@@ -462,11 +469,9 @@ export class TsTables {
     }
     // Until every program the PAT lists has its table, the picture is incomplete: wait a little
     // for the rest, so that a stream with several programs doesn't change layout as they come in.
-    if (
-      this.current === undefined &&
-      programs.length < this.pat.size &&
-      this.waited < OTHER_PROGRAMS_PATIENCE_PACKETS
-    ) {
+    const patient =
+      this.repeats < OTHER_PROGRAMS_PATIENCE_REPEATS * programs.length && this.waited < OTHER_PROGRAMS_PATIENCE_PACKETS;
+    if (this.current === undefined && programs.length < this.pat.size && patient) {
       return undefined;
     }
     const key = keyOf(programs);

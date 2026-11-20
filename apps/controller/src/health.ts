@@ -74,9 +74,10 @@ export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | 
     return undefined;
   }
   const frame = Date.parse(pipeline.lastFrameAt);
-  const { layoutChangedAt, state } = pipeline;
+  // A transcoder older than the field sends none: no change, as far as the controller can tell.
+  const layoutChangedAt = pipeline.layoutChangedAt ?? null;
   // Once the run that took over failed, nothing is coming of the change.
-  return layoutChangedAt === null || state === "exited" ? frame : Math.max(frame, Date.parse(layoutChangedAt));
+  return layoutChangedAt === null || pipeline.state === "exited" ? frame : Math.max(frame, Date.parse(layoutChangedAt));
 }
 
 /**

@@ -707,6 +707,45 @@ describe("StandbyReaders", () => {
       readers.closeAll();
     });
 
+    test("starts no check at every change of tables that keep changing", async () => {
+      const { checks, clock, readers, feed } = await reading();
+      await feed(before(), tsPackets(5, 256));
+      checks[0]?.end("decoded");
+      await settle();
+      // The first change gets its check at once.
+      clock.now = 10_000;
+      await feed(after(1), tsPackets(5, 211));
+      expect(checks).toHaveLength(2);
+
+      // The tables flip on, twice a second. Each flip ends the check that runs, which would get no
+      // more video, but the next one waits: three seconds after the last one started.
+      for (let flip = 1; flip <= 5; flip += 1) {
+        clock.now = 10_000 + flip * 500;
+        await feed(flip % 2 === 1 ? before(1 + flip) : after(1 + flip), tsPackets(5, flip % 2 === 1 ? 256 : 211));
+      }
+      expect(checks[1]?.stopped).toBe(true);
+      expect(checks).toHaveLength(2);
+      clock.now = 12_999;
+      await feed(tsPackets(5, 256));
+      expect(checks).toHaveLength(2);
+      clock.now = 13_000;
+      await feed(tsPackets(5, 256));
+      expect(checks).toHaveLength(3);
+      expect(checks[2]?.stopped).toBe(false);
+
+      // And the one after that six seconds later, as the tables have not settled.
+      clock.now = 13_500;
+      await feed(after(7), tsPackets(5, 211));
+      expect(checks[2]?.stopped).toBe(true);
+      clock.now = 18_999;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(3);
+      clock.now = 19_000;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(4);
+      readers.closeAll();
+    });
+
     test("takes the first tables of a new connection for no change", async () => {
       const { engine, checks, clock, readers, feed } = await reading();
       await feed(before(), tsPackets(5, 256));

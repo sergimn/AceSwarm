@@ -15,7 +15,7 @@ export interface FakeSource {
    */
   layout: (layout: Layout, delivered?: boolean) => boolean;
   /** Ends the source, as when the engine closes the stream. */
-  end: (reason: string, delivered?: boolean) => void;
+  end: (reason: string) => void;
 }
 
 /** Stands in for `readSource`, and keeps every source opened, in order. */
@@ -41,8 +41,8 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
           source.sink = next;
           return true;
         },
-        end: (reason, delivered = source.told !== undefined) => {
-          request.onEnd({ reason, delivered });
+        end: (reason) => {
+          request.onEnd({ reason });
         },
       };
       opened.push(source);
@@ -62,5 +62,5 @@ export function layoutOf(videoPid: number, type = 0x1b): Layout {
     { pid: videoPid + 1, type: 0x0f, descriptors: new Uint8Array(0) },
   ];
   const key = `1@4096[${streams.map((entry) => `${String(entry.pid)}:${String(entry.type)}:`).join(",")}]`;
-  return { programs: [{ number: 1, pmtPid: 4096, pcrPid: videoPid, streams }], key };
+  return { programs: [{ number: 1, pmtPid: 4096, streams }], key };
 }
