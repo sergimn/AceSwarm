@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { PipelineState } from "@aceswarm/shared/api-types";
 import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
@@ -76,6 +77,8 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
+  /** The timer that removes its directory (see `removeLater`). */
+  private removal: NodeJS.Timeout | undefined;
   /** Since when the data comes without a break (see `watchFlow`), or none yet. */
   private flowingSince: number | undefined;
   /** The last time the data was seen to come, while `flowingSince` is set. */
@@ -93,6 +96,34 @@ export class Generation {
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
+  }
+
+  /**
+   * Removes its directory after `ms`, once players can no longer reference it. It is in `waiting`
+   * until then. Only the first call counts: a run can be retired twice.
+   */
+  removeLater(ms: number, waiting: Set<Generation>): void {
+    if (this.removal !== undefined) {
+      return;
+    }
+    waiting.add(this);
+    this.removal = setTimeout(() => {
+      waiting.delete(this);
+      void rm(this.directory, { recursive: true, force: true });
+    }, ms);
+    this.removal.unref();
+  }
+
+  /**
+   * Ends it as its stream stops: ffmpeg is killed at once, nothing follows its live edge, and its
+   * directory is not removed later by itself (the stream's next pipeline starts with the same
+   * directory names, and the stop removes the files of every run).
+   */
+  stopNow(): void {
+    clearTimeout(this.removal);
+    this.error ??= "stopped with its stream";
+    this.process?.kill("SIGKILL");
+    this.watch?.stop();
   }
 
   /** Whether its output may be published now: its live edge moves, or it has none. */
