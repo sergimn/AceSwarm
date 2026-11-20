@@ -64,7 +64,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 - Turn on **One engine per path** (under **Settings**) when you run several streams: they then share one engine instead of each starting its own.
 - With WireGuard profiles, [hot standby](#hot-standby) gives each stream an engine on every other path too, so streams × paths engines without **One engine per path**. On a Pi, turn that on, or set `STANDBY_MAX_PATHS=1`, or turn hot standby off.
 - An engine levels off at about its cache plus 150 MB, about 275 MB with the default settings. The Pi's arm64 engine behaved like the x86 one in testing, so an 8 GB Pi has room for several streams with their own engines. The dashboard shows how much each engine really uses.
-- To use less memory, lower `ENGINE_MEMORY_CACHE_MB`: with 50, the least the engine gives a stream, the arm64 engine stayed at about 175 MB in testing. [Cache on disk](#cache-on-disk) is not for a Pi: the arm64 engine keeps its cache in memory whatever it is told.
+- To use less memory, lower `ENGINE_MEMORY_CACHE_MB`: with 50, the arm64 engine stayed at about 175 MB in testing. [Cache on disk](#cache-on-disk) is not for a Pi: in testing the arm64 engine kept its cache in memory when told to use a folder.
 
 ### Cache on disk
 
@@ -78,7 +78,7 @@ mkdir -p /mnt/ssd/aceswarm-cache
 ENGINE_CACHE_DIR=/mnt/ssd/aceswarm-cache
 ```
 
-- **x86_64 only.** The arm64 engine (the Android build, which a Raspberry Pi runs) sets its cache to memory when it starts, whatever it is told. So that the setting never does nothing in silence, Ace Swarm refuses to start with `ENGINE_CACHE_DIR` set on arm64. There, lower `ENGINE_MEMORY_CACHE_MB` to use less memory.
+- **x86_64 only.** In testing, the arm64 engine (the Android build, which a Raspberry Pi runs) set its cache to memory when it started and wrote no stream data to the folder. So that the setting never does nothing in silence, Ace Swarm refuses to start with `ENGINE_CACHE_DIR` set on arm64. There, lower `ENGINE_MEMORY_CACHE_MB` to use less memory.
 - **Do not use an SD card location.** Every stream is written to the folder for as long as it runs, at the stream's bitrate: an 8 Mbit/s stream writes 1 MB a second, about 86 GB a day. That wears out SD cards and USB sticks. Use an SSD or a hard disk. A folder that lives in memory (tmpfs) saves nothing.
 - **Make the folder yourself, for this alone.** Ace Swarm does not make it: a disk that is not mounted then gives an error instead of streams filling the disk underneath. The user Docker or Podman runs as has to be able to write to it, and the folder has to let other users in, because engines run as a user of their own: mode 755, which `mkdir` gives it on most systems (`chmod 755 <folder>`). Its filesystem has to keep Linux owners and permissions (not FAT or exFAT). With SELinux, label it for containers (`chcon -t container_file_t <folder>`).
 - **Each engine keeps at most `ENGINE_DISK_CACHE_MB` (256).** It makes a folder of its own, and once that is full it writes over its oldest data. Count the size for every engine: one per stream and one per hot standby, or with **One engine per path** one per network path, which keeps at least 50 MB for each of its streams. The folder of an engine that is gone is removed when the next engine starts.

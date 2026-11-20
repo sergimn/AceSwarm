@@ -53,7 +53,8 @@ const ENGINE_CACHE_MOUNT = "/cache";
 
 /**
  * The exit code of an engine whose entrypoint could not set up its cache folder (EX_CONFIG in
- * engine/entrypoint.sh). The engine's log says what went wrong.
+ * engine/entrypoint.sh), and of an arm64 engine that is asked for a cache on disk at all
+ * (engine/start-arm64.sh). The engine's log says what went wrong.
  */
 const ENGINE_CACHE_SETUP_EXIT_CODE = 78;
 

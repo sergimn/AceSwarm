@@ -133,12 +133,16 @@ describe("engine cache on disk", () => {
     );
   });
 
-  it("refuses the folder on arm64, where the engine keeps its cache in memory whatever it is told", () => {
+  it("refuses the folder on arm64, where the engine keeps its cache in memory", () => {
     const onDisk = { ENGINE_CACHE_DIR: "/mnt/ssd/cache" };
     expect(() => loadConfig(onDisk, "arm64")).toThrow(
-      /^invalid configuration:\n✖ ENGINE_CACHE_DIR does not work on this machine \(arm64.*lower ENGINE_MEMORY_CACHE_MB\n {2}→ at ENGINE_CACHE_DIR$/,
+      /✖ ENGINE_CACHE_DIR is for x86_64 only, and this machine is arm64 .* lower ENGINE_MEMORY_CACHE_MB\n {2}→ at ENGINE_CACHE_DIR/,
     );
-    // A folder that is no folder is still the first thing to say.
+    // Said together with whatever else is wrong, so one start names everything to change.
+    expect(() => loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "255" }, "arm64")).toThrow(
+      /ENGINE_MEMORY_MB=255 is too small[^]*ENGINE_CACHE_DIR is for x86_64 only/,
+    );
+    // A folder that is no folder is the first thing to say.
     expect(() => loadConfig({ ENGINE_CACHE_DIR: "cache" }, "arm64")).toThrow(/has to be the full path/);
     // Without the folder nothing is refused, and the other settings read the same on both.
     expect(loadConfig({}, "arm64")).toEqual(loadConfig({}, "x64"));
