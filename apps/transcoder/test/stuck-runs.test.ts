@@ -312,16 +312,17 @@ describe("StuckRuns", () => {
   });
 
   it("reads no memory before a run's first video: ffmpeg sets up its encoders once data comes", async () => {
-    // While ffmpeg waits for the engine it holds little; once video comes, its encoders take more.
-    // The wait is longer than the minute it settles in: that minute counts from the first video.
+    // While ffmpeg waits for the engine it holds little; once video comes, its encoders take more,
+    // within seconds. The wait is longer than the minute it settles in: that minute counts from
+    // the first video, not from the run's first check.
     let memory = 20 * MB;
     const watch = runs(30, 512, () => memory);
     for (let second = 0; second < MEMORY_SETTLES_MS / 1000 + 20; second += 2) {
       expect(watch.check(generation)).toBeUndefined();
       after(2);
     }
-    memory = 700 * MB;
     for (let second = 0; second <= 120; second += 2) {
+      memory = (second < 10 ? 20 : 700) * MB;
       await fullSegment();
       await previewSegment();
       expect(watch.check(generation)).toBeUndefined();
