@@ -330,6 +330,17 @@ describe("Pipeline", () => {
     return file;
   }
 
+  /**
+   * The stream starts again after its pipeline stopped. The new pipeline replaces its first run
+   * at once, so that those files are due in a minute (`due`), and its second run is live.
+   */
+  async function startedAgain(): Promise<{ due: string; live: string }> {
+    const next = start(120);
+    await next.start("http://engine-1/play", false);
+    await next.start("http://engine-2/play", false);
+    return { due: await wrote(1), live: await wrote(2) };
+  }
+
   describe("when a retired run's files are removed", () => {
     const REMOVE_AFTER_MS = 60_000;
 
@@ -342,10 +353,16 @@ describe("Pipeline", () => {
       vi.useRealTimers();
     });
 
-    /** A minute passes, the removals that came due run, and they get the time to finish on the real files. */
-    async function aMinutePasses(): Promise<void> {
+    /**
+     * A minute passes and the removals that came due run. They work on real files, so this waits for
+     * the removal of `due`, a run's files that were to go, and a moment more for the others.
+     */
+    async function aMinutePasses(due: string): Promise<void> {
       await vi.advanceTimersByTimeAsync(REMOVE_AFTER_MS);
-      await sleep(100);
+      await vi.waitFor(() => {
+        expect(existsSync(due)).toBe(false);
+      });
+      await sleep(50);
     }
 
     it("removes the files of a run a minute after another replaced it, and only its files", async () => {
@@ -354,10 +371,8 @@ describe("Pipeline", () => {
       await instance.start("http://engine-2/play", false);
       const [retired, current] = [await wrote(1), await wrote(2)];
       await vi.advanceTimersByTimeAsync(REMOVE_AFTER_MS - 1);
-      await sleep(100);
       expect(existsSync(retired)).toBe(true);
-      await aMinutePasses();
-      expect(existsSync(retired)).toBe(false);
+      await aMinutePasses(retired);
       expect(existsSync(join(hlsDir, "s1", "g1"))).toBe(false);
       expect(existsSync(current)).toBe(true);
     });
@@ -365,30 +380,26 @@ describe("Pipeline", () => {
     it("leaves the files of the stream's next pipeline alone when a run its last one retired comes due", async () => {
       const first = start(120);
       await first.start("http://engine-1/play", false);
-      // A restart retires its first run, with a minute to go; then the stream stops and starts again.
+      // Two restarts retire its first two runs, with a minute to go; then the stream stops and starts again.
       await first.start("http://engine-2/play", false);
+      await first.start("http://engine-3/play", false);
       await first.stop();
-      const next = start(120);
-      await next.start("http://engine-1/play", false);
-      const file = await wrote(1);
-      await aMinutePasses();
-      expect(existsSync(file)).toBe(true);
-      await next.stop();
+      const { due, live } = await startedAgain();
+      await aMinutePasses(due);
+      expect(existsSync(live)).toBe(true);
     });
 
     it("leaves them alone too when its last pipeline retired a run only as the stream stopped", async () => {
       const first = start(120);
       await first.start("http://engine-1/play", false);
-      // The restart is on its way (it is making the new run's directories) when the stream stops.
-      const restarting = first.start("http://engine-2/play", false);
+      await first.start("http://engine-2/play", false);
+      // The third run is on its way (it is making its directories) when the stream stops.
+      const restarting = first.start("http://engine-3/play", false);
       await first.stop();
       await restarting;
-      const next = start(120);
-      await next.start("http://engine-1/play", false);
-      const file = await wrote(1);
-      await aMinutePasses();
-      expect(existsSync(file)).toBe(true);
-      await next.stop();
+      const { due, live } = await startedAgain();
+      await aMinutePasses(due);
+      expect(existsSync(live)).toBe(true);
     });
 
     it("kills the run a restart retired a moment ago when the pipeline stops, as it may still be writing", async () => {
