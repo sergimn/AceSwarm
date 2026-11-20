@@ -60,10 +60,12 @@ export class StreamPaths {
 
   /**
    * Records the stream's health on its path, when it says something about the path: not while it
-   * starts, and not while its broadcast sends nothing new (that is the same on every path).
+   * starts, not while its broadcast sends nothing new (that is the same on every path), and not
+   * while its engine serves the broadcast too far behind (that is where the session started).
    */
   rememberHealth(path: string | null, health: Health): void {
-    const says = health.state !== "starting" && health.state !== "buffering" && health.state !== "stale-source";
+    const starts = health.state === "starting" || health.state === "buffering";
+    const says = !starts && health.state !== "stale-source" && health.lagging !== true;
     if (path !== null && says) {
       this.remember(path, health.healthy);
     }

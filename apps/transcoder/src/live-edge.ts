@@ -28,6 +28,23 @@ export interface LiveEdgeSeed {
   since: number;
   /** Since when the broadcast is known to send nothing new (see `LiveEdge.quietSince`); `since` when absent. */
   quietSince?: number | undefined;
+  /** When a live session of the stream last saw new data, if one ever did (see `LiveEdge.newDataAt`). */
+  newDataAt?: number | undefined;
+}
+
+/**
+ * What two of a stream's sources saw, as one: the newer edge (the second one's when both have the
+ * same), with the latest time either of them found the broadcast sending new data. Those times
+ * are the stream's, not one source's.
+ */
+export function newerSeed(one: LiveEdgeSeed | undefined, other: LiveEdgeSeed | undefined): LiveEdgeSeed | undefined {
+  if (one === undefined || other === undefined) {
+    return one ?? other;
+  }
+  const quietSince = Math.max(one.quietSince ?? one.since, other.quietSince ?? other.since);
+  const newData = Math.max(one.newDataAt ?? -Infinity, other.newDataAt ?? -Infinity);
+  const newest = other.edge >= one.edge ? other : one;
+  return { ...newest, quietSince, newDataAt: newData === -Infinity ? undefined : newData };
 }
 
 /** Rises of a new session's edge compared, by our clock (see `LiveEdge`). */
@@ -57,7 +74,9 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  * know of a slightly later end of the old window has an edge newer than the previous session's,
  * which starts that time over (it gets another `staleAfterMs` to show it moves), though the
  * broadcast is as quiet as before. A session that was live and sees its own edge move again after
- * it went stale is live again, and does start `quietSince` over.
+ * it went stale is live again, and does start `quietSince` over. A session without a live position
+ * (`none`) reports no quiet time, as its output is played as it comes, but keeps the stream's for
+ * the session after it.
  *
  * - waiting: no new data seen yet. A new session counts once it downloaded and its own edge kept
  *   moving past the newest edge the stream's previous session saw, at about the broadcast's pace:
@@ -67,7 +86,8 @@ export const DEFAULT_LIVE_EDGE_SETTINGS: LiveEdgeSettings = { staleAfterMs: 60_0
  *   window sees its edge rise faster than time passes, and then stop.
  * - live: the edge moved within `staleAfterMs`, and the engine serves close to it.
  * - stale: the edge did not move for `staleAfterMs` (counted from when it was first seen), or the
- *   engine serves more than `staleAfterMs` behind it.
+ *   engine serves more than `staleAfterMs` behind it. `staleBecause` tells the two apart for the
+ *   controller: only the first is the broadcast's doing.
  * - none: the session has no live position (see `noLiveAfterPolls`).
  */
 export class LiveEdge {
@@ -79,6 +99,11 @@ export class LiveEdge {
   private edgeSince: number | undefined;
   /** Since when the broadcast sent nothing new, by the stream's sessions: see the class comment. */
   private quietSince: number | undefined;
+  /**
+   * When a live session of the stream last saw new data: `quietSince` without the time an edge
+   * was first seen, which says nothing about whether the broadcast goes on.
+   */
+  private newDataAt: number | undefined;
   /** This session's own newest `livepos.last`, and its recent rises past `baseline` (our clock). */
   private own: number | undefined;
   private rises: { at: number; edge: number }[] = [];
@@ -98,13 +123,14 @@ export class LiveEdge {
     this.seed = seed;
     // What the stream's sessions know goes on before this one has a live position of its own.
     this.quietSince = seed === undefined ? undefined : (seed.quietSince ?? seed.since);
+    this.newDataAt = seed?.newDataAt;
   }
 
   /** What a next session of the same stream starts from. */
   snapshot(): LiveEdgeSeed | undefined {
     return this.edge === undefined || this.edgeSince === undefined
       ? this.seed
-      : { edge: this.edge, since: this.edgeSince, quietSince: this.quietSince };
+      : { edge: this.edge, since: this.edgeSince, quietSince: this.quietSince, newDataAt: this.newDataAt };
   }
 
   observe(sample: LiveSample): void {
@@ -135,6 +161,7 @@ export class LiveEdge {
         this.rose(sample.last, now);
         if (this.verified) {
           this.quietSince = now;
+          this.newDataAt = now;
         }
       }
     }
@@ -180,15 +207,40 @@ export class LiveEdge {
   }
 
   state(): LiveEdgeState {
+    return this.stateWhen(this.staleBecause());
+  }
+
+  /** The state, given why the session is stale (so both come from one reading of the clock). */
+  private stateWhen(staleBecause: "quiet" | "behind" | null): LiveEdgeState {
     if (this.edge === undefined) {
       return this.hasNoLivePos ? "none" : "waiting";
     }
-    const now = this.now();
-    const staleAfterMs = this.settings.staleAfterMs;
-    if (now - (this.edgeSince ?? now) > staleAfterMs || this.behindMs() > staleAfterMs) {
+    if (staleBecause !== null) {
       return "stale";
     }
     return this.verified ? "live" : "waiting";
+  }
+
+  /**
+   * Why the session is stale, when it is (see `LiveEdgeView.staleBecause`). One that serves far
+   * behind its edge is only the engine's fault ("behind") while the broadcast is known to send new
+   * data: a live session of the stream saw its edge move within `staleAfterMs`. Otherwise it may
+   * be a session on the old window of a broadcast that stopped, which a new engine can't help: an
+   * edge that was only just seen for the first time doesn't say that the broadcast goes on.
+   */
+  private staleBecause(): "quiet" | "behind" | null {
+    if (this.edge === undefined) {
+      return null;
+    }
+    const now = this.now();
+    const staleAfterMs = this.settings.staleAfterMs;
+    if (now - (this.edgeSince ?? now) > staleAfterMs) {
+      return "quiet";
+    }
+    if (this.behindMs() <= staleAfterMs) {
+      return null;
+    }
+    return now - (this.newDataAt ?? -Infinity) <= staleAfterMs ? "behind" : "quiet";
   }
 
   /** Whether the edge moved within the last `ms`: the broadcast sends new data now. */
@@ -203,13 +255,15 @@ export class LiveEdge {
   }
 
   view(): LiveEdgeView {
-    const state = this.state();
+    const staleBecause = this.staleBecause();
+    const state = this.stateWhen(staleBecause);
     // A session without a live position says nothing about the broadcast, and its output is
     // published: the quiet time of the sessions before it is kept for the next one (`snapshot`),
     // not shown as this one's.
     const quietSince = state === "none" ? undefined : this.quietSince;
     return {
       state,
+      staleBecause,
       edgeAt: this.edge === undefined ? null : new Date(this.edge * 1000).toISOString(),
       advancedAt: this.edgeSince === undefined ? null : new Date(this.edgeSince).toISOString(),
       quietSince: quietSince === undefined ? null : new Date(quietSince).toISOString(),

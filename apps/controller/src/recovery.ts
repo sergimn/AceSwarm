@@ -26,20 +26,22 @@ export interface RecoveryDecision {
  * failures: 0 → restart pipeline, 1 → restart pipeline, 2 → restart engine, 3 → switch path,
  * then alternate engine restart and path switch with growing delays.
  *
- * While the broadcast sends nothing new (`staleSource`), every try replaces the engine: the one
- * whose live edge stopped goes, so it can't keep its old window, and a new one looks for the
- * broadcast from scratch. Every second try does that on another path, when there is one to switch
- * to. (On a shared engine, other streams play from it: only the stream's session starts again.)
+ * With `freshEngine`, every try replaces the engine. That is for a source the transcoder found
+ * stale: while the broadcast sends nothing new, the engine whose live edge stopped goes, so it
+ * can't keep its old window, and a new one looks for the broadcast from scratch; and an engine
+ * that serves a broadcast that goes on too far behind keeps doing so, where a new one starts close
+ * to the live edge. Every second try does that on another path, when there is one to switch to.
+ * (On a shared engine, other streams play from it: only the stream's session starts again.)
  */
 export function nextRecovery(
   state: RecoveryState,
   policy: RecoveryPolicy,
   canSwitchPath: boolean,
-  staleSource = false,
+  freshEngine = false,
 ): RecoveryDecision {
   const { failures } = state;
   let action: RecoveryAction;
-  if (staleSource) {
+  if (freshEngine) {
     action = canSwitchPath && failures % 2 === 1 ? "switch-path" : "restart-engine";
   } else if (failures < 2) {
     action = "restart-pipeline";

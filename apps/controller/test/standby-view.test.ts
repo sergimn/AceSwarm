@@ -111,11 +111,17 @@ describe("a path without a standby", () => {
 });
 
 describe("what a reader says is wrong", () => {
-  test("is its error, or that the live edge of the broadcast is stale", () => {
+  test("is its error, or why its source is stale", () => {
     expect(readerNote(reader())).toBeUndefined();
     expect(readerNote(reader({ error: "the engine answered 500" }))).toBe("the engine answered 500");
     const stale = { state: "stale", edgeAt: null, advancedAt: null, quietSince: null, behindSeconds: null } as const;
     expect(readerNote(reader({ liveEdge: stale }))).toBe("its broadcast sends no new data");
+    expect(readerNote(reader({ liveEdge: { ...stale, staleBecause: "quiet" } }))).toBe(
+      "its broadcast sends no new data",
+    );
+    expect(readerNote(reader({ liveEdge: { ...stale, staleBecause: "behind" } }))).toBe(
+      "its engine serves the broadcast too far behind",
+    );
     expect(readerNote(reader({ error: "the engine answered 500", liveEdge: stale }))).toBe("the engine answered 500");
     expect(readerNote(reader({ liveEdge: { ...stale, state: "live" } }))).toBeUndefined();
   });

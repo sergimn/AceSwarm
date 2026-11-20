@@ -17,6 +17,12 @@ export interface Health {
   state: HealthState;
   healthy: boolean;
   reason: string;
+  /**
+   * No video because the engine serves the broadcast too far behind its live edge, while the
+   * broadcast sends new data (`LiveEdgeView.staleBecause` is "behind"). That is the engine's
+   * doing, which a new one fixes: the stream doesn't wait for its broadcast.
+   */
+  lagging?: true;
 }
 
 function seconds(ms: number): string {
@@ -35,14 +41,21 @@ export function duration(ms: number): string {
 
 /**
  * Why a source whose live edge the transcoder found stale is. How long the broadcast sent nothing
- * new counts from `quietSince`, which goes on when a retry opens a session on a newer window.
+ * new counts from `quietSince`, which goes on when a retry opens a session on a newer window. A
+ * session that is stale for how far behind its engine serves, rather than for that long without
+ * new data, says so, with what makes the stream wait all the same: nobody saw the broadcast send
+ * new data lately (otherwise it is `lagging`, see `evaluateHealth`).
  */
 function staleReason(edge: LiveEdgeView, now: number): string {
   const behind = edge.behindSeconds ?? 0;
   const since = edge.quietSince === null ? undefined : Date.parse(edge.quietSince);
   return since !== undefined && now - since > behind * 1000
     ? `no new data from the broadcast for ${duration(now - since)}`
-    : `the engine serves the broadcast ${duration(behind * 1000)} late`;
+    : `${lateReason(edge)}, and the broadcast is not known to send new data`;
+}
+
+function lateReason(edge: LiveEdgeView): string {
+  return `the engine serves the broadcast ${duration((edge.behindSeconds ?? 0) * 1000)} late`;
 }
 
 /**
@@ -69,12 +82,17 @@ export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | 
  * new video frames keep arriving; everything else is either still starting or stalled. Frames
  * only count while the engine's live edge moves (the transcoder publishes nothing else), and a
  * source whose live edge stopped is "stale-source": its broadcast sends nothing new, so restarting
- * things locally can't bring video back.
+ * things locally can't bring video back. A source that is stale only because its engine serves a
+ * broadcast that goes on too far behind (`lagging`) is stalled instead: that is local, and a new
+ * engine fixes it. (A transcoder that doesn't say why a source is stale gets the wait, as before.)
  */
 export function evaluateHealth(inputs: HealthInputs): Health {
   const { now, pipeline } = inputs;
-  if (pipeline?.liveEdge?.state === "stale") {
-    return { state: "stale-source", healthy: false, reason: staleReason(pipeline.liveEdge, now) };
+  const edge = pipeline?.liveEdge;
+  if (edge?.state === "stale") {
+    return edge.staleBecause === "behind"
+      ? { state: "stalled", healthy: false, reason: lateReason(edge), lagging: true }
+      : { state: "stale-source", healthy: false, reason: staleReason(edge, now) };
   }
   const lastFrame = lastSignOfVideo(pipeline);
 
