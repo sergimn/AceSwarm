@@ -31,10 +31,20 @@ function fakeFfmpeg(pid: number, signals: string[]): ChildProcess {
   return child;
 }
 
+/** It fails before any video, as when the engine still lets go of the reader it replaces. */
+function exit(child: ChildProcess | undefined): void {
+  Object.assign(child ?? {}, { exitCode: 183 });
+  child?.emit("exit", 183, null);
+}
+
 /** How a run makes the full output's video: the first `-c:v` is that output's. */
 function fullCodec(args: string[] | undefined): string | undefined {
   return args?.[args.indexOf("-c:v") + 1];
 }
+
+/** The full output's playlist of a run once it wrote `count` segments: players get them. */
+const fullPlaylist = (count: number): string =>
+  `#EXTM3U\n#EXT-X-TARGETDURATION:2\n${Array.from({ length: count }, (_, index) => `#EXTINF:2.0,\nseg_${String(index)}.ts\n`).join("")}`;
 
 describe("Pipeline with a run that goes on but is stuck", () => {
   let hlsDir: string;
@@ -65,13 +75,13 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(): Pipeline {
+  function start(previewMode: PipelineSettings["plan"]["previewMode"] = "video"): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
       handoverTimeoutMs: 120_000,
       plan: {
-        previewMode: "video",
+        previewMode,
         previewHeight: 270,
         previewFps: 15,
         previewBitrateKbps: 400,
@@ -82,7 +92,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
       },
-      stuck: { fullOutputStallMs: 30_000, maxMemoryBytes: 1024 * MB },
+      stuck: { fullOutputStallMs: 30_000, maxMemoryGrowthBytes: 512 * MB },
     };
     const events = {
       generationStarted: (_id: string, reason: string) => {
@@ -108,20 +118,25 @@ describe("Pipeline with a run that goes on but is stuck", () => {
   }
 
   /** ffmpeg of the run writes a file of its generation now, by the test's clock. */
-  async function wrote(file: string, run = 0): Promise<void> {
+  async function wrote(file: string, run = 0, text = "#EXTM3U\n"): Promise<void> {
     const path = join(hlsDir, "s1", `g${String(run + 1)}`, file);
-    await writeFile(path, "#EXTM3U\n");
+    await writeFile(path, text);
     await utimes(path, clock.now / 1000, clock.now / 1000);
   }
 
-  /** A second of the run: its preview writes, and its full output too unless it stalled. */
-  async function second(run: number, full: boolean, frame: number): Promise<void> {
+  /**
+   * A second of the run: its preview writes (unless `preview` is false), and its full output too
+   * unless it stalled.
+   */
+  async function second(run: number, full: boolean, frame: number, preview = true): Promise<void> {
     clock.now += 1000;
     (children[run]?.stdout as PassThrough).write(`frame=${String(frame)}\nfps=25\nprogress=continue\n`);
     await nextTurn();
-    await wrote("preview/index.m3u8", run);
+    if (preview) {
+      await wrote("preview/index.m3u8", run);
+    }
     if (full) {
-      await wrote("full/index.m3u8", run);
+      await wrote("full/index.m3u8", run, fullPlaylist(Math.floor(frame / 50)));
     }
     await pipeline?.sync();
   }
@@ -150,13 +165,48 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       { generation: 1, seconds: 30, frames: 1250 },
       "the full output wrote no segment while ffmpeg still made video; starting it again",
     );
-    expect(instance.status().source).toBe("http://engine-1/play");
+    // Until the new run has video, the stream's last frame is the old run's, and the controller is
+    // told when the transcoder started it.
+    const restartedAt = new Date(clock.now).toISOString();
+    expect(instance.status()).toMatchObject({
+      source: "http://engine-1/play",
+      state: "starting",
+      lastFrameAt: new Date(clock.now).toISOString(),
+      restartedAt,
+    });
 
     // The new run plays: it is left alone.
     for (let at = 1; at <= 40; at += 1) {
       await second(1, true, at * 25);
     }
     expect(runs).toHaveLength(2);
+    expect(instance.status()).toMatchObject({ lastFrameAt: new Date(clock.now).toISOString(), restartedAt });
+  });
+
+  it("opens the source again when the run that replaced a stuck one fails before any video", async () => {
+    const instance = start();
+    await instance.start("http://engine-1/play", false);
+    (children[0]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 10; at += 1) {
+      await second(0, true, at * 25);
+    }
+    for (let at = 11; at <= 40; at += 1) {
+      await second(0, false, at * 25);
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(2);
+    });
+    exit(children[1]);
+    clock.now += 1000;
+    await instance.sync();
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(reasons).toEqual(["start", "full-output-stalled", "reopen"]);
+    // The stream's last frame is still the stalled run's: the controller still waits for the new one.
+    const { lastFrameAt, restartedAt } = instance.status();
+    expect(lastFrameAt).not.toBeNull();
+    expect(Date.parse(restartedAt ?? "") - Date.parse(lastFrameAt ?? "")).toBeLessThanOrEqual(1000);
   });
 
   it("re-encodes the full stream when the copy that replaced a stalled one gets no segment either", async () => {
@@ -192,13 +242,51 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
     );
 
-    // It plays, and the stream's later runs re-encode too, as for a source that is not H.264.
-    for (let at = 1; at <= 40; at += 1) {
+    // It plays, and the stream's later runs re-encode too: a run started again for its memory, and
+    // one on another source.
+    for (let at = 1; at <= 70; at += 1) {
       await second(2, true, at * 25);
     }
     expect(runs).toHaveLength(3);
-    await instance.start("http://engine-2/play", false);
+    memory.set(1002, 2000 * MB);
+    await second(2, true, 71 * 25);
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(4);
+    });
+    expect(reasons.at(-1)).toBe("memory");
     expect(fullCodec(runs[3])).toBe("libx264");
+    await instance.start("http://engine-2/play", false);
+    expect(fullCodec(runs[4])).toBe("libx264");
+  });
+
+  it("decodes every frame after a stall with key frames only decoding, so the next run shows whether its copy gets any", async () => {
+    const instance = start("keyframes");
+    await instance.start("http://engine-1/play", false);
+    (children[0]?.stderr as PassThrough).write(H264);
+    expect(runs[0]).toContain("-skip_frame");
+    for (let at = 1; at <= 10; at += 1) {
+      await second(0, true, at * 25);
+    }
+    // The key frames stop: so do the full output and the preview, which decodes key frames only.
+    for (let at = 11; at <= 40; at += 1) {
+      await second(0, false, at * 25, false);
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(2);
+    });
+    expect(reasons).toEqual(["start", "full-output-stalled"]);
+    expect(runs[1]).not.toContain("-skip_frame");
+    expect(instance.decoding()).toBe("all-frames-fallback");
+    // Its preview goes on and its copy gets nothing: the full stream is re-encoded, from every frame.
+    (children[1]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 31; at += 1) {
+      await second(1, false, 0);
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(fullCodec(runs[2])).toBe("libx264");
+    expect(runs[2]).not.toContain("-skip_frame");
   });
 
   it("leaves a run alone whose source stopped: nothing makes video, and the controller deals with it", async () => {
@@ -215,23 +303,27 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     expect(runs).toHaveLength(1);
   });
 
-  it("starts ffmpeg again once it holds more than the memory limit", async () => {
+  it("starts ffmpeg again once its memory grew by more than the limit over what it settled at", async () => {
     const instance = start();
     await instance.start("http://engine-1/play", false);
     (children[0]?.stderr as PassThrough).write(H264);
-    for (let at = 1; at <= 5; at += 1) {
+    // A run that holds over a GB from the start is fine (a re-encode on a host with many cores).
+    memory.set(1000, 1100 * MB);
+    for (let at = 1; at <= 70; at += 1) {
       await second(0, true, at * 25);
     }
-    memory.set(1000, 1500 * MB);
-    await second(0, true, 6 * 25);
+    expect(runs).toHaveLength(1);
+    memory.set(1000, 1700 * MB);
+    await second(0, true, 71 * 25);
     await vi.waitFor(() => {
       expect(runs).toHaveLength(2);
     });
     expect(reasons).toEqual(["start", "memory"]);
     expect(signals[0]?.[0]).toBe("SIGKILL");
     expect(warn).toHaveBeenCalledWith(
-      { generation: 1, memoryMb: 1500, limitMb: 1024 },
-      "ffmpeg holds too much memory; starting it again",
+      { generation: 1, memoryMb: 1700, settledMb: 1100, limitMb: 512 },
+      "ffmpeg's memory keeps growing; starting it again",
     );
+    expect(fullCodec(runs[1])).toBe("copy");
   });
 });

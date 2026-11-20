@@ -4,20 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Generation } from "../src/generation.ts";
-import { processMemory, StuckRuns, type MemoryReader } from "../src/stuck-runs.ts";
+import { MEMORY_SETTLES_MS, processMemory, StuckRuns, type MemoryReader } from "../src/stuck-runs.ts";
 
-const START = 1_800_000_000_000;
 const MB = 1024 * 1024;
 
 /** A run of ffmpeg writing to `directory`, with a process of that pid. */
-function run(directory: string, pid?: number): Generation {
+function run(directory: string, pid?: number, mode: "copy" | "transcode" = "copy"): Generation {
   const generation = new Generation({
     number: 1,
     source: "http://engine/play",
     directory,
-    mode: "copy",
+    mode,
     allFrames: false,
-    startedAt: START,
+    startedAt: 0,
     inputTimeoutSeconds: 60,
   });
   generation.process = pid === undefined ? undefined : ({ pid } as ChildProcess);
@@ -25,17 +24,23 @@ function run(directory: string, pid?: number): Generation {
   return generation;
 }
 
-function runs(stallSeconds = 30, maxMemoryMb = 1024, memoryOf: MemoryReader = () => 100 * MB): StuckRuns {
-  return new StuckRuns({ fullOutputStallMs: stallSeconds * 1000, maxMemoryBytes: maxMemoryMb * MB }, memoryOf);
-}
-
 const huge = (): number => 10_000 * MB;
 
 describe("StuckRuns", () => {
   let directory: string;
   let generation: Generation;
+  /** The clock `StuckRuns` goes by, in ms. */
+  const clock = { now: 0 };
+  /** The modification time the next write gets, in seconds: any time will do, as long as it changes. */
+  let mark = 1_800_000_000;
+
+  function runs(stallSeconds = 30, growthMb = 512, memoryOf: MemoryReader = () => 100 * MB): StuckRuns {
+    const limits = { fullOutputStallMs: stallSeconds * 1000, maxMemoryGrowthBytes: growthMb * MB };
+    return new StuckRuns(limits, memoryOf, () => clock.now);
+  }
 
   beforeEach(async () => {
+    clock.now = 0;
     directory = await mkdtemp(join(tmpdir(), "stuck-runs-test-"));
     await mkdir(join(directory, "full"));
     await mkdir(join(directory, "preview"));
@@ -46,44 +51,55 @@ describe("StuckRuns", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  /** ffmpeg writes a file of the run at `at` (ms), as its modification time says. */
-  async function wrote(file: string, at: number): Promise<void> {
-    const path = join(directory, file);
+  /** ffmpeg writes a file of the run in `at` (its directory). */
+  async function wrote(file: string, at = directory): Promise<void> {
+    const path = join(at, file);
     await writeFile(path, "x");
-    await utimes(path, at / 1000, at / 1000);
+    mark += 1;
+    await utimes(path, mark, mark);
   }
 
-  const fullSegment = (at: number): Promise<void> => wrote("full/index.m3u8", at);
-  const previewSegment = (at: number): Promise<void> => wrote("preview/index.m3u8", at);
+  const fullSegment = (at = directory): Promise<void> => wrote("full/index.m3u8", at);
+  const previewSegment = (at = directory): Promise<void> => wrote("preview/index.m3u8", at);
+
+  /** Seconds pass by the clock of `StuckRuns`. */
+  function after(seconds: number): void {
+    clock.now += seconds * 1000;
+  }
 
   /** The first run plays, then its full output stalls for 30 s: it is started again. */
-  async function firstStalls(watch: StuckRuns): Promise<number> {
-    await fullSegment(START);
-    await previewSegment(START);
+  async function firstStalls(watch: StuckRuns): Promise<void> {
+    await fullSegment();
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 30_000);
+    after(30);
+    await previewSegment();
     expect(watch.check(generation)?.reencode).toBe(false);
-    return START + 30_000;
   }
 
   it("leaves a run alone while its full output keeps writing segments", async () => {
     const watch = runs();
     for (let second = 0; second <= 120; second += 2) {
-      await fullSegment(START + second * 1000);
-      await previewSegment(START + second * 1000);
-      generation.lastFrameAt = START + second * 1000;
+      await fullSegment();
+      await previewSegment();
+      generation.frames = second * 25;
       expect(watch.check(generation)).toBeUndefined();
+      after(2);
     }
   });
 
   it("finds a run whose full output stopped while its preview goes on", async () => {
     const watch = runs();
-    await fullSegment(START);
-    await previewSegment(START);
+    await fullSegment();
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 28_000);
-    expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 30_000);
+    for (let second = 2; second <= 28; second += 2) {
+      after(2);
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+    }
+    after(2);
+    await previewSegment();
     expect(watch.check(generation)).toEqual({
       reason: "full-output-stalled",
       reencode: false,
@@ -94,89 +110,145 @@ describe("StuckRuns", () => {
 
   it("goes by ffmpeg's frame count too, and by the thumbnail, so that it works without a preview", async () => {
     const watch = runs();
-    await fullSegment(START);
-    generation.lastFrameAt = START;
+    await fullSegment();
+    generation.frames = 25;
     expect(watch.check(generation)).toBeUndefined();
+    after(31);
     generation.frames = 1500;
-    generation.lastFrameAt = START + 31_000;
     expect(watch.check(generation)?.details).toEqual({ seconds: 31, frames: 1500 });
 
     const thumbnails = runs();
     const other = run(directory, 4243);
-    await wrote("thumbnail.jpg", START);
-    await fullSegment(START);
+    await wrote("thumbnail.jpg");
     expect(thumbnails.check(other)).toBeUndefined();
-    await wrote("thumbnail.jpg", START + 40_000);
+    after(40);
+    await wrote("thumbnail.jpg");
     expect(thumbnails.check(other)?.reason).toBe("full-output-stalled");
   });
 
   it("leaves a run alone that makes no video at all: its source stopped, which the controller handles", async () => {
     const watch = runs();
-    await fullSegment(START);
-    await previewSegment(START);
-    generation.lastFrameAt = START;
+    await fullSegment();
+    await previewSegment();
+    generation.frames = 25;
+    expect(watch.check(generation)).toBeUndefined();
     // Nothing more is written for minutes: whatever the clock says, ffmpeg made no video since.
-    expect(watch.check(generation)).toBeUndefined();
-    expect(watch.check(generation)).toBeUndefined();
+    for (let second = 0; second < 300; second += 1) {
+      after(1);
+      expect(watch.check(generation)).toBeUndefined();
+    }
   });
 
   it("counts from when the run first made video, not from when it started", async () => {
     const watch = runs();
     // A slow engine: the first data comes long after ffmpeg started, and the full output's first
     // segment needs a key frame more than the preview's.
-    await previewSegment(START + 60_000);
+    after(60);
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 80_000);
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await fullSegment(START + 82_000);
-    await previewSegment(START + 100_000);
+    after(20);
+    await previewSegment();
+    expect(watch.check(generation)).toBeUndefined();
+    after(2);
+    await fullSegment();
+    expect(watch.check(generation)).toBeUndefined();
+    after(18);
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
   });
 
   it("finds a run whose full output never wrote a segment while its preview went on", async () => {
     const watch = runs();
-    await previewSegment(START + 5000);
+    after(5);
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 35_000);
+    after(30);
+    await previewSegment();
     expect(watch.check(generation)?.details).toEqual({ seconds: 30, frames: 0 });
   });
 
   it("uses the stall time it is given", async () => {
     const watch = runs(10);
-    await fullSegment(START);
-    await previewSegment(START);
+    await fullSegment();
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 9000);
+    after(9);
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 10_000);
+    after(1);
+    await previewSegment();
     expect(watch.check(generation)?.reason).toBe("full-output-stalled");
   });
 
-  it("finds a run that holds more memory than allowed, whatever its outputs do", async () => {
-    let memory = 900 * MB;
-    const watch = runs(30, 1024, (pid) => (pid === 4242 ? memory : undefined));
-    await fullSegment(START);
-    await previewSegment(START);
+  it("goes by its own clock: when the files say they were written makes no difference", async () => {
+    const watch = runs();
+    // The system's clock steps an hour on: the files' times jump, while a second passes each time.
+    for (let second = 0; second <= 60; second += 2) {
+      mark += second === 30 ? 3600 : 0;
+      await fullSegment();
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+      after(2);
+    }
+  });
+
+  it("finds a run whose memory grew by more than allowed over what it settled at, whatever its outputs do", async () => {
+    let memory = 1100 * MB;
+    const watch = runs(30, 512, (pid) => (pid === 4242 ? memory : undefined));
+    for (let second = 0; second <= 120; second += 2) {
+      await fullSegment();
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+      after(2);
+    }
+    memory = 1612 * MB;
     expect(watch.check(generation)).toBeUndefined();
-    memory = 1025 * MB;
+    memory = 1613 * MB;
     expect(watch.check(generation)).toEqual({
       reason: "memory",
       reencode: false,
-      message: "ffmpeg holds too much memory; starting it again",
-      details: { memoryMb: 1025, limitMb: 1024 },
+      message: "ffmpeg's memory keeps growing; starting it again",
+      details: { memoryMb: 1613, settledMb: 1100, limitMb: 512 },
     });
   });
 
+  it("takes what a run holds a minute after its first video as what it needs, however much that is", async () => {
+    // A re-encode on a host with many cores holds over a GB from its first seconds on.
+    let memory = 300 * MB;
+    const watch = runs(30, 512, () => memory);
+    after(10);
+    await previewSegment();
+    expect(watch.check(generation)).toBeUndefined();
+    for (let second = 0; second < MEMORY_SETTLES_MS / 1000; second += 2) {
+      memory += 50 * MB;
+      after(2);
+      await fullSegment();
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+    }
+    // Settled at 1800 MB: that much more is fine for good.
+    for (let second = 0; second < 600; second += 2) {
+      after(2);
+      await fullSegment();
+      await previewSegment();
+      expect(watch.check(generation)).toBeUndefined();
+    }
+  });
+
   it("has no memory limit at 0, and none when the memory can't be read", async () => {
-    await previewSegment(START);
-    await fullSegment(START);
-    expect(runs(30, 0, () => 10_000 * MB).check(generation)).toBeUndefined();
-    expect(runs(30, 1024, () => undefined).check(generation)).toBeUndefined();
+    for (const watch of [runs(30, 0, huge), runs(30, 512, () => undefined)]) {
+      await previewSegment();
+      await fullSegment();
+      expect(watch.check(generation)).toBeUndefined();
+      after(120);
+      await previewSegment();
+      await fullSegment();
+      expect(watch.check(generation)).toBeUndefined();
+    }
   });
 
   it("leaves runs alone that ended, were replaced, stopped for a stale source or have no process", async () => {
-    await fullSegment(START);
-    await previewSegment(START + 60_000);
     const exited = run(directory, 1);
     exited.state = "exited";
     const retired = run(directory, 2);
@@ -185,11 +257,15 @@ describe("StuckRuns", () => {
     stale.staleStopped = true;
     const none = run(directory);
     for (const ended of [exited, retired, stale, none]) {
-      const watch = runs(30, 1024, huge);
-      // Its preview went on long after its last full segment.
-      await previewSegment(START);
+      let memory = 100 * MB;
+      const watch = runs(30, 512, () => memory);
+      // Its preview goes on long after its last full segment, and its memory grows.
+      await fullSegment();
+      await previewSegment();
       expect(watch.check(ended)).toBeUndefined();
-      await previewSegment(START + 60_000);
+      after(90);
+      memory = huge();
+      await previewSegment();
       expect(watch.check(ended)).toBeUndefined();
     }
   });
@@ -197,9 +273,10 @@ describe("StuckRuns", () => {
   it("checks a run that has made no frame yet too, as ffmpeg counts the frames of the full output", async () => {
     const watch = runs();
     generation.state = "starting";
-    await previewSegment(START);
+    await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    await previewSegment(START + 30_000);
+    after(30);
+    await previewSegment();
     expect(watch.check(generation)?.reason).toBe("full-output-stalled");
   });
 
@@ -219,19 +296,16 @@ describe("StuckRuns", () => {
       await rm(nextDirectory, { recursive: true, force: true });
     });
 
-    async function nextWrote(file: string, at: number): Promise<void> {
-      const path = join(nextDirectory, file);
-      await writeFile(path, "x");
-      await utimes(path, at / 1000, at / 1000);
-    }
-
-    it("re-encodes the full stream when its copy never wrote a segment", async () => {
+    it("re-encodes the full stream when its copy never wrote a segment, and so do the stream's later runs", async () => {
       const watch = runs();
-      const stalledAt = await firstStalls(watch);
+      await firstStalls(watch);
+      expect(watch.copyFails).toBe(false);
       // The new run makes previews from 5 s on, but the copy gets no frame: no key frame comes.
-      await nextWrote("preview/index.m3u8", stalledAt + 5000);
+      after(5);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
-      await nextWrote("preview/index.m3u8", stalledAt + 35_000);
+      after(30);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)).toEqual({
         reason: "full-output-stalled",
         reencode: true,
@@ -239,52 +313,65 @@ describe("StuckRuns", () => {
           "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
         details: { seconds: 30, frames: 0 },
       });
+      expect(watch.copyFails).toBe(true);
     });
 
     it("starts a copy again when the new run had full segments before it stalled", async () => {
       const watch = runs();
-      const stalledAt = await firstStalls(watch);
-      await nextWrote("preview/index.m3u8", stalledAt + 5000);
-      await nextWrote("full/index.m3u8", stalledAt + 7000);
+      await firstStalls(watch);
+      after(5);
+      await previewSegment(nextDirectory);
+      after(2);
+      await fullSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
-      await nextWrote("preview/index.m3u8", stalledAt + 37_000);
+      after(30);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)?.reencode).toBe(false);
+      expect(watch.copyFails).toBe(false);
     });
 
     it("starts a copy again when the new run stalls long after", async () => {
       const watch = runs();
-      const stalledAt = await firstStalls(watch);
-      await nextWrote("preview/index.m3u8", stalledAt + 5 * 60_000 - 30_000);
+      await firstStalls(watch);
+      // Its first video comes so late that it is found stalled a second after the 5 minutes.
+      after(5 * 60 - 29);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
-      await nextWrote("preview/index.m3u8", stalledAt + 5 * 60_000 + 1);
+      after(29);
+      await previewSegment(nextDirectory);
+      expect(watch.check(next)).toBeUndefined();
+      after(1);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)?.reencode).toBe(false);
     });
 
-    it("never re-encodes for a run that re-encodes already, nor after a run that held too much memory", async () => {
-      let memory = 2000 * MB;
-      const watch = runs(30, 1024, () => memory);
-      await previewSegment(START);
+    it("never re-encodes for a run that re-encodes already, nor after a run whose memory grew", async () => {
+      let memory = 100 * MB;
+      const watch = runs(30, 512, () => memory);
+      for (let second = 0; second <= 70; second += 2) {
+        await fullSegment();
+        await previewSegment();
+        expect(watch.check(generation)).toBeUndefined();
+        after(2);
+      }
+      memory = 2000 * MB;
       expect(watch.check(generation)?.reason).toBe("memory");
       memory = 100 * MB;
-      await nextWrote("preview/index.m3u8", START + 5000);
+      after(5);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
-      await nextWrote("preview/index.m3u8", START + 35_000);
+      after(30);
+      await previewSegment(nextDirectory);
       expect(watch.check(next)?.reencode).toBe(false);
 
-      const transcoding = new Generation({
-        number: 3,
-        source: "http://engine/play",
-        directory: nextDirectory,
-        mode: "transcode",
-        allFrames: false,
-        startedAt: START,
-        inputTimeoutSeconds: 60,
-      });
-      transcoding.process = { pid: 4444 } as ChildProcess;
-      await nextWrote("preview/index.m3u8", START + 40_000);
+      const transcoding = run(nextDirectory, 4444, "transcode");
+      after(5);
+      await previewSegment(nextDirectory);
       expect(watch.check(transcoding)).toBeUndefined();
-      await nextWrote("preview/index.m3u8", START + 70_000);
+      after(30);
+      await previewSegment(nextDirectory);
       expect(watch.check(transcoding)?.reencode).toBe(false);
+      expect(watch.copyFails).toBe(false);
     });
   });
 });

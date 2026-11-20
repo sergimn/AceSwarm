@@ -17,7 +17,7 @@ const manager = new PipelineManager(
     liveEdge: { ...DEFAULT_LIVE_EDGE_SETTINGS, staleAfterMs: config.STALE_SOURCE_SECONDS * 1000 },
     stuck: {
       fullOutputStallMs: config.FULL_OUTPUT_STALL_SECONDS * 1000,
-      maxMemoryBytes: config.FFMPEG_MAX_MEMORY_MB * 1024 * 1024,
+      maxMemoryGrowthBytes: config.FFMPEG_MAX_MEMORY_GROWTH_MB * 1024 * 1024,
     },
     plan: {
       previewMode: previewMode(config),

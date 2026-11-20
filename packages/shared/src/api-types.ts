@@ -316,6 +316,15 @@ export interface PipelineStatus {
    * none while this waits, and none once it is stale.
    */
   liveEdge: LiveEdgeView | null;
+  /**
+   * When the transcoder last started the stream's ffmpeg again by itself, because its run went on
+   * but was stuck: its full output wrote nothing while it still made video, or its memory kept
+   * growing. Null if it never did (and missing from a transcoder older than this field). Until the
+   * new run has video of its own, `lastFrameAt` is the old run's last frame, and the controller
+   * gives the new run its startup grace from this moment (see its `evaluateHealth`): a re-encode
+   * of the full stream can take it a minute.
+   */
+  restartedAt?: string | null;
 }
 
 /** One standby session the transcoder reads to keep it pulling the stream (`PUT /standbys/:id`). */

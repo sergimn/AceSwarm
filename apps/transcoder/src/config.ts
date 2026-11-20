@@ -57,11 +57,12 @@ const schema = z.object({
    */
   FULL_OUTPUT_STALL_SECONDS: z.coerce.number().int().min(10).default(30),
   /**
-   * An ffmpeg run that holds more memory than this (MB, resident and swapped out) starts again,
-   * whatever the cause: nothing else stops it on a host without container memory limits. 0 turns
-   * it off.
+   * An ffmpeg run whose memory (resident and swapped out) grows by more than this many MB over what
+   * it settled at a minute after its first video starts again, whatever the cause. The compose file
+   * gives the transcoder no memory limit, so nothing else stops it. How much a run needs depends on
+   * the host (more cores start more threads), so the limit is on the growth. 0 turns it off.
    */
-  FFMPEG_MAX_MEMORY_MB: z.coerce.number().int().min(0).default(1024),
+  FFMPEG_MAX_MEMORY_GROWTH_MB: z.coerce.number().int().min(0).default(512),
 });
 
 export type Config = z.infer<typeof schema>;

@@ -18,16 +18,16 @@ describe("preview mode", () => {
 });
 
 describe("stuck ffmpeg runs", () => {
-  it("restarts a run whose full output stalled for 30 s, or that holds over 1024 MB, by default", () => {
+  it("restarts a run whose full output stalled for 30 s, or whose memory grew by over 512 MB, by default", () => {
     expect(loadConfig({}).FULL_OUTPUT_STALL_SECONDS).toBe(30);
-    expect(loadConfig({}).FFMPEG_MAX_MEMORY_MB).toBe(1024);
+    expect(loadConfig({}).FFMPEG_MAX_MEMORY_GROWTH_MB).toBe(512);
   });
 
-  it("takes other values, a memory limit of 0 (none), and refuses a stall time under 10 s", () => {
-    const config = loadConfig({ FULL_OUTPUT_STALL_SECONDS: "60", FFMPEG_MAX_MEMORY_MB: "0" });
+  it("takes other values, a memory growth limit of 0 (none), and refuses a stall time under 10 s", () => {
+    const config = loadConfig({ FULL_OUTPUT_STALL_SECONDS: "60", FFMPEG_MAX_MEMORY_GROWTH_MB: "0" });
     expect(config.FULL_OUTPUT_STALL_SECONDS).toBe(60);
-    expect(config.FFMPEG_MAX_MEMORY_MB).toBe(0);
+    expect(config.FFMPEG_MAX_MEMORY_GROWTH_MB).toBe(0);
     expect(() => loadConfig({ FULL_OUTPUT_STALL_SECONDS: "5" })).toThrow(/FULL_OUTPUT_STALL_SECONDS/);
-    expect(() => loadConfig({ FFMPEG_MAX_MEMORY_MB: "-1" })).toThrow(/FFMPEG_MAX_MEMORY_MB/);
+    expect(() => loadConfig({ FFMPEG_MAX_MEMORY_GROWTH_MB: "-1" })).toThrow(/FFMPEG_MAX_MEMORY_GROWTH_MB/);
   });
 });

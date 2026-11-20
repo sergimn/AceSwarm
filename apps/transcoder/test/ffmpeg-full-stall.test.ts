@@ -1,9 +1,10 @@
 /**
- * Runs the real ffmpeg of the transcoder image on a broadcast that stops sending key frames, fed at
- * a pace like a live engine. ffmpeg's HLS muxer holds the segment it writes in memory until it can
- * start the next one, and a copied video can only start one at a key frame as ffmpeg sees it, so
- * the full output stops while the preview and ffmpeg's frame count go on (see "A full output that
- * stops" in docs/architecture.md). The pipeline has to notice that by itself (see `StuckRuns`).
+ * Runs the real ffmpeg of the transcoder image on a broadcast that stops sending key frames, fed
+ * steadily like a live engine, at four times its pace. ffmpeg's HLS muxer holds the segment it
+ * writes in memory until it can start the next one, and a copied video can only start one at a key
+ * frame as ffmpeg sees it, so the full output stops while the preview and ffmpeg's frame count go
+ * on (see "A full output that stops" in docs/architecture.md). The pipeline has to notice that by
+ * itself (see `StuckRuns`).
  *
  * Like `ffmpeg-gaps.test.ts`, it only runs with `FFMPEG_BIN` set to the ffmpeg 9.0.2 binary of the
  * transcoder image (the CI job "ffmpeg with timestamp gaps" runs both):
@@ -155,13 +156,14 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
   describe("in a pipeline", () => {
     let server: Server;
     let url: string;
+    /** When the broadcast began: each test plays it from its start. */
+    let liveSince = Date.now();
 
     beforeAll(async () => {
       // An engine of a live broadcast: every connection gets the stream from where it is now.
-      const startedAt = Date.now();
       server = createServer((request, response) => {
         response.writeHead(200, { "content-type": "video/mp2t" });
-        const elapsed = (Date.now() - startedAt) / 1000;
+        const elapsed = (Date.now() - liveSince) / 1000;
         let at = Math.floor((elapsed * bytesPerSecond()) / PACKET) * PACKET;
         const timer = setInterval(() => {
           const next = Math.min(sample.length, at + Math.round(bytesPerSecond() / 50));
@@ -187,57 +189,69 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       server.close();
     });
 
-    it("starts ffmpeg again once the full output wrote nothing for the stall time, then re-encodes it", async () => {
-      const started: { reason: string; at: number }[] = [];
-      const begin = Date.now();
-      const pipeline = new Pipeline(
-        "stall",
-        {
-          hlsDir: join(directory, "hls"),
-          ffmpegPath: FFMPEG ?? "ffmpeg",
-          handoverTimeoutMs: 120_000,
-          plan: PLAN_SETTINGS,
-          stuck: { fullOutputStallMs: 8000, maxMemoryBytes: 1024 * 1024 * 1024 },
-        },
-        createLogger("test", "silent"),
-        {
-          generationStarted: (_id, reason) => {
-            started.push({ reason, at: (Date.now() - begin) / 1000 });
+    // With key frames only decoding, the preview stops with the key frames too, and the run that
+    // replaces the stalled one decodes every frame so that its preview shows its copy gets nothing.
+    it.each(["video", "keyframes", "thumbnails"] as const)(
+      "starts ffmpeg again once the full output wrote nothing for the stall time, then re-encodes it (%s previews)",
+      async (previewMode) => {
+        const started: { reason: string; at: number }[] = [];
+        const id = `stall-${previewMode}`;
+        liveSince = Date.now();
+        const pipeline = new Pipeline(
+          id,
+          {
+            hlsDir: join(directory, "hls"),
+            ffmpegPath: FFMPEG ?? "ffmpeg",
+            handoverTimeoutMs: 120_000,
+            plan: { ...PLAN_SETTINGS, previewMode },
+            stuck: { fullOutputStallMs: 8000, maxMemoryGrowthBytes: 512 * 1024 * 1024 },
           },
-          handover: () => undefined,
-        },
-      );
-      try {
-        await pipeline.start(url, false);
-        const keyFramesStop = WITH_KEY_FRAMES / PACE;
-        for (let waited = 0; waited < 30 && started.length < 2; waited += 0.5) {
-          await sleep(500);
-        }
-        expect(started.map((start) => start.reason)).toEqual(["start", "full-output-stalled"]);
-        // Not before the stall time had passed since the key frames stopped, nor much after.
-        expect(started[1]?.at).toBeGreaterThan(keyFramesStop + 8 - 2);
-        expect(started[1]?.at).toBeLessThan(keyFramesStop + 8 + 6);
-        const first = join(directory, "hls", "stall", "g1");
-        expect(playlistEnd(join(first, "full", "index.m3u8"))).toBeLessThanOrEqual(WITH_KEY_FRAMES + 2);
-        expect(playlistEnd(join(first, "preview", "index.m3u8"))).toBeGreaterThan(WITH_KEY_FRAMES + 8 * PACE - 8);
-        expect(pipeline.status().mode).toBe("copy");
+          createLogger("test", "silent"),
+          {
+            generationStarted: (_id, reason) => {
+              started.push({ reason, at: (Date.now() - liveSince) / 1000 });
+            },
+            handover: () => undefined,
+          },
+        );
+        try {
+          await pipeline.start(url, false);
+          const keyFramesStop = WITH_KEY_FRAMES / PACE;
+          for (let waited = 0; waited < 30 && started.length < 2; waited += 0.5) {
+            await sleep(500);
+          }
+          expect(started.map((start) => start.reason)).toEqual(["start", "full-output-stalled"]);
+          // Not before the stall time had passed since the key frames stopped, nor much after.
+          expect(started[1]?.at).toBeGreaterThan(keyFramesStop + 8 - 2);
+          expect(started[1]?.at).toBeLessThan(keyFramesStop + 8 + 6);
+          expect(pipeline.decoding()).toBe(previewMode === "video" ? "all-frames" : "all-frames-fallback");
+          const first = join(directory, "hls", id, "g1");
+          expect(playlistEnd(join(first, "full", "index.m3u8"))).toBeLessThanOrEqual(WITH_KEY_FRAMES + 2);
+          if (previewMode === "video") {
+            const preview = playlistEnd(join(first, "preview", "index.m3u8"));
+            expect(preview).toBeGreaterThan(WITH_KEY_FRAMES + 8 * PACE - 8);
+          }
+          expect(pipeline.status().mode).toBe("copy");
 
-        // The new run's copy gets no frame at all, as no key frame comes: the full stream is
-        // re-encoded after the stall time, and plays.
-        for (let waited = 0; waited < 25 && started.length < 3; waited += 0.5) {
-          await sleep(500);
+          // The new run's copy gets no frame at all, as no key frame comes: the full stream is
+          // re-encoded after the stall time, and plays.
+          for (let waited = 0; waited < 25 && started.length < 3; waited += 0.5) {
+            await sleep(500);
+          }
+          const reasons = started.map((start) => start.reason);
+          expect(reasons).toEqual(["start", "full-output-stalled", "full-output-stalled"]);
+          expect(pipeline.status().mode).toBe("transcode");
+          const third = join(directory, "hls", id, "g3", "full", "index.m3u8");
+          for (let waited = 0; waited < 10 && playlistEnd(third) < 4; waited += 0.5) {
+            await sleep(500);
+          }
+          expect(playlistEnd(third)).toBeGreaterThanOrEqual(4);
+          expect(playlistEnd(join(directory, "hls", id, "g2", "full", "index.m3u8"))).toBe(0);
+        } finally {
+          await pipeline.stop();
         }
-        expect(started.map((start) => start.reason)).toEqual(["start", "full-output-stalled", "full-output-stalled"]);
-        expect(pipeline.status().mode).toBe("transcode");
-        const third = join(directory, "hls", "stall", "g3", "full", "index.m3u8");
-        for (let waited = 0; waited < 10 && playlistEnd(third) < 4; waited += 0.5) {
-          await sleep(500);
-        }
-        expect(playlistEnd(third)).toBeGreaterThanOrEqual(4);
-        expect(playlistEnd(join(directory, "hls", "stall", "g2", "full", "index.m3u8"))).toBe(0);
-      } finally {
-        await pipeline.stop();
-      }
-    }, 90_000);
+      },
+      90_000,
+    );
   });
 });
