@@ -18,6 +18,7 @@ import {
 } from "./live-edge.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
 import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
+import { DEFAULT_STUCK_LIMITS, StuckRuns, type MemoryReader, type StuckLimits } from "./stuck-runs.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 
@@ -33,6 +34,8 @@ export interface PipelineSettings {
    * `staleAfterMs` also leave the playlist, so a player never starts on old video.
    */
   liveEdge?: LiveEdgeSettings;
+  /** When a run that goes on is stuck, and started again (see `StuckRuns`). */
+  stuck?: StuckLimits;
 }
 
 export interface PipelineEvents {
@@ -47,6 +50,8 @@ export interface PipelineOptions {
   spawner?: Spawner | undefined;
   now?: () => number;
   watchLiveEdge?: WatchLiveEdge;
+  /** How much memory an ffmpeg process holds (see `StuckLimits.maxMemoryBytes`). */
+  memoryOf?: MemoryReader;
 }
 
 const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -85,6 +90,7 @@ export class Pipeline {
   private forceTranscode = false;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
+  private readonly stuck: StuckRuns;
   /**
    * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
    * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
@@ -110,6 +116,7 @@ export class Pipeline {
     this.now = options.now ?? Date.now;
     this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
     this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
+    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, options.memoryOf);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -267,6 +274,9 @@ export class Pipeline {
       return;
     }
     this.stopIfStale(active);
+    if (this.restartIfStuck(active)) {
+      return;
+    }
     if (this.mayReopenNow(active)) {
       this.reopen(active);
       return;
@@ -350,6 +360,22 @@ export class Pipeline {
     for (const variant of VARIANTS) {
       this.playlists[variant].expire(before);
     }
+  }
+
+  /**
+   * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`). The
+   * old run is killed outright: as it stops, ffmpeg would write out all it holds.
+   */
+  private restartIfStuck(generation: Generation): boolean {
+    const stuck = this.stuck.check(generation);
+    if (stuck === undefined) {
+      return false;
+    }
+    this.logger.warn({ generation: generation.number, ...stuck.details }, stuck.message);
+    generation.process?.kill("SIGKILL");
+    const { source, inputTimeoutSeconds, stat } = generation;
+    this.swap(generation, this.prepare(source, inputTimeoutSeconds, REOPENS_AFTER_FALLBACK, stat), stuck.reason);
+    return true;
   }
 
   /** Promotes the pending generation once it has a segment, or gives up on it. */
@@ -585,25 +611,13 @@ export class Pipeline {
   }
 
   private async relaunchAsTranscode(generation: Generation): Promise<void> {
-    if (generation === this.active) {
-      this.retire(generation);
-      this.active = await this.launch(
-        generation.source,
-        "transcode",
-        generation.inputTimeoutSeconds,
-        0,
-        generation.stat,
-      );
-    } else if (generation === this.pending) {
-      this.retire(generation);
-      this.pending = await this.launch(
-        generation.source,
-        "transcode",
-        generation.inputTimeoutSeconds,
-        0,
-        generation.stat,
-      );
+    const slot = generation === this.active ? "active" : generation === this.pending ? "pending" : undefined;
+    if (slot === undefined) {
+      return;
     }
+    this.retire(generation);
+    const { source, inputTimeoutSeconds, stat } = generation;
+    this[slot] = await this.launch(source, "transcode", inputTimeoutSeconds, 0, stat);
   }
 
   /** Stops a generation and removes its files once players can no longer reference them. */
