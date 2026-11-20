@@ -30,6 +30,21 @@ export function maxEngineMemoryCacheMb(limitMb: number): number {
   );
 }
 
+/** The engine never gives a stream less cache on disk than this (its `live_cache_min_size`). */
+const MIN_ENGINE_DISK_CACHE_MB = 50;
+
+/**
+ * Whether this can be the host folder of ENGINE_CACHE_DIR: a full, plain path. Control characters
+ * are out because the path travels in a Docker API call and in log lines.
+ */
+function isHostFolder(dir: string): boolean {
+  if (!dir.startsWith("/") || /\p{Cc}/u.test(dir)) {
+    return false;
+  }
+  const parts = dir.split("/").filter((part) => part.length > 0);
+  return parts.length > 0 && parts.every((part) => part !== "." && part !== "..");
+}
+
 /** Docker API endpoint. Always a socket proxy, never the raw socket. */
 const dockerHost = z
   .string()
@@ -67,6 +82,25 @@ const schema = z
      * cap an engine grows for over an hour, to about 1.7 GB in testing. 0 leaves it to the engine.
      */
     ENGINE_MEMORY_CACHE_MB: z.coerce.number().int().min(0).max(65_536).default(128),
+    /**
+     * A folder on the host where engines keep their stream cache instead of in memory; empty keeps
+     * it in memory. It is mounted into every engine, which makes a folder of its own in it (see
+     * engine/entrypoint.sh). The container runtime does not make the folder: a path under a disk
+     * that is not mounted then fails, rather than fill the disk below it.
+     */
+    ENGINE_CACHE_DIR: z
+      .string()
+      .default("")
+      .refine((dir) => dir === "" || isHostFolder(dir), {
+        message:
+          "ENGINE_CACHE_DIR has to be the full path of a folder on the host, such as /mnt/ssd/aceswarm-cache " +
+          '(it starts with "/", is not "/" itself, and has no "." or ".." parts)',
+      }),
+    /**
+     * Size of the cache on disk of each engine, which then stops growing and is written over in
+     * place (the engine's `--disk-cache-limit`). The engine gives every stream it plays at least 50 MB.
+     */
+    ENGINE_DISK_CACHE_MB: z.coerce.number().int().min(MIN_ENGINE_DISK_CACHE_MB).max(1_048_576).default(256),
     /** How often engine memory is sampled for the metrics. */
     ENGINE_STATS_SECONDS: envInt(15),
     ENGINE_EXTRA_FLAGS: z.string().default(""),
@@ -129,6 +163,20 @@ const schema = z
     // the memory alert for good.
     const cacheMb = config.ENGINE_MEMORY_CACHE_MB;
     const limitMb = config.ENGINE_MEMORY_MB;
+    if (config.ENGINE_CACHE_DIR !== "") {
+      // With the cache on disk the memory cache stays empty, so only the engine itself has to fit.
+      const minMb = minEngineMemoryMb(0);
+      if (limitMb !== 0 && limitMb < minMb) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["ENGINE_MEMORY_MB"],
+          message:
+            `ENGINE_MEMORY_MB=${String(limitMb)} is too small. With its cache on disk (ENGINE_CACHE_DIR) an ` +
+            `engine still needs at least ${String(minMb)} MB`,
+        });
+      }
+      return;
+    }
     const minMb = minEngineMemoryMb(cacheMb);
     if (cacheMb === 0 || limitMb === 0 || limitMb >= minMb) {
       return;
@@ -150,8 +198,31 @@ const schema = z
 
 export type Config = z.infer<typeof schema>;
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  return parseEnv(schema, env);
+/**
+ * The arm64 engine is the Android build of Acestream. In testing it took the options for a cache
+ * on disk and kept the stream in memory all the same (docs/architecture.md). Engines run on the
+ * machine the controller runs on, so the controller's own architecture tells which engine it is.
+ */
+function engineCachesOnDisk(arch: string): boolean {
+  return arch !== "arm64";
+}
+
+export function loadConfig(env: Record<string, string | undefined> = process.env, arch: string = process.arch): Config {
+  const checked = schema.superRefine((config, ctx) => {
+    if (config.ENGINE_CACHE_DIR !== "" && !engineCachesOnDisk(arch)) {
+      // Refused instead of ignored: nothing would reach the folder, and the engines would keep the
+      // memory use this setting is there to save.
+      ctx.addIssue({
+        code: "custom",
+        path: ["ENGINE_CACHE_DIR"],
+        message:
+          "ENGINE_CACHE_DIR is for x86_64 only, and this machine is arm64 (such as a Raspberry Pi): the arm64 " +
+          "engine keeps its stream cache in memory. Leave ENGINE_CACHE_DIR empty; to use less memory, lower " +
+          "ENGINE_MEMORY_CACHE_MB",
+      });
+    }
+  });
+  return parseEnv(checked, env);
 }
 
 const cleanupSchema = z.object({ DOCKER_HOST: dockerHost, STACK_NAME: stackName });

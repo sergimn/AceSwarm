@@ -1,5 +1,6 @@
 #!/bin/sh
-# Starts the Acestream Android engine (arm64) through its Linux wrapper. The cache stays in memory.
+# Starts the Acestream Android engine (arm64) through its Linux wrapper. The cache stays in memory:
+# this engine did not keep it on disk when told to (see below).
 set -eu
 cd /acestream
 # ACESWARM_MEMORY_CACHE_BYTES caps the stream data the engine keeps in memory (--memory-cache-limit).
@@ -13,6 +14,22 @@ case "$cache_bytes" in
     exit 64
     ;;
   *[!0]*) cache_limit="--memory-cache-limit $cache_bytes" ;;
+esac
+# ACESWARM_DISK_CACHE_BYTES asks for the cache on disk (ENGINE_CACHE_DIR). In testing the Android
+# engine took the options for that and kept the stream in memory all the same: when it starts it
+# sets its stream cache to memory, and its wrapper lacks the Android calls it asks for free disk
+# space with. So a disk cache is refused here, with the entrypoint's exit code for a cache that
+# cannot be set up. The controller refuses the setting on arm64 before any engine starts.
+case "${ACESWARM_DISK_CACHE_BYTES:-0}" in
+  *[!0-9]*)
+    echo "ACESWARM_DISK_CACHE_BYTES must be a number of bytes, got '$ACESWARM_DISK_CACHE_BYTES'" >&2
+    exit 64
+    ;;
+  *[!0]*)
+    echo "engine cache on disk: the arm64 engine does not keep its stream cache on disk. ENGINE_CACHE_DIR" \
+      "is for x86_64 only: leave it empty here, and lower ENGINE_MEMORY_CACHE_MB to use less memory." >&2
+    exit 78
+    ;;
 esac
 # cache_limit and ACESWARM_ENGINE_FLAGS hold space separated engine options, so they are split on purpose.
 # shellcheck disable=SC2086
