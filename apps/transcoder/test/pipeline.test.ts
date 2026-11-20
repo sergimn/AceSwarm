@@ -1,10 +1,11 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { setImmediate as nextTurn } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveEdge } from "../src/live-edge.ts";
@@ -52,6 +53,7 @@ describe("Pipeline", () => {
   const sourceOf = (run: number): string | undefined => opened[run]?.request.source;
   /** How long a run's reader waits for data, in milliseconds. */
   const inputTimeout = (run: number): number | undefined => opened[run]?.request.idleTimeoutMs;
+  const streamLogger = createLogger("test", "silent");
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-test-"));
@@ -86,6 +88,7 @@ describe("Pipeline", () => {
     const logger = createLogger("test", "silent");
     const sources = fakeSources();
     opened = sources.opened;
+    vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
     pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
@@ -220,6 +223,51 @@ describe("Pipeline", () => {
     expect(instance.status().fps).toBe(25);
   });
 
+  it("kills ffmpeg at once when it stops, and removes its files though ffmpeg writes some as it dies", async () => {
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    const directory = join(hlsDir, "s1", "g1", "full");
+    const signals: (NodeJS.Signals | number | undefined)[] = [];
+    let written = 0;
+    // Files keep coming for a moment while the directory is being removed.
+    Object.assign(children[0] ?? {}, {
+      kill: (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        const until = performance.now() + 30;
+        const write = (): void => {
+          try {
+            writeFileSync(join(directory, `seg_${String(written)}.ts`), "late");
+          } catch {
+            return;
+          }
+          written += 1;
+          if (performance.now() < until) {
+            setImmediate(write);
+          }
+        };
+        setImmediate(write);
+        return true;
+      },
+    });
+    await instance.stop();
+    expect(signals).toEqual(["SIGKILL"]);
+    // The writes landed (a failed one ends them), so the removal had to deal with them.
+    expect(written).toBeGreaterThan(0);
+    expect(existsSync(join(hlsDir, "s1"))).toBe(false);
+  });
+
+  it("says in the log that ffmpeg was stopped with its stream, not killed from outside", async () => {
+    const info = vi.spyOn(streamLogger, "info");
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    await instance.stop();
+    children[0]?.emit("exit", null, "SIGKILL");
+    expect(info).toHaveBeenCalledWith(
+      { generation: 1, code: null, signal: "SIGKILL", error: "stopped with its stream" },
+      "ffmpeg exited",
+    );
+  });
+
   it("says a restart that failed before any video is still starting until ffmpeg opens it again", async () => {
     const clock = { now: 1000 };
     const instance = start(120, () => clock.now);
@@ -271,6 +319,104 @@ describe("Pipeline", () => {
     await instance.sync();
     expect(runs).toHaveLength(3);
     expect(instance.status().pendingSource).toBeNull();
+  });
+
+  /** A file ffmpeg wrote into the run's directory. */
+  async function wrote(generation: number): Promise<string> {
+    const file = join(hlsDir, "s1", `g${String(generation)}`, "full", "seg_000000.ts");
+    await writeFile(file, "video");
+    return file;
+  }
+
+  /**
+   * The stream starts again after its pipeline stopped. The new pipeline replaces its first run
+   * at once, so that those files are due in a minute (`due`), and its second run is live.
+   */
+  async function startedAgain(): Promise<{ due: string; live: string }> {
+    const next = start(120);
+    await next.start("http://engine-1/play", false);
+    await next.start("http://engine-2/play", false);
+    return { due: await wrote(1), live: await wrote(2) };
+  }
+
+  describe("when a retired run's files are removed", () => {
+    const REMOVE_AFTER_MS = 60_000;
+
+    beforeEach(() => {
+      // Only the timers: the files are real, and the pipeline's syncs run on real time.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * A minute passes and the removals that came due run. They work on real files, so this waits for
+     * the removal of `due`, a run's files that were to go, and a moment more for the others.
+     */
+    async function aMinutePasses(due: string): Promise<void> {
+      await vi.advanceTimersByTimeAsync(REMOVE_AFTER_MS);
+      await vi.waitFor(() => {
+        expect(existsSync(due)).toBe(false);
+      });
+      await sleep(50);
+    }
+
+    it("removes the files of a run a minute after another replaced it, and only its files", async () => {
+      const instance = start(120);
+      await instance.start("http://engine-1/play", false);
+      await instance.start("http://engine-2/play", false);
+      const [retired, current] = [await wrote(1), await wrote(2)];
+      await vi.advanceTimersByTimeAsync(REMOVE_AFTER_MS - 1);
+      expect(existsSync(retired)).toBe(true);
+      await aMinutePasses(retired);
+      expect(existsSync(join(hlsDir, "s1", "g1"))).toBe(false);
+      expect(existsSync(current)).toBe(true);
+    });
+
+    it("leaves the files of the stream's next pipeline alone when a run its last one retired comes due", async () => {
+      const first = start(120);
+      await first.start("http://engine-1/play", false);
+      // Two restarts retire its first two runs, with a minute to go; then the stream stops and starts again.
+      await first.start("http://engine-2/play", false);
+      await first.start("http://engine-3/play", false);
+      await first.stop();
+      const { due, live } = await startedAgain();
+      await aMinutePasses(due);
+      expect(existsSync(live)).toBe(true);
+    });
+
+    it("leaves them alone too when its last pipeline retired a run only as the stream stopped", async () => {
+      const first = start(120);
+      await first.start("http://engine-1/play", false);
+      await first.start("http://engine-2/play", false);
+      // The third run is on its way (it is making its directories) when the stream stops.
+      const restarting = first.start("http://engine-3/play", false);
+      await first.stop();
+      await restarting;
+      const { due, live } = await startedAgain();
+      await aMinutePasses(due);
+      expect(existsSync(live)).toBe(true);
+    });
+
+    it("kills the run a restart retired a moment ago when the pipeline stops, as it may still be writing", async () => {
+      const instance = start(120);
+      await instance.start("http://engine-1/play", false);
+      const signals: (NodeJS.Signals | number | undefined)[] = [];
+      Object.assign(children[0] ?? {}, {
+        kill: (signal?: NodeJS.Signals | number) => {
+          signals.push(signal);
+          return true;
+        },
+      });
+      await instance.start("http://engine-2/play", false);
+      // It was asked to stop, and has three seconds to do so.
+      expect(signals).not.toHaveLength(0);
+      expect(signals.every((signal) => signal === "SIGTERM")).toBe(true);
+      await instance.stop();
+      expect(signals.at(-1)).toBe("SIGKILL");
+    });
   });
 });
 

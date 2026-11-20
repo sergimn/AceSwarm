@@ -15,6 +15,10 @@ const manager = new PipelineManager(
     ffmpegPath: config.FFMPEG_PATH,
     handoverTimeoutMs: config.HANDOVER_TIMEOUT_SECONDS * 1000,
     liveEdge: { ...DEFAULT_LIVE_EDGE_SETTINGS, staleAfterMs: config.STALE_SOURCE_SECONDS * 1000 },
+    stuck: {
+      fullOutputStallMs: config.FULL_OUTPUT_STALL_SECONDS * 1000,
+      maxMemoryGrowthBytes: config.FFMPEG_MAX_MEMORY_GROWTH_MB * 1024 * 1024,
+    },
     plan: {
       previewMode: previewMode(config),
       previewHeight: config.PREVIEW_HEIGHT,

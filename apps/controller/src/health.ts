@@ -80,6 +80,27 @@ export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | 
 }
 
 /**
+ * When the transcoder started the stream's ffmpeg again by itself (see `PipelineStatus.restartedAt`)
+ * after the stream's last video, and within the startup grace of that video. Its new run starts like
+ * one the controller started: it may take a while, as a broadcast whose copy can't be cut takes two
+ * restarts and a re-encode. Undefined otherwise. A restart long after the stream's last video counts
+ * for nothing: a run that makes no video of its own gets that wait from each restart only while the
+ * restart is within the grace of the stream's last video, so at most about twice the grace in all.
+ */
+function restartedAfterVideo(
+  pipeline: PipelineStatus | undefined,
+  lastFrame: number | undefined,
+  graceMs: number,
+): number | undefined {
+  const restartedAt = pipeline?.restartedAt;
+  if (restartedAt === undefined || restartedAt === null || lastFrame === undefined) {
+    return undefined;
+  }
+  const at = Date.parse(restartedAt);
+  return at >= lastFrame && at - lastFrame <= graceMs ? at : undefined;
+}
+
+/**
  * Classifies a stream from what the pipeline and engine report. A stream is healthy only while
  * new video frames keep arriving; everything else is either still starting or stalled. Frames
  * only count while the engine's live edge moves (the transcoder publishes nothing else), and a
@@ -87,6 +108,8 @@ export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | 
  * things locally can't bring video back. A source that is stale only because its engine serves a
  * broadcast that goes on too far behind (`lagging`) is stalled instead: that is local, and a new
  * engine fixes it. (A transcoder that doesn't say why a source is stale gets the wait, as before.)
+ * A stream whose transcoder started ffmpeg again by itself after its video is starting (see
+ * `restartedAfterVideo`): neither a stall nor a reason to fail over to a standby early.
  */
 export function evaluateHealth(inputs: HealthInputs): Health {
   const { now, pipeline } = inputs;
@@ -97,7 +120,10 @@ export function evaluateHealth(inputs: HealthInputs): Health {
       : { state: "stale-source", healthy: false, reason: staleReason(edge, now) };
   }
   const lastFrame = lastSignOfVideo(pipeline);
-
+  const restartedAt = restartedAfterVideo(pipeline, lastFrame, inputs.startupGraceMs);
+  if (restartedAt !== undefined && pipeline?.state !== "exited" && now - restartedAt <= inputs.startupGraceMs) {
+    return { state: "starting", healthy: false, reason: "the transcoder started ffmpeg again; waiting for video" };
+  }
   if (lastFrame !== undefined && now - lastFrame <= inputs.stallAfterMs) {
     return { state: "playing", healthy: true, reason: "receiving video" };
   }

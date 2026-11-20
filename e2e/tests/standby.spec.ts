@@ -5,6 +5,7 @@ import {
   docker,
   engineContainers,
   gatewayAssignments,
+  openApp,
   recoveriesSucceeded,
   reportedEngines,
   resetStack,
@@ -227,7 +228,7 @@ test("fails over to the direct path's shared engine when the VPN's engine stops 
 });
 
 test("turning hot standby off removes the standbys", async ({ page, request }) => {
-  await page.goto("/");
+  await openApp(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const toggle = page
     .getByRole("dialog", { name: "Settings" })

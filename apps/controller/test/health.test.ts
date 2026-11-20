@@ -76,6 +76,60 @@ describe("evaluateHealth", () => {
   });
 });
 
+const STARTING = {
+  state: "starting",
+  healthy: false,
+  reason: "the transcoder started ffmpeg again; waiting for video",
+};
+/** The stream played for an hour; its run was found stuck `ms` ago, right at its last frame. */
+const restarted = (ms: number, overrides: Partial<PipelineStatus> = {}): HealthInputs =>
+  inputs({
+    attemptStartedAt: NOW - 3_600_000,
+    pipeline: pipeline({ state: "starting", lastFrameAt: ago(ms + 500), restartedAt: ago(ms), ...overrides }),
+  });
+
+describe("evaluateHealth after the transcoder started ffmpeg again by itself", () => {
+  it("waits for the new run for the startup grace, though the last frame is older than the stall time", () => {
+    // Not even a standby takes over early: the stream counts as starting, not as playing.
+    expect(evaluateHealth(restarted(1000))).toEqual(STARTING);
+    expect(evaluateHealth(restarted(45_000))).toEqual(STARTING);
+    expect(evaluateHealth(restarted(60_000))).toEqual(STARTING);
+    expect(evaluateHealth(restarted(61_000))).toEqual({
+      state: "stalled",
+      healthy: false,
+      reason: "no new video for 62s",
+    });
+  });
+
+  it("waits again for a run started again before any video of the one before, within the grace of the last video", () => {
+    // Two stalls and a re-encode: the second restart came 35 s after the stream's last frame.
+    const second = inputs({
+      attemptStartedAt: NOW - 3_600_000,
+      pipeline: pipeline({ lastFrameAt: ago(45_000), restartedAt: ago(10_000) }),
+    });
+    expect(evaluateHealth(second)).toEqual(STARTING);
+    // One long after the stream's last video counts for nothing: it is stalled.
+    const late = inputs({
+      attemptStartedAt: NOW - 3_600_000,
+      pipeline: pipeline({ lastFrameAt: ago(80_000), restartedAt: ago(5000) }),
+    });
+    expect(evaluateHealth(late).state).toBe("stalled");
+  });
+
+  it("plays once the new run has video of its own, and is stalled when it exits", () => {
+    const playing = pipeline({ state: "running", lastFrameAt: ago(1000), restartedAt: ago(5000) });
+    expect(evaluateHealth(inputs({ attemptStartedAt: NOW - 3_600_000, pipeline: playing })).state).toBe("playing");
+    expect(evaluateHealth(restarted(30_000, { state: "exited", error: "x" })).state).toBe("stalled");
+  });
+
+  it("goes by the attempt alone for a stream that never had video, or a transcoder that doesn't say", () => {
+    const never = pipeline({ lastFrameAt: null, restartedAt: ago(1000) });
+    expect(evaluateHealth(inputs({ attemptStartedAt: NOW - 90_000, pipeline: never })).state).toBe("stalled");
+    const older = pipeline({ lastFrameAt: ago(45_000) });
+    expect(evaluateHealth(inputs({ pipeline: older })).state).toBe("stalled");
+  });
+});
+
 function stale(advancedAt: number, behindSeconds = 0, quietSince = advancedAt): LiveEdgeView {
   return {
     state: "stale",

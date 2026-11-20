@@ -35,6 +35,35 @@ jobs:
       - run: npm run test:coverage
       - run: npm run build:ui
 
+  ffmpeg-gaps:
+    name: ffmpeg with timestamp gaps
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # The transcoder's own ffmpeg: the image the Dockerfile copies it from.
+      - name: Take ffmpeg out of the image the transcoder uses
+        run: |
+          image=$(sed -n 's/^FROM \(docker\.io\/mwader\/static-ffmpeg:[^ ]*\) AS ffmpeg$/\1/p' Dockerfile)
+          test -n "$image"
+          container=$(docker create "$image")
+          docker cp "$container:/ffmpeg" "$RUNNER_TEMP/ffmpeg"
+          docker rm "$container"
+          "$RUNNER_TEMP/ffmpeg" -version | head -n 1
+      # Also runs the full output that stops on a broadcast without key frames, on the same binary.
+      # One file at a time: both time real ffmpeg runs, which must not compete for the CPU.
+      - run: >-
+          npx vitest run --no-file-parallelism
+          apps/transcoder/test/ffmpeg-gaps.test.ts apps/transcoder/test/ffmpeg-full-stall.test.ts
+        env:
+          FFMPEG_BIN: ${{ runner.temp }}/ffmpeg
+
   pre-commit:
     name: pre-commit hooks
     runs-on: ubuntu-slim

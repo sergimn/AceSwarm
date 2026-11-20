@@ -51,7 +51,8 @@ export interface FeedHost {
  * run does with the video from what its source carries:
  *
  * - The full output's mode belongs to a run, not to the stream: it copies H.264 and re-encodes
- *   anything else. A source's program tables say what it carries before ffmpeg gets a byte of it,
+ *   anything else, and everything once a copy of the stream's video couldn't be cut (see
+ *   `copyFails`). A source's program tables say what it carries before ffmpeg gets a byte of it,
  *   so a run in the wrong mode is replaced right there, without reading the source again. A run
  *   starts in the mode that suited the stream's last known video, as most sources stay as they
  *   are. Where the tables don't tell (no MPEG-TS, or a kind of stream they don't name), ffmpeg's
@@ -63,6 +64,12 @@ export interface FeedHost {
  *   run's input ends there; what it still writes out is published first (see `drain`).
  */
 export class SourceFeeds {
+  /**
+   * A run that copied the stream's video got no segment of it into the full output, right after
+   * another that stalled (see `StuckRuns.copyFails`): ffmpeg finds no key frame in that video to
+   * start one at. Every later run of the stream re-encodes it, whatever the source says it carries.
+   */
+  copyFails = false;
   /** The codec of the video the stream's sources carried last, as far as known. */
   private codec: string | undefined;
   /** What ffmpeg found the video of a layout to be, where its tables say otherwise, or nothing. */
@@ -83,7 +90,14 @@ export class SourceFeeds {
 
   /** The mode a run starts in, before its source said what it carries. */
   startMode(): FullMode {
-    return this.codec === undefined ? "copy" : fullModeFor(this.codec);
+    return this.modeFor(this.codec);
+  }
+
+  private modeFor(codec: string | undefined): FullMode {
+    if (this.copyFails) {
+      return "transcode";
+    }
+    return codec === undefined ? "copy" : fullModeFor(codec);
   }
 
   /**
@@ -108,7 +122,7 @@ export class SourceFeeds {
   /** Notes the codec of the video a source carries now. Returns the full output's mode for it. */
   private carries(codec: string): FullMode {
     this.codec = codec;
-    return fullModeFor(codec);
+    return this.modeFor(codec);
   }
 
   /** Starts reading the run's source into its ffmpeg. */
@@ -211,10 +225,10 @@ export class SourceFeeds {
     return this.draining.includes(run);
   }
 
-  /** Stops the runs that still drain. */
+  /** Kills the runs that still drain, as the stream stops: what they would write out is not kept. */
   stop(): void {
     for (const run of this.draining.splice(0)) {
-      run.halt();
+      run.stopNow();
     }
   }
 }

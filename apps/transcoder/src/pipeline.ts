@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -17,41 +17,15 @@ import {
   type LiveEdgeSettings,
   type WatchLiveEdge,
 } from "./live-edge.ts";
+import type { PipelineEvents, PipelineOptions, PipelineSettings, Spawner } from "./pipeline-settings.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
 import { SourceFeeds, type Succession } from "./source-feeds.ts";
-import { readSource, type OpenSource } from "./source-reader.ts";
+import { readSource } from "./source-reader.ts";
+import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
 import { describeLayout, videoCodecOfLayout } from "./ts-tables.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
-
-export type PlanSettings = Omit<FfmpegPlan, "directory" | "fullMode" | "allFrames" | "midStream">;
-
-export interface PipelineSettings {
-  hlsDir: string;
-  ffmpegPath: string;
-  handoverTimeoutMs: number;
-  plan: PlanSettings;
-  /**
-   * When a source's live edge counts as stale (see `LiveEdge`). Published segments older than its
-   * `staleAfterMs` also leave the playlist, so a player never starts on old video.
-   */
-  liveEdge?: LiveEdgeSettings;
-}
-
-export interface PipelineEvents {
-  generationStarted: (id: string, reason: string) => void;
-  handover: (id: string, result: "promoted" | "failed") => void;
-}
-
-export type Spawner = (command: string, args: string[]) => ChildProcess;
-
-/** What tests replace: how ffmpeg starts, the clock, and how a source is read and its live edge followed. */
-export interface PipelineOptions {
-  spawner?: Spawner | undefined;
-  now?: () => number;
-  watchLiveEdge?: WatchLiveEdge;
-  openSource?: OpenSource | undefined;
-}
+export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, Spawner } from "./pipeline-settings.ts";
 
 /** ffmpeg gets the stream on its standard input, from the source's reader. */
 const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -88,6 +62,8 @@ export class Pipeline {
   private readonly playlists: Record<Variant, VirtualPlaylist>;
   private active: Generation | undefined;
   private pending: Generation | undefined;
+  /** Runs that were retired and whose files are still to be removed (see `retire`). */
+  private readonly retiredRuns = new Set<Generation>();
   private nextNumber = 1;
   /** Reads the sources, and knows what the full output does with their video. */
   private readonly feeds: SourceFeeds;
@@ -95,6 +71,9 @@ export class Pipeline {
   private layoutChangedAt: number | undefined;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
+  private readonly stuck: StuckRuns;
+  /** When it last started ffmpeg again by itself, as its run was stuck (see `PipelineStatus.restartedAt`). */
+  private restartedAt: number | undefined;
   /**
    * The newest thumbnail players may see, and when it was written as far as this pipeline knows:
    * a source's ffmpeg can still write one as it stops, which must not make an old picture new.
@@ -128,6 +107,7 @@ export class Pipeline {
       },
     };
     this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);
+    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -190,6 +170,7 @@ export class Pipeline {
     const generation = this.active;
     const pendingSource = this.pending?.source ?? null;
     const layoutChangedAt = this.layoutChangedAt === undefined ? null : new Date(this.layoutChangedAt).toISOString();
+    const restartedAt = this.restartedAt === undefined ? null : new Date(this.restartedAt).toISOString();
     if (generation === undefined) {
       return {
         id: this.id,
@@ -207,6 +188,7 @@ export class Pipeline {
         error: "not started",
         pendingSource,
         liveEdge: null,
+        restartedAt,
       };
     }
     const { layout } = generation;
@@ -230,6 +212,7 @@ export class Pipeline {
       error: generation.error,
       pendingSource,
       liveEdge: generation.watch?.edge.view() ?? null,
+      restartedAt,
     };
   }
 
@@ -267,19 +250,25 @@ export class Pipeline {
     return existsSync(path) ? path : undefined;
   }
 
+  /**
+   * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
+   * stop by itself and it writes out what it holds first, a whole segment or a stalled full
+   * output's backlog, into a directory that is going. That goes for the runs that were retired
+   * moments ago and still stop. A file it writes while it dies can still land in a directory that
+   * `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm` tries again for that.
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.syncTimer !== undefined) {
       clearInterval(this.syncTimer);
     }
-    for (const generation of [this.active, this.pending]) {
-      generation?.halt();
-      generation?.watch?.stop();
+    for (const generation of [this.active, this.pending, ...this.retiredRuns]) {
+      generation?.stopNow();
     }
     this.feeds.stop();
     this.active = undefined;
     this.pending = undefined;
-    await rm(this.root, { recursive: true, force: true });
+    await rm(this.root, { recursive: true, force: true, maxRetries: 3 });
   }
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */
@@ -292,6 +281,9 @@ export class Pipeline {
       return;
     }
     this.stopIfStale(active);
+    if (this.restartIfStuck(active)) {
+      return;
+    }
     if (this.mayReopenNow(active)) {
       this.reopen(active);
       return;
@@ -385,6 +377,30 @@ export class Pipeline {
     }
   }
 
+  /**
+   * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`), with
+   * the full stream re-encoded from then on when a copy can't be cut (`SourceFeeds.copyFails`). The
+   * old run is killed outright: as it stops, ffmpeg would write out all it holds. A full output
+   * that stalled shows the broadcast's key frames are gone, which decoding key frames only needs
+   * too: the stream's later runs decode every frame (see `KeyFrames`). Until the new run has video
+   * of its own, the stream's last video is the old run's, and the controller gives the new run
+   * time to start (see `PipelineStatus.restartedAt`).
+   */
+  private restartIfStuck(generation: Generation): boolean {
+    const stuck = this.stuck.check(generation);
+    if (stuck === undefined) {
+      return false;
+    }
+    this.logger.warn({ generation: generation.number, ...stuck.details }, stuck.message);
+    generation.process?.kill("SIGKILL");
+    this.feeds.copyFails ||= stuck.reencode;
+    this.keyFrames.allFrames ||= stuck.reason === "full-output-stalled";
+    this.restartedAt = this.now();
+    const { source, inputTimeoutSeconds, stat } = generation;
+    this.swap(generation, this.prepare(source, inputTimeoutSeconds, REOPENS_AFTER_FALLBACK, stat), stuck.reason);
+    return true;
+  }
+
   /** Promotes the pending generation once it has a segment, or gives up on it. */
   private async syncPending(): Promise<void> {
     const pending = this.pending;
@@ -448,7 +464,8 @@ export class Pipeline {
    */
   private swap(generation: Generation, next: Generation, reason: string): void {
     next.handoverSince = generation.handoverSince;
-    // The last frame players got of this source, which a run that took over mid-stream carries.
+    // The last frame players got of this source, until `next` has one: a run that took over
+    // mid-stream carries it, as does one that replaced a stuck run (see `restartIfStuck`).
     next.publishedFrameAt = generation.publishedFrameAt;
     this[generation === this.pending ? "pending" : "active"] = next;
     this.retire(generation);
@@ -634,16 +651,19 @@ export class Pipeline {
     this.swap(generation, this.prepare(source, inputTimeoutSeconds, reopens, stat), mode);
   }
 
-  /** Stops a generation and removes its files once players can no longer reference them. */
+  /**
+   * Stops a generation and removes its files once players can no longer reference them. Once the
+   * pipeline has stopped, its stop has removed them all: a timer could then only remove the files
+   * of the stream's next pipeline, which starts with the same names.
+   */
   private retire(generation: Generation): void {
     generation.retired = true;
     this.keyFrames.ended(generation);
     this.lastEdge = this.newestEdge(generation);
     generation.watch?.stop();
     generation.halt();
-    const timer = setTimeout(() => {
-      void rm(generation.directory, { recursive: true, force: true });
-    }, OLD_GENERATION_TTL_MS);
-    timer.unref();
+    if (!this.stopped) {
+      generation.removeLater(OLD_GENERATION_TTL_MS, this.retiredRuns);
+    }
   }
 }
