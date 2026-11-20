@@ -103,7 +103,8 @@ export async function resetStack(request: APIRequestContext): Promise<void> {
  * ones of a path that streams shared on its next sweep. On Docker, removing a running container
  * deletes its network interface on the host, and the browser aborts the requests it has in flight
  * when the host's interfaces change (`net::ERR_NETWORK_CHANGED`): a spec whose first request, or
- * `page.goto`, lands in the middle of that fails for a reason that has nothing to do with it.
+ * `page.goto` before `openApp` loaded the page again, lands in the middle of that fails for a
+ * reason that has nothing to do with it.
  * With no stream left, the controller removes every engine that is still there, so one that stays
  * fails the reset, by name, instead of some later spec's first request. Only that first request
  * is covered: a spec that has the page open while its own engines come and go isn't.
@@ -204,7 +205,10 @@ export async function openApp(page: Page): Promise<void> {
     const outcome = new Map<string, string>();
     const onFailed = (request: Request): void => {
       const errorText = request.failure()?.errorText ?? "failed";
-      outcome.set(request.url(), errorText);
+      // A status that came first stays: a missing file is then aborted by the browser, which on its
+      // own reads like a fault of the test.
+      const status = outcome.get(request.url());
+      outcome.set(request.url(), status === undefined ? errorText : `${status}, then ${errorText}`);
       if (errorText === NETWORK_CHANGED) {
         lost.push(`${request.method()} ${request.url()}`);
       }
