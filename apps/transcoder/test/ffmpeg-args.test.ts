@@ -22,6 +22,13 @@ function valueAfter(args: string[], flag: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
+/** The options of the preview output: from its `-map` up to the thumbnail's, empty without a preview. */
+function previewOutput(args: string[]): string[] {
+  const maps = args.map((arg, index) => (arg === "-map" ? index : -1)).filter((index) => index >= 0);
+  // The full output has two maps (video, audio), the preview one and the thumbnail one.
+  return maps.length === 4 ? args.slice(maps[2], maps[3]) : [];
+}
+
 /** The format of each output, in order. */
 function formats(args: string[]): string[] {
   return args.filter((_, index) => args[index - 1] === "-f");
@@ -75,15 +82,54 @@ describe("buildFfmpegArgs", () => {
     const args = buildFfmpegArgs({ ...PLAN, previewMode: "keyframes" });
     expect(valueAfter(args, "-skip_frame")).toBe("nokey");
     expect(args.indexOf("-skip_frame")).toBeLessThan(args.indexOf("-i"));
-    expect(args).toContain("scale=-2:270");
-    expect(buildFfmpegArgs(PLAN)).toContain("fps=15,scale=-2:270");
+    expect(valueAfter(previewOutput(args), "-vf")).toBe("scale=-2:270");
+    // Key frames are sparse already: no frame rate to enforce.
+    expect(previewOutput(args)).not.toContain("-r");
+    expect(previewOutput(args)).not.toContain("-fps_mode");
+  });
+
+  it("thins the preview out in the filter and sets its frame rate on the output", () => {
+    const preview = previewOutput(buildFfmpegArgs(PLAN));
+    // One frame for each 1/15 s slot of the stream's time, scaled after thinning.
+    expect(valueAfter(preview, "-vf")).toBe(
+      "select='isnan(prev_selected_t)+gt(floor(t*15),floor(prev_selected_t*15))',scale=-2:270",
+    );
+    expect(valueAfter(preview, "-r")).toBe("15");
+    expect(valueAfter(preview, "-fps_mode")).toBe("cfr");
+    // The frame rate stays on the output, after -vf and before the encoder's options.
+    expect(preview.indexOf("-r")).toBeGreaterThan(preview.indexOf("-vf"));
+    expect(preview.indexOf("-r")).toBeLessThan(preview.indexOf("-c:v"));
+
+    const ten = previewOutput(buildFfmpegArgs({ ...PLAN, previewFps: 10 }));
+    expect(valueAfter(ten, "-vf")).toContain("floor(t*10),floor(prev_selected_t*10)");
+    expect(valueAfter(ten, "-r")).toBe("10");
+  });
+
+  it("never lets a filter graph repeat frames of the video, apart from the thumbnail's", () => {
+    // ffmpeg 9's scheduler can deadlock when a graph with a repeating fps filter shares the decoder
+    // with another graph while the full stream is copied or re-encoded first: see the architecture
+    // notes on ffmpeg freezing at timestamp gaps. The previews and the full video leave the repeating to
+    // the output's frame rate, which acts after the graph.
+    for (const fullMode of ["copy", "transcode"] as const) {
+      for (const previewMode of ["video", "keyframes", "thumbnails"] as const) {
+        for (const allFrames of [false, true]) {
+          const args = buildFfmpegArgs({ ...PLAN, fullMode, previewMode, allFrames });
+          const filters = args.filter((_, index) => args[index - 1] === "-vf");
+          const repeating = filters.filter((filter) => /(^|,)fps=/.test(filter));
+          expect(repeating, `${fullMode} ${previewMode} ${String(allFrames)}`).toEqual([
+            "fps=1/10:round=up:start_time=0,scale=-2:180",
+          ]);
+        }
+      }
+    }
   });
 
   it("decodes every frame in keyframes mode once the broadcast has no key frames to decode alone", () => {
     const args = buildFfmpegArgs({ ...PLAN, previewMode: "keyframes", allFrames: true });
     expect(args).not.toContain("-skip_frame");
     // Every frame is decoded, so the preview thins them out as in video mode.
-    expect(args).toContain("fps=15,scale=-2:270");
+    expect(valueAfter(previewOutput(args), "-vf")).toContain("select=");
+    expect(valueAfter(previewOutput(args), "-r")).toBe("15");
     expect(args).toEqual(buildFfmpegArgs({ ...PLAN, previewMode: "video" }));
     expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes" })).toBe(true);
     expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes", allFrames: true })).toBe(false);
