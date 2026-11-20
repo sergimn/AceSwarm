@@ -62,6 +62,31 @@ function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
   ];
 }
 
+/**
+ * The preview's filter. Key frames are sparse already, so `keyframes` mode only scales them. With
+ * every frame decoded, the preview keeps the first frame of each 1/`previewFps` second slot of the
+ * stream's time and scales only those, which costs what the `fps` filter did.
+ *
+ * It must not use the `fps` filter: when the video has a gap in its timestamps, `fps` repeats a
+ * frame, and then ffmpeg 9's scheduler can deadlock for good (every thread waits, nothing is read
+ * or written, ffmpeg never exits). `select` never repeats a frame, and the frame rate on the output
+ * (see `previewFrameRate`) repeats it after the graph. The details are in the architecture notes
+ * ("ffmpeg and gaps in the video's timestamps"), and `test/ffmpeg-gaps.test.ts` runs the real ffmpeg.
+ */
+function previewFilter(plan: FfmpegPlan): string {
+  const scale = `scale=-2:${String(plan.previewHeight)}`;
+  if (decodesKeyFramesOnly(plan)) {
+    return scale;
+  }
+  const slot = (time: string): string => `floor(${time}*${String(plan.previewFps)})`;
+  return `select='isnan(prev_selected_t)+gt(${slot("t")},${slot("prev_selected_t")})',${scale}`;
+}
+
+/** Sets the preview's frame rate on the output, where ffmpeg repeats a frame outside the graph. */
+function previewFrameRate(plan: FfmpegPlan): string[] {
+  return decodesKeyFramesOnly(plan) ? [] : ["-r", String(plan.previewFps), "-fps_mode", "cfr"];
+}
+
 function keyframeEvery(plan: FfmpegPlan): string[] {
   return ["-force_key_frames", `expr:gte(t,n_forced*${String(plan.segmentSeconds)})`];
 }
@@ -134,16 +159,13 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     ...hlsOutput(plan, "full"),
   ];
 
-  // Key frames are sparse already; with every frame decoded, fps thins them out to the preview's rate.
-  const previewFilter = decodesKeyFramesOnly(plan)
-    ? `scale=-2:${String(plan.previewHeight)}`
-    : `fps=${String(plan.previewFps)},scale=-2:${String(plan.previewHeight)}`;
   const bitrate = plan.previewBitrateKbps;
   const preview = [
     "-map",
     "0:v:0",
     "-vf",
-    previewFilter,
+    previewFilter(plan),
+    ...previewFrameRate(plan),
     "-c:v",
     "libx264",
     "-preset",
