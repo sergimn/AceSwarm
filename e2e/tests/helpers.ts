@@ -1,6 +1,14 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { expect, test, type APIRequestContext, type Locator, type Page, type Request } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Locator,
+  type Page,
+  type Request,
+  type Response,
+} from "@playwright/test";
 import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
@@ -183,18 +191,31 @@ const APP_LOAD_ATTEMPTS = 3;
  * doesn't see change.
  *
  * A load is whole when no request of it failed with that error and every stylesheet has its rules.
- * If not, the page is loaded again, up to `APP_LOAD_ATTEMPTS` times in all. A fault that doesn't
- * go away, a stylesheet that really is missing for one, fails on every try and fails the test.
+ * If not, the page is loaded again, up to `APP_LOAD_ATTEMPTS` times in all, and the test's report
+ * and the log say so ("the page was loaded again", with what was lost). A fault that doesn't go
+ * away, a stylesheet that really is missing for one, fails on every try and fails the test with
+ * what was wrong on the last. A stylesheet with no rules is loaded again whatever the reason, so
+ * the note says what was seen of it.
  */
 export async function openApp(page: Page): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     const lost: string[] = [];
+    // What became of each request of this load that didn't go well, to say it when the load is cut.
+    const outcome = new Map<string, string>();
     const onFailed = (request: Request): void => {
-      if (request.failure()?.errorText === NETWORK_CHANGED) {
+      const errorText = request.failure()?.errorText ?? "failed";
+      outcome.set(request.url(), errorText);
+      if (errorText === NETWORK_CHANGED) {
         lost.push(`${request.method()} ${request.url()}`);
       }
     };
+    const onResponse = (response: Response): void => {
+      if (response.status() >= 400) {
+        outcome.set(response.url(), `HTTP ${String(response.status())}`);
+      }
+    };
     page.on("requestfailed", onFailed);
+    page.on("response", onResponse);
     try {
       await page.goto("/");
     } catch (error) {
@@ -207,6 +228,7 @@ export async function openApp(page: Page): Promise<void> {
       }
     } finally {
       page.off("requestfailed", onFailed);
+      page.off("response", onResponse);
     }
     // The specs run in Node without DOM types, so browser-side code is passed as a string. `goto`
     // returns once the stylesheets are in or have failed.
@@ -216,16 +238,15 @@ export async function openApp(page: Page): Promise<void> {
     }
     const problem = [
       ...lost.map((what) => `${what} failed with ${NETWORK_CHANGED}`),
-      ...unstyled.map((href) => `${href} has no rules`),
-    ];
-    expect(
-      attempt,
-      `the page did not load whole in ${String(APP_LOAD_ATTEMPTS)} tries: ${problem.join("; ")}`,
-    ).toBeLessThan(APP_LOAD_ATTEMPTS);
-    const note = `the page was loaded again: ${problem.join("; ")}`;
+      ...unstyled.map((href) => `${href} has no rules (${outcome.get(href) ?? "no error seen"})`),
+    ].join("; ");
+    if (attempt >= APP_LOAD_ATTEMPTS) {
+      throw new Error(`the page did not load whole in ${String(APP_LOAD_ATTEMPTS)} tries: ${problem}`);
+    }
+    const note = `the page was loaded again: ${problem}`;
     test.info().annotations.push({ type: "page loaded again", description: note });
     process.stdout.write(`${note}\n`);
-    // A change of the network can be heard twice, a moment apart.
+    // Wait a little, in case another change follows the one that was heard.
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 }
