@@ -179,7 +179,7 @@ The engine only reads HTTP sources (`--source -` for stdin isn't supported). ffm
 
 ## Tests
 
-The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only, engine sharing and hot standby off, so each stream has one engine). `disk-cache.spec.ts` alone changes a setting of the stack: it runs `e2e/stack.sh up` with `ENGINE_CACHE_DIR` set, which recreates only the controller, and again without it before it ends.
+The specs share one stack, so they run one after the other, in file order. Each starts from an empty stack (`resetStack`: no streams, no WireGuard profile, WireGuard only, engine sharing and hot standby off, so each stream has one engine). It returns only once the controller has removed every engine: on Docker, removing a container deletes its network interface on the host, and the browser aborts the requests in flight when that happens (`net::ERR_NETWORK_CHANGED`). `disk-cache.spec.ts` alone changes a setting of the stack: it runs `e2e/stack.sh up` with `ENGINE_CACHE_DIR` set, which recreates only the controller, and again without it before it ends.
 
 ```mermaid
 flowchart LR

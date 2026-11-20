@@ -263,6 +263,21 @@ export type LiveEdgeState = "waiting" | "live" | "stale" | "none";
 
 export interface LiveEdgeView {
   state: LiveEdgeState;
+  /**
+   * Why the session is stale, null while it is not:
+   * - quiet: the broadcast is not known to send new data. The session's edge did not move for the
+   *   stale threshold, or it serves far behind an edge while no session of the stream was seen to
+   *   get new data within the threshold (a new engine on the old window of a broadcast that
+   *   stopped). Nothing local can change that: the stream waits for its broadcast.
+   * - behind: the broadcast sends new data (a live session of the stream saw some within the
+   *   threshold; the time an edge was first seen, which `quietSince` can be, doesn't count), but
+   *   the engine serves it more than the threshold behind its live edge. That is this session's
+   *   start, not the broadcast: a new one usually starts close to the edge.
+   *
+   * Absent from a transcoder that doesn't tell: the controller then waits for the broadcast, as for
+   * "quiet".
+   */
+  staleBecause?: "quiet" | "behind" | null;
   /** The broadcast's newest data the engine knows of, by the broadcaster's clock (can be off). */
   edgeAt: string | null;
   /** When that edge last moved (or was first seen), by the transcoder's clock. */
