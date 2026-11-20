@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -220,6 +221,37 @@ describe("Pipeline", () => {
     (children[1]?.stdout as PassThrough).write("frame=12\nfps=25\nprogress=continue\n");
     await nextTurn();
     expect(instance.status().fps).toBe(25);
+  });
+
+  it("kills ffmpeg at once when it stops, and removes its files though ffmpeg writes some as it dies", async () => {
+    const instance = start(120);
+    await instance.start("http://engine-1/play", false);
+    const directory = join(hlsDir, "s1", "g1", "full");
+    const signals: (NodeJS.Signals | number | undefined)[] = [];
+    // Files keep coming for a moment while the directory is being removed.
+    Object.assign(children[0] ?? {}, {
+      kill: (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        const until = performance.now() + 30;
+        let written = 0;
+        const write = (): void => {
+          try {
+            writeFileSync(join(directory, `seg_${String(written)}.ts`), "late");
+          } catch {
+            return;
+          }
+          written += 1;
+          if (performance.now() < until) {
+            setImmediate(write);
+          }
+        };
+        setImmediate(write);
+        return true;
+      },
+    });
+    await instance.stop();
+    expect(signals).toEqual(["SIGKILL"]);
+    expect(existsSync(join(hlsDir, "s1"))).toBe(false);
   });
 
   it("says a restart that failed before any video is still starting until ffmpeg opens it again", async () => {

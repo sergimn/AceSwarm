@@ -224,6 +224,13 @@ export class Pipeline {
     return existsSync(path) ? path : undefined;
   }
 
+  /**
+   * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
+   * stop by itself and it writes out what it holds first, a whole segment or a stalled full
+   * output's backlog, into a directory that is going. A file it writes while it dies can still
+   * land in a directory that `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm`
+   * tries again for that.
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.syncTimer !== undefined) {
@@ -231,13 +238,13 @@ export class Pipeline {
     }
     for (const generation of [this.active, this.pending]) {
       if (generation !== undefined) {
-        killProcess(generation.process);
+        generation.process?.kill("SIGKILL");
         generation.watch?.stop();
       }
     }
     this.active = undefined;
     this.pending = undefined;
-    await rm(this.root, { recursive: true, force: true });
+    await rm(this.root, { recursive: true, force: true, maxRetries: 3 });
   }
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */

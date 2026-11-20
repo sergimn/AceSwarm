@@ -109,19 +109,8 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
         String(offset),
         encoded,
       ]);
-      // Its timestamps go on from the part before it, as in a broadcast.
-      const remux = [
-        "-map",
-        "0",
-        "-c",
-        "copy",
-        "-bsf:v",
-        "filter_units=remove_types=6",
-        "-muxdelay",
-        "0",
-        "-muxpreload",
-        "0",
-      ];
+      // Its timestamps go on from about where the part before it ended, as in a broadcast.
+      const remux = ["-map", "0", "-c", "copy", "-bsf:v", "filter_units=remove_types=6", "-muxdelay", "0"];
       ffmpeg(["-copyts", "-i", encoded, ...remux, "-f", "mpegts", path]);
     };
     ffmpeg([...lavfi(WITH_KEY_FRAMES), "-c:v", "libx264", "-preset", "veryfast", "-g", "50", ...audio, first]);
