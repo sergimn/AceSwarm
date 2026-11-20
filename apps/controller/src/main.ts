@@ -40,6 +40,8 @@ const engines = new EngineManager(
     httpPort: config.ENGINE_HTTP_PORT,
     memoryMb: config.ENGINE_MEMORY_MB,
     memoryCacheMb: config.ENGINE_MEMORY_CACHE_MB,
+    cacheDir: config.ENGINE_CACHE_DIR,
+    diskCacheMb: config.ENGINE_DISK_CACHE_MB,
     extraFlags: config.ENGINE_EXTRA_FLAGS,
     dns: config.ENGINE_DNS,
     readyTimeoutMs: config.ENGINE_READY_TIMEOUT_SECONDS * 1000,
@@ -159,6 +161,12 @@ await runService(service, config.PORT, logger, async () => {
 });
 await started;
 logger.info(
-  { port: config.PORT, strategy: config.PATH_STRATEGY, lowCpuPreviews: config.LOW_CPU_PREVIEWS },
+  {
+    port: config.PORT,
+    strategy: config.PATH_STRATEGY,
+    lowCpuPreviews: config.LOW_CPU_PREVIEWS,
+    // Where the engines started from now on keep their stream cache.
+    engineCache: config.ENGINE_CACHE_DIR === "" ? "memory" : config.ENGINE_CACHE_DIR,
+  },
   "controller ready",
 );

@@ -26,9 +26,13 @@ FROM engine-${TARGETARCH}
 USER 0:0
 COPY --from=busybox /bin/busybox /usr/local/lib/aceswarm/busybox
 COPY --chmod=0755 engine/entrypoint.sh /usr/local/lib/aceswarm/entrypoint.sh
+# ACESWARM_DISK_CACHE_BYTES above 0 moves the x86 engine's stream cache from memory to a folder of
+# its own under /cache, where the controller mounts ENGINE_CACHE_DIR (see entrypoint.sh). The arm64
+# engine refuses it (see start-arm64.sh).
 ENV ACESWARM_ENGINE_USER=1000:1000 \
     ACESWARM_LIVE_CACHE_BYTES=104857600 \
     ACESWARM_MEMORY_CACHE_BYTES=134217728 \
+    ACESWARM_DISK_CACHE_BYTES=0 \
     ACESWARM_ENGINE_FLAGS=""
 EXPOSE 6878
 ENTRYPOINT ["/usr/local/lib/aceswarm/entrypoint.sh"]

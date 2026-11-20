@@ -25,20 +25,34 @@ export interface EngineMemory {
   cacheLimitBytes: number | null;
   /**
    * Estimated stream data in the engine's memory cache. Engines don't report it, so this is the
-   * memory used above an idle engine's, at most the cap (see estimateCacheBytes).
+   * memory used above an idle engine's, at most the cap (see estimateCacheBytes). An engine with
+   * its cache on disk has none: 0, and no cap.
    */
   cacheBytes: number;
 }
 
-/** The memory cache cap an engine container was started with, from its environment. */
-export function engineCacheLimit(env: readonly string[] | null | undefined): number | null {
-  const prefix = "ACESWARM_MEMORY_CACHE_BYTES=";
+/** A size in bytes that an engine container was started with, from its environment; null when unset or 0. */
+function engineBytes(env: readonly string[] | null | undefined, name: string): number | null {
+  const prefix = `${name}=`;
   const value = env?.findLast((entry) => entry.startsWith(prefix))?.slice(prefix.length);
   if (value === undefined || !/^\d+$/.test(value)) {
     return null;
   }
   const bytes = Number(value);
   return bytes > 0 && Number.isSafeInteger(bytes) ? bytes : null;
+}
+
+/** The memory cache cap an engine container was started with, from its environment. */
+export function engineCacheLimit(env: readonly string[] | null | undefined): number | null {
+  return engineBytes(env, "ACESWARM_MEMORY_CACHE_BYTES");
+}
+
+/**
+ * Whether an engine container was started with its cache on disk (ENGINE_CACHE_DIR). Its memory
+ * cache then stays empty, and its memory stays near an idle engine's.
+ */
+export function engineCacheOnDisk(env: readonly string[] | null | undefined): boolean {
+  return engineBytes(env, "ACESWARM_DISK_CACHE_BYTES") !== null;
 }
 
 /**
@@ -138,15 +152,22 @@ export class EngineResourceMonitor {
         continue;
       }
       const usage = await this.docker.memoryUsage(container.Id);
-      if (usage !== undefined) {
-        const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
-        const cacheBytes = estimateCacheBytes(
-          usage.usedBytes,
-          this.lowestBytes(details, usage.usedBytes),
-          cacheLimitBytes,
-        );
-        memory.push({ stream, engine, ...usage, cacheLimitBytes, cacheBytes });
+      if (usage === undefined) {
+        continue;
       }
+      if (engineCacheOnDisk(details?.Config.Env)) {
+        // Nothing to estimate: the stream data is in a file, and what the engine uses above its
+        // idle memory is not a cache.
+        memory.push({ stream, engine, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
+        continue;
+      }
+      const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
+      const cacheBytes = estimateCacheBytes(
+        usage.usedBytes,
+        this.lowestBytes(details, usage.usedBytes),
+        cacheLimitBytes,
+      );
+      memory.push({ stream, engine, ...usage, cacheLimitBytes, cacheBytes });
     }
     for (const id of this.lastExit.keys()) {
       if (!seen.has(id)) {
