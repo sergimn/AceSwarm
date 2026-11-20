@@ -15,8 +15,21 @@ export const DEFAULT_STUCK_LIMITS: StuckLimits = { fullOutputStallMs: 30_000, ma
 /** Why a run is started again, as the reason of its successor (see `PipelineEvents.generationStarted`). */
 export type StuckReason = "full-output-stalled" | "memory";
 
+/**
+ * How soon after a run was found with its full output stalled the run that replaced it has to be
+ * found so too, without a full segment of its own, for the full stream to be re-encoded (see
+ * `Stuck.reencode`). Its start, ffmpeg's probe of the source and the stall time fit well within it.
+ */
+export const STALLED_AGAIN_WITHIN_MS = 5 * 60_000;
+
 export interface Stuck {
   reason: StuckReason;
+  /**
+   * The full output stalled again right after a restart, with a copied video that never gave it a
+   * segment: the broadcast has no key frames to cut it at, so a copy would only stall again. The
+   * full stream is to be re-encoded, which makes key frames of its own.
+   */
+  reencode: boolean;
   message: string;
   /** What the log shows with the message. */
   details: Record<string, number>;
@@ -61,6 +74,9 @@ export const processMemory: MemoryReader = (pid) => {
  *   So a run whose full output wrote no segment for `fullOutputStallMs`, while it still made video
  *   (a frame, a preview segment or a thumbnail) after that long, is stuck. A run that makes no
  *   video at all is not: the source stopped, and the controller deals with that.
+ *   When the run that replaced it stalls too, soon after and without a full segment of its own,
+ *   the broadcast has no key frames to cut a copy at (ffmpeg drops a copied video's frames before
+ *   its first key frame, so the full output gets none at all), and the full stream is re-encoded.
  * - **It holds too much memory**, for that reason or any other: past `maxMemoryBytes`.
  *
  * It is told about the run every second or so (see `check`).
@@ -70,6 +86,8 @@ export class StuckRuns {
   private readonly memoryOf: MemoryReader;
   /** When each run was first seen making video. */
   private readonly videoSince = new WeakMap<Generation, number>();
+  /** When the last run whose full output stalled still made video, as it was found. */
+  private lastStallAt: number | undefined;
 
   constructor(limits: StuckLimits, memoryOf: MemoryReader = processMemory) {
     this.limits = limits;
@@ -92,6 +110,7 @@ export class StuckRuns {
     }
     return {
       reason: "memory",
+      reencode: false,
       message: "ffmpeg holds too much memory; starting it again",
       details: { memoryMb: megabytes(memory), limitMb: megabytes(limit) },
     };
@@ -114,9 +133,18 @@ export class StuckRuns {
     if (lagMs < this.limits.fullOutputStallMs) {
       return undefined;
     }
+    const reencode =
+      generation.mode === "copy" &&
+      fullWrittenAt === undefined &&
+      this.lastStallAt !== undefined &&
+      madeVideoAt - this.lastStallAt <= STALLED_AGAIN_WITHIN_MS;
+    this.lastStallAt = madeVideoAt;
     return {
       reason: "full-output-stalled",
-      message: "the full output wrote no segment while ffmpeg still made video; starting it again",
+      reencode,
+      message: reencode
+        ? "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it"
+        : "the full output wrote no segment while ffmpeg still made video; starting it again",
       details: { seconds: Math.round(lagMs / 1000), frames: generation.frames },
     };
   }

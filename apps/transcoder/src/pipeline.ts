@@ -363,8 +363,9 @@ export class Pipeline {
   }
 
   /**
-   * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`). The
-   * old run is killed outright: as it stops, ffmpeg would write out all it holds.
+   * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`), with
+   * the full stream re-encoded from then on when a copy can't be cut. The old run is killed
+   * outright: as it stops, ffmpeg would write out all it holds.
    */
   private restartIfStuck(generation: Generation): boolean {
     const stuck = this.stuck.check(generation);
@@ -373,6 +374,7 @@ export class Pipeline {
     }
     this.logger.warn({ generation: generation.number, ...stuck.details }, stuck.message);
     generation.process?.kill("SIGKILL");
+    this.forceTranscode ||= stuck.reencode;
     const { source, inputTimeoutSeconds, stat } = generation;
     this.swap(generation, this.prepare(source, inputTimeoutSeconds, REOPENS_AFTER_FALLBACK, stat), stuck.reason);
     return true;

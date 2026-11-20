@@ -31,6 +31,11 @@ function fakeFfmpeg(pid: number, signals: string[]): ChildProcess {
   return child;
 }
 
+/** How a run makes the full output's video: the first `-c:v` is that output's. */
+function fullCodec(args: string[] | undefined): string | undefined {
+  return args?.[args.indexOf("-c:v") + 1];
+}
+
 describe("Pipeline with a run that goes on but is stuck", () => {
   let hlsDir: string;
   let pipeline: Pipeline | undefined;
@@ -152,6 +157,48 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       await second(1, true, at * 25);
     }
     expect(runs).toHaveLength(2);
+  });
+
+  it("re-encodes the full stream when the copy that replaced a stalled one gets no segment either", async () => {
+    const instance = start();
+    await instance.start("http://engine-1/play", false);
+    (children[0]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 10; at += 1) {
+      await second(0, true, at * 25);
+    }
+    for (let at = 11; at <= 40; at += 1) {
+      await second(0, false, at * 25);
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(2);
+    });
+    // The broadcast still sends no key frame: ffmpeg drops the copied video's frames before the
+    // first one, so the full output gets nothing and ffmpeg counts no frame, but the preview goes on.
+    (children[1]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 30; at += 1) {
+      await second(1, false, 0);
+    }
+    expect(runs).toHaveLength(2);
+    await second(1, false, 0);
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(3);
+    });
+    expect(reasons).toEqual(["start", "full-output-stalled", "full-output-stalled"]);
+    expect(runs.map((args) => fullCodec(args))).toEqual(["copy", "copy", "libx264"]);
+    expect(instance.status().mode).toBe("transcode");
+    expect(signals[1]?.[0]).toBe("SIGKILL");
+    expect(warn).toHaveBeenCalledWith(
+      { generation: 2, seconds: 30, frames: 0 },
+      "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
+    );
+
+    // It plays, and the stream's later runs re-encode too, as for a source that is not H.264.
+    for (let at = 1; at <= 40; at += 1) {
+      await second(2, true, at * 25);
+    }
+    expect(runs).toHaveLength(3);
+    await instance.start("http://engine-2/play", false);
+    expect(fullCodec(runs[3])).toBe("libx264");
   });
 
   it("leaves a run alone whose source stopped: nothing makes video, and the controller deals with it", async () => {

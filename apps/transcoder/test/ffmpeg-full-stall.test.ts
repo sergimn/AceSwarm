@@ -29,7 +29,7 @@ const FFMPEG = process.env["FFMPEG_BIN"];
 const PACKET = 188;
 /** The sample's stream seconds with key frames, then without. */
 const WITH_KEY_FRAMES = 12;
-const WITHOUT_KEY_FRAMES = 60;
+const WITHOUT_KEY_FRAMES = 120;
 /** How many times faster than its own pace the sample is fed: a live engine sends it at 1. */
 const PACE = 4;
 
@@ -187,7 +187,7 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       server.close();
     });
 
-    it("starts ffmpeg again once the full output wrote nothing for the stall time", async () => {
+    it("starts ffmpeg again once the full output wrote nothing for the stall time, then re-encodes it", async () => {
       const started: { reason: string; at: number }[] = [];
       const begin = Date.now();
       const pipeline = new Pipeline(
@@ -220,9 +220,24 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
         const first = join(directory, "hls", "stall", "g1");
         expect(playlistEnd(join(first, "full", "index.m3u8"))).toBeLessThanOrEqual(WITH_KEY_FRAMES + 2);
         expect(playlistEnd(join(first, "preview", "index.m3u8"))).toBeGreaterThan(WITH_KEY_FRAMES + 8 * PACE - 8);
+        expect(pipeline.status().mode).toBe("copy");
+
+        // The new run's copy gets no frame at all, as no key frame comes: the full stream is
+        // re-encoded after the stall time, and plays.
+        for (let waited = 0; waited < 25 && started.length < 3; waited += 0.5) {
+          await sleep(500);
+        }
+        expect(started.map((start) => start.reason)).toEqual(["start", "full-output-stalled", "full-output-stalled"]);
+        expect(pipeline.status().mode).toBe("transcode");
+        const third = join(directory, "hls", "stall", "g3", "full", "index.m3u8");
+        for (let waited = 0; waited < 10 && playlistEnd(third) < 4; waited += 0.5) {
+          await sleep(500);
+        }
+        expect(playlistEnd(third)).toBeGreaterThanOrEqual(4);
+        expect(playlistEnd(join(directory, "hls", "stall", "g2", "full", "index.m3u8"))).toBe(0);
       } finally {
         await pipeline.stop();
       }
-    }, 60_000);
+    }, 90_000);
   });
 });
