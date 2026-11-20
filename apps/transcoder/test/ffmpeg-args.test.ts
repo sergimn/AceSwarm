@@ -90,6 +90,26 @@ describe("buildFfmpegArgs", () => {
     expect(decodesKeyFramesOnly(PLAN)).toBe(false);
   });
 
+  it("writes the first thumbnail with the first frame and one every interval, from one encoder thread", () => {
+    for (const previewMode of ["video", "keyframes", "thumbnails"] as const) {
+      const args = buildFfmpegArgs({ ...PLAN, previewMode });
+      const thumbnail = args.slice(args.lastIndexOf("-map"));
+      // `round=up` takes a frame as soon as its slot begins, and `start_time=0` keeps a first frame
+      // that starts a little after the audio in the first slot, so neither waits for half an interval.
+      expect(valueAfter(thumbnail, "-vf"), previewMode).toBe("fps=1/10:round=up:start_time=0,scale=-2:180");
+      expect(thumbnail.at(-1), previewMode).toBe("/hls/s1/3/thumbnail.jpg");
+      // Only the thumbnail's encoder: the mjpeg encoder holds each picture until the next without it.
+      expect(thumbnail.indexOf("-threads"), previewMode).toBeGreaterThan(-1);
+      expect(valueAfter(thumbnail, "-threads"), previewMode).toBe("1");
+      expect(
+        args.filter((arg) => arg === "-threads"),
+        previewMode,
+      ).toHaveLength(1);
+    }
+    const slow = buildFfmpegArgs({ ...PLAN, thumbnailIntervalSeconds: 30 });
+    expect(slow).toContain("fps=1/30:round=up:start_time=0,scale=-2:180");
+  });
+
   it("caps the preview bitrate", () => {
     const args = buildFfmpegArgs(PLAN);
     expect(valueAfter(args, "-maxrate")).toBe("480k");

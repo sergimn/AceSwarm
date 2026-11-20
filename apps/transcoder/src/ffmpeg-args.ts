@@ -163,11 +163,21 @@ export function buildFfmpegArgs(plan: FfmpegPlan): string[] {
     ...hlsOutput(plan, "preview"),
   ];
 
+  // The first thumbnail is written with the first frame, and one every interval after it. Left at
+  // its defaults, the fps filter holds the first frame until half an interval of video has passed
+  // (it rounds to the nearest slot), and ffmpeg 9 prints no -progress before every output has a
+  // frame, so the transcoder saw no frame for that long after each start. `round=up` takes a frame
+  // as soon as its slot begins. `start_time=0` makes the filter pad from the first frame when the
+  // video starts a little after the audio: its first timestamp is then above zero, and `round=up`
+  // alone would put it in the next slot and hold it for a whole interval. The mjpeg encoder holds
+  // each picture until the next one arrives, unless it runs on one thread.
   const thumbnail = [
     "-map",
     "0:v:0",
     "-vf",
-    `fps=1/${String(plan.thumbnailIntervalSeconds)},scale=-2:180`,
+    `fps=1/${String(plan.thumbnailIntervalSeconds)}:round=up:start_time=0,scale=-2:180`,
+    "-threads",
+    "1",
     "-q:v",
     "6",
     "-update",
