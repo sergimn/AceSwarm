@@ -156,9 +156,9 @@ export class StreamEngines {
     return [...this.gateway.list(), ...this.standbys.assignments()];
   }
 
-  /** The path of the engine kept from a failed move, if there is one. */
-  get sparePath(): string | undefined {
-    return this.spare?.path;
+  /** The engine kept from a failed move, if there is one, with the path it is on. */
+  get kept(): { engine: string; path: string } | undefined {
+    return this.spare === undefined ? undefined : { engine: this.spare.engine.name, path: this.spare.path };
   }
 
   private nextGeneration(): number {

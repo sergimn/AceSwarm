@@ -4,6 +4,7 @@ import {
   addStream,
   docker,
   engineContainers,
+  enginePlace,
   gatewayAssignments,
   openApp,
   recoveriesSucceeded,
@@ -146,6 +147,10 @@ test("fails over to the standby within seconds when the engine it plays from sto
   const standbyEngine = before.standbys[0]?.engine?.name;
   expect(standbyEngine).toBeTruthy();
   expect(before.engine?.name).toBeTruthy();
+  // The engine gauges tell the two containers apart by what they are for (sampled every 15 s).
+  const place = { timeout: 60_000 };
+  await expect.poll(async () => enginePlace(request, before.engine!.name), place).toBe("playing direct");
+  await expect.poll(async () => enginePlace(request, standbyEngine!), place).toBe(`standby ${VPN_PATH}`);
   const engines = engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"));
   const recovered = await recoveriesSucceeded(request, run.streamId);
 
@@ -167,6 +172,8 @@ test("fails over to the standby within seconds when the engine it plays from sto
   expect(tookSeconds).toBeLessThan(60);
   const after = await stream(request);
   expect(after.engine?.name).toBe(standbyEngine);
+  // The same container has the other role now: its gauges follow the failover.
+  await expect.poll(async () => enginePlace(request, standbyEngine!), place).toBe(`playing ${VPN_PATH}`);
   expect(after.recoveries).toBe(before.recoveries + 1);
   // The failover brought the video back, so it counts as a recovery that worked once the stream plays.
   await expect
@@ -183,6 +190,10 @@ test("the engine it left gets hot again as the direct path's standby, and the st
   await expect
     .poll(async () => (await standbys(request)).join(", "), { timeout: 240_000, intervals: [2000] })
     .toBe("direct hot");
+  // The container the stream played from is the standby in the gauges too.
+  const standbyEngine = (await stream(request)).standbys[0]?.engine?.name;
+  expect(standbyEngine).toBeTruthy();
+  await expect.poll(async () => enginePlace(request, standbyEngine!), { timeout: 60_000 }).toBe("standby direct");
   // Sticky: a healthy stream never moves to a standby that is just as good.
   const before = await waitForSteadyPlaying(request, run.streamId);
   for (let check = 0; check < 5; check += 1) {

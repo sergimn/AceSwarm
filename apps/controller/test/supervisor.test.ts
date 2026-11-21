@@ -1206,6 +1206,8 @@ describe("moving a stream to another path", () => {
     ]);
     expect(instance.path).toBe("direct");
     expect(handovers).toEqual([`${replacement.baseUrl}/play`]);
+    // The metrics label it as kept, on the path it is on.
+    expect(instance.engines.kept).toEqual({ engine: replacement.name, path: "wg:a" });
 
     await untilMoves(fake, 2);
     // No new engine: the same one, and the session it opened there, which the engine still knows.

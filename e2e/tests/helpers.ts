@@ -500,6 +500,21 @@ export async function recoveriesSucceeded(
 }
 
 /**
+ * What the controller's engine gauges say an engine container is for and which network path it is
+ * on, as "role path" (the labels of aceswarm_engine_memory_bytes, which the dashboards draw engines
+ * by); undefined while the engine has no memory sample.
+ */
+export async function enginePlace(request: APIRequestContext, engine: string): Promise<string | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const labels = `[^}]*engine="${engine}",role="([^"]*)",path="([^"]*)"[^}]*`;
+  const match = new RegExp(String.raw`^aceswarm_engine_memory_bytes\{${labels}\} \S+$`, "m").exec(
+    await response.text(),
+  );
+  return match === null ? undefined : `${match[1]!} ${match[2]!}`;
+}
+
+/**
  * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
  * "Engines running" adds up); undefined before its first sample, or when it could not list them.
  */

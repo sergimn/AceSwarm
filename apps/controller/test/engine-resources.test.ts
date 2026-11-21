@@ -113,6 +113,7 @@ describe("EngineResourceMonitor", () => {
       {
         stream: "s1",
         engine: "aceswarm-engine-s1-1",
+        sharedPath: null,
         usedBytes: 300 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: 128 * MB,
@@ -121,6 +122,7 @@ describe("EngineResourceMonitor", () => {
       {
         stream: "s2",
         engine: "aceswarm-engine-s2-1",
+        sharedPath: null,
         usedBytes: 500 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: null,
@@ -160,6 +162,7 @@ describe("EngineResourceMonitor", () => {
       {
         stream: "s1",
         engine: "aceswarm-engine-s1-1",
+        sharedPath: null,
         usedBytes: 400 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: null,
@@ -247,6 +250,12 @@ describe("EngineResourceMonitor", () => {
 
     await monitor.sample();
     expect(monitor.running()).toEqual({ own: 2, shared: 1 });
+    // A shared engine says which path it is of; an engine of a stream has none.
+    expect(monitor.latest().map(({ stream, sharedPath }) => [stream, sharedPath])).toEqual([
+      ["s1", null],
+      ["s1", null],
+      ["", "wg:vpn"],
+    ]);
 
     engines.splice(0, 3);
     await monitor.sample();
