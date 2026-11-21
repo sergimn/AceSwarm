@@ -320,9 +320,9 @@ export interface PipelineStatus {
    * and `lastFrameAt` stands still for a few seconds after it; a run that reads on over a move to
    * other PIDs waits for a picture to go on from, for less. A change that leaves the streams
    * ffmpeg reads where they are doesn't count.
-   * Only a change after a run that showed video counts here: changes over a stream that has no
-   * video move nothing, so they can't keep it from being taken for stalled. A transcoder older
-   * than this field doesn't send it.
+   * Only a change after a run that showed video counts here (for a run that reads on over moves:
+   * video since its last one): changes over a stream that has no video move nothing, so they
+   * can't keep it from being taken for stalled. A transcoder older than this field doesn't send it.
    */
   layoutChangedAt?: string | null;
   exitCode: number | null;

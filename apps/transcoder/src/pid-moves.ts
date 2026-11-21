@@ -257,22 +257,24 @@ export function staysPut(real: Layout, next: Layout): boolean {
  * if the decoders can go on with what follows, so nothing is passed on until the stream has shown
  * that:
  *
- * - The video (H.264 or HEVC) goes on from the first access unit that carries its decoder
- *   settings (the parameter sets, which encoders send with the pictures a decoder can start at),
- *   and only if they are byte for byte the ones the decoder has. Until then the new PIDs' packets
- *   are held back, for at most `PATIENCE_MS`.
+ * - The video (H.264 or HEVC) goes on from the first picture a decoder can start at (see
+ *   `VideoStart.key`) that carries its decoder settings (the parameter sets, which encoders send
+ *   with such pictures), and only if they are byte for byte the ones the decoder has. Until then
+ *   the new PIDs' packets are held back, for at most `PATIENCE_MS`.
  * - Every audio stream's frame header (AAC, MPEG audio, AC-3) says what the old one said.
  * - Anything that can't be checked this way means no: another video codec, an unknown stream
  *   type, a second video stream. The caller then starts ffmpeg over, as for a change of codec.
  *
  * What is passed on continues the old stream without a break: timestamps go on from the last
  * ones ffmpeg got (the new encoder's own clock may be anywhere), and so does each PID's
- * continuity counter. So ffmpeg drops nothing: if the old stream was cut in the middle of a
- * picture, that one picture reaches the decoders damaged, and the next one is a picture they can
- * start at. A gap would be worse than that: ffmpeg 9 can stop for good when a video frame is
- * missing at the wrong moment (the preview's `fps` filter then repeats a frame, and its threads
- * end up waiting for each other). The stream's new tables are left out: ffmpeg keeps the ones
- * it has.
+ * continuity counter. So ffmpeg drops nothing at the move: if the old stream was cut in the
+ * middle of a picture, that one picture reaches the decoders damaged, and the next one is a
+ * picture they can start at. A gap would be worse than that: ffmpeg 9 can stop for good when a
+ * video frame is missing at the wrong moment (the preview's `fps` filter then repeats a frame,
+ * and its threads end up waiting for each other). After its first packet a PID's counters step
+ * as the stream's own do, so what the stream loses on its way shows to ffmpeg as it does on a
+ * stream that never moved. The stream's new tables are left out (ffmpeg keeps the ones it has),
+ * and so is everything on PIDs that are not the run's (see `Moved`).
  */
 export class PidMoves {
   private readonly now: () => number;
