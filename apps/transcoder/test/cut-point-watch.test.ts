@@ -53,7 +53,7 @@ describe("CutPointWatch", () => {
   it("allows gaps of up to 5 s, or half the stall time when that is shorter", () => {
     expect(feed(watchOf(), 0, 200, 5)).toBe(60);
     expect(feed(watchOf(), 0, 200, 5.5)).toBeUndefined();
-    // About a frame more: a key frame every 150 frames at 29.97 frames a second.
+    // A little more: a key frame every 150 frames at 29.97 frames a second.
     expect(feed(watchOf(), 0, 200, 5.005)).toBeGreaterThanOrEqual(60);
     expect(feed(watchOf(), 0, 200, 5.2)).toBeUndefined();
     expect(feed(watchOf(8000), 0, 200, 4)).toBe(60);
@@ -65,7 +65,7 @@ describe("CutPointWatch", () => {
     expect(feedGaps(watchOf(), [1.8, 5])).toBeUndefined();
     // 1.5 s, then 3.4 s: 4.9 s.
     expect(feedGaps(watchOf(), [1.5, 3.4])).toBeGreaterThanOrEqual(60);
-    // 1.9 s, then 3.3 s: 5.2 s, more than about a frame too long.
+    // 1.9 s, then 3.3 s: 5.2 s, longer than the rounding allows.
     expect(feedGaps(watchOf(), [1.9, 3.3])).toBeUndefined();
   });
 

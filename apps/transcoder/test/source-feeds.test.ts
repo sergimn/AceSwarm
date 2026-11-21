@@ -140,7 +140,7 @@ describe("SourceFeeds watching for key frames", () => {
     expect(waiting?.layout(layoutOf(256))).toBe(false);
     expect(cutPoints(source, 0, 60)).toBe(60);
     expect(stream.copyFails).toBe(false);
-    // It would re-encode for as long as it lives: it counts a minute of its own.
+    // It would re-encode for as long as it lives: it counts a wait of its own.
     expect(waiting?.request.cutPoints?.watching()).toBe(true);
     expect(cutPoints(waiting, 500, 60)).toBe(60);
     expect(succeeded.map((how) => how.mode)).toEqual(["copy", "copy"]);

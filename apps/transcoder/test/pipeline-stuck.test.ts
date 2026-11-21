@@ -538,7 +538,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         expect(reasons.at(-1)).toBe("key-frames");
       });
       expect(instance.status().mode).toBe("copy");
-      // It would re-encode for as long as it lives, once it took over: it counts a minute of its own.
+      // It would re-encode for as long as it lives, once it took over: it counts a wait of its own.
       const before = runs.length;
       expect(pending?.request.cutPoints?.watching()).toBe(true);
       expect(keyFrames(pending, 3_000_000, 120)).toBe(60);

@@ -18,8 +18,8 @@ const WRAP = 2 ** 33;
  */
 export const MAX_FIRST_SEGMENT_MS = 5000;
 /**
- * How much longer than those limits a gap or a first segment may be all the same: about a frame.
- * At the NTSC frame rates (30000/1001 frames a second and the like) a whole number of frames lasts
+ * How much longer than those limits a gap or a first segment may be all the same: a few frames,
+ * far more than the 0.1 % that an NTSC frame rate adds. At the NTSC frame rates (30000/1001 frames a second and the like) a whole number of frames lasts
  * a little longer than a whole number of seconds: with a key frame every 60 frames at 29.97, they
  * come 2.002 s apart, and a first segment of three of them lasts 6.006 s where segments are 6 s.
  */
