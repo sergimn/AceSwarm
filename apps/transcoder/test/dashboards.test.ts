@@ -9,7 +9,9 @@ import { fakeSources } from "./fake-source.ts";
 interface Panel {
   id: number;
   title: string;
-  targets?: { expr: string }[];
+  /** The panel's least step. */
+  interval?: string;
+  targets?: { expr: string; instant?: boolean; step?: string }[];
   panels?: Panel[];
 }
 
@@ -83,5 +85,32 @@ test("the overview's marks count increases over one step of the graph, whatever 
   for (const mark of counting) {
     expect(mark.expr?.match(/\[[^\]]+\]/g)).toEqual(["[$__rate_interval]"]);
     expect(mark.step).toBeUndefined();
+  }
+});
+
+test("the overview's layout change panels count over one step of the graph, or over its whole range", () => {
+  const counting = panels.filter(({ targets = [] }) =>
+    targets.some(({ expr }) => expr.includes("increase(aceswarm_pipeline_layout_")),
+  );
+  expect(counting.map(({ title }) => title)).toEqual([
+    "Layout changes",
+    "Layout changes in range",
+    "Video gap at each layout change",
+  ]);
+  for (const panel of counting) {
+    const { targets = [] } = panel;
+    for (const target of targets) {
+      const windows = target.expr.match(/\[[^\]]+\]/g) ?? [];
+      expect(windows.length).toBeGreaterThan(0);
+      if (target.instant === true) {
+        // A count in range, at the range's end.
+        expect(new Set(windows)).toEqual(new Set(["[$__range]"]));
+      } else {
+        // One step of the graph: a minute at the least, as the panels' notes say.
+        expect(new Set(windows)).toEqual(new Set(["[$__rate_interval]"]));
+        expect(target.step).toBeUndefined();
+        expect(panel.interval).toBe("1m");
+      }
+    }
   }
 });

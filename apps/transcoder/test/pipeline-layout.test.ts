@@ -1019,6 +1019,36 @@ describe("Pipeline following what its source carries", () => {
       expect(gaps).toEqual([clock.now - lastOld]);
     });
 
+    it("counts the frames the old run drains as the last before the wait, when the new run was replaced twice", async () => {
+      const instance = await playing();
+      clock.now += 2000;
+      opened[0]?.layout(layoutOf(211));
+      // ffmpeg finds HEVC: a run that re-encodes takes the new run's place.
+      await banner(1, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(3);
+      });
+      // That run's ffmpeg finds H.264 after all: a run that copies takes its place.
+      await banner(2, "h264");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(4);
+      });
+      // Only now does the old run report the frames it still had.
+      clock.now += 300;
+      await frames(112, 0);
+      const lastOld = clock.now;
+      await wrote(1, 4);
+      exit(0);
+      await pipeline?.sync();
+      expect(await playlist(instance)).toContain("g1:3");
+      expect(instance.status().lastFrameAt).toBe(new Date(lastOld).toISOString());
+      clock.now += 4000;
+      await frames(20, 3);
+      await wrote(4, 1);
+      await pipeline?.sync();
+      expect(gaps).toEqual([clock.now - lastOld]);
+    });
+
     it("measures no wait with the frames of a run that was stopped, which players don't get", async () => {
       const instance = await playing();
       clock.now += 3000;

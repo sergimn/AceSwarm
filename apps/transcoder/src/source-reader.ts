@@ -160,6 +160,8 @@ class EngineReader implements SourceReader {
   private fed: Layout | undefined;
   /** Holds back how often a new run starts for tables that keep changing. */
   private readonly brake: FollowBrake;
+  /** The PIDs that carried packets since a change began to wait its turn, while it waits. */
+  private heard: Set<number> | undefined;
   /** PIDs of a layout the stream left, which the new one doesn't use. */
   private dropped = new Set<number>();
   private readonly moves: PidMoves;
@@ -343,7 +345,7 @@ class EngineReader implements SourceReader {
     }
     // A change that came too soon after the last one is followed now, with the layout as it is by now.
     if (this.fed !== undefined && this.brake.mayFollow()) {
-      this.follow(this.tables.layout, out, true);
+      this.follow(this.tables.layout, out, this.waited());
     }
     this.packets.push(chunk, (buffer, at) => {
       data = buffer;
@@ -354,8 +356,12 @@ class EngineReader implements SourceReader {
       }
       if (layout !== undefined && (this.fed === undefined || this.brake.mayFollow())) {
         flush();
-        this.follow(layout, out, false);
+        this.follow(layout, out, this.waited());
+      } else if (layout !== undefined) {
+        // It waits its turn: what comes meanwhile tells whether the run could still read on over it.
+        this.heard ??= new Set();
       }
+      this.heard?.add(pid);
       if (pid === NULL_PID || this.dropped.has(pid)) {
         // Padding carries nothing, and a PID the stream left would look like one more stream.
         flush();
@@ -392,14 +398,21 @@ class EngineReader implements SourceReader {
     return out;
   }
 
+  /** The PIDs that carried packets while a change waited its turn, if one did: it is followed now. */
+  private waited(): ReadonlySet<number> | undefined {
+    const { heard } = this;
+    this.heard = undefined;
+    return heard;
+  }
+
   /**
    * The stream's layout is `layout` from here on. A run that can read on over the change does (see
-   * `PidMoves`); otherwise a new one starts here (see `startOver`). A change that `waited` for its
-   * turn (see `FollowBrake`) gets a new run unless the run's streams are where they were: the old
-   * one was given the stream as it came meanwhile, new tables and all, so it is not where a move
-   * could take it on from.
+   * `PidMoves`); otherwise a new one starts here (see `startOver`). A change that waited for its
+   * turn (see `FollowBrake`; `waited` has the PIDs that carried packets meanwhile) gets a new run
+   * unless the run's streams are where they were, or nothing came on the PIDs it moves them to: the
+   * old one was given the stream as it came meanwhile, so it is not where a move could take it on from.
    */
-  private follow(layout: Layout | undefined, out: Piece[], waited: boolean): void {
+  private follow(layout: Layout | undefined, out: Piece[], waited: ReadonlySet<number> | undefined): void {
     const previous = this.fed;
     if (layout === undefined || layout.key === (this.looking ?? previous)?.key) {
       return;
@@ -420,7 +433,12 @@ class EngineReader implements SourceReader {
   }
 
   /** Whether the run reads on over the change to `layout`, and how; a new one starts here otherwise. */
-  private decide(layout: Layout, previous: Layout | undefined, out: Piece[], waited: boolean): void {
+  private decide(
+    layout: Layout,
+    previous: Layout | undefined,
+    out: Piece[],
+    waited: ReadonlySet<number> | undefined,
+  ): void {
     const fit = previous === undefined ? undefined : this.moves.consider(layout, waited);
     if (fit === "carried" && previous !== undefined) {
       this.fed = layout;
@@ -470,12 +488,15 @@ class EngineReader implements SourceReader {
    * An access unit of the run's video that was held back tells whether a copy can be cut at it. At
    * one that can, the owner may hand over another sink: the old one ends right before the unit, and
    * the new one begins with the stream's tables and then the unit, as at a change of layout.
-   * Otherwise the unit goes on as it would have.
+   * Otherwise the unit goes on as it would have. The owner isn't asked while the tables name
+   * another layout than the run reads (a change that waits its turn, see `FollowBrake`): a new run
+   * would begin with those tables while the stream still comes as the run reads it.
    */
   private cutPoint(unit: HeldUnit, out: Piece[]): void {
     const { point } = unit;
-    const next = point === "none" ? undefined : this.request.cutPoints?.found(unit.pts, point);
     const { fed } = this;
+    const asRead = fed !== undefined && this.tables.layout?.key === fed.key;
+    const next = point === "none" || !asRead ? undefined : this.request.cutPoints?.found(unit.pts, point);
     if (next === undefined || next === this.sink || fed === undefined) {
       this.again(unit.packets, out);
       return;
@@ -505,6 +526,8 @@ class EngineReader implements SourceReader {
     this.looking = undefined;
     if ("carried" in verdict) {
       this.fed = looking;
+      // As for a new run (see `startOver`): what still comes on the PIDs the stream left is no one's.
+      this.dropped = this.dropped.union(streamPids(fed)).difference(streamPids(looking));
       this.request.onMove?.({ layout: looking, previous: fed, inPlace: false });
       out.push({ sink: this.sink, bytes: verdict.carried });
     } else {

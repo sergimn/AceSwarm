@@ -623,6 +623,30 @@ describe("PidMoves", () => {
     expect(run.moves.expire()).toBeUndefined();
   });
 
+  it("counts the patience of a move that keeps coming back from its first look, until a new run begins", () => {
+    const { run, encoder } = playing();
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.feed(moved().picture("p"));
+    // The tables go back after a second, with data held for the move: it comes back a second later.
+    run.clock.now = 1000;
+    expect(run.moves.giveUp()).not.toHaveLength(0);
+    run.clock.now = 2000;
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.feed(moved().picture("p"));
+    run.clock.now = 2499;
+    expect(run.moves.expire()).toBeUndefined();
+    run.clock.now = 2500;
+    expect(run.moves.expire()?.why).toBe("no picture to go on from in 2.5s");
+
+    // A run that begins looks at the same move with its patience whole.
+    run.moves.begin(BASE, [encoder.picture("idr")]);
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.clock.now = 4999;
+    expect(run.moves.expire()).toBeUndefined();
+    run.clock.now = 5000;
+    expect(run.moves.expire()).toBeDefined();
+  });
+
   it("gives up after 4 MB without a picture to go on from", () => {
     const { run } = playing();
     run.moves.consider(NEXT);
@@ -967,10 +991,62 @@ describe("PidMoves", () => {
 
   it("reads on over a change that had to wait when its streams are where they were, and over no other", () => {
     const { run } = playing();
-    expect(run.moves.consider(layoutOf(H264, 0x10_01), true)).toBe("carried");
-    expect(run.moves.consider(NEXT, true)).toEqual({
+    // While it waited, packets came on the run's PIDs and on the new ones.
+    const heard = new Set([0, PMT_PID, 256, 257, 211, 221]);
+    expect(run.moves.consider(layoutOf(H264, 0x10_01), heard)).toBe("carried");
+    expect(run.moves.consider(NEXT, heard)).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+    // Video on the new PIDs is enough, and so is sound.
+    expect(run.moves.consider(NEXT, new Set([256, 257, 211]))).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+    expect(run.moves.consider(NEXT, new Set([256, 257, 221]))).toEqual({
       no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
     });
     expect(run.moves.consider(NEXT)).toBe("looking");
+  });
+
+  it("looks at a move that had to wait when nothing came on the PIDs it moves the streams to meanwhile", () => {
+    const { run } = playing();
+    expect(run.moves.consider(NEXT, new Set([0, PMT_PID, 256, 257]))).toBe("looking");
+  });
+
+  it("looks at a move of the video alone that had to wait, while the sound stays on its PID and the video didn't come", () => {
+    const { run } = playing();
+    const partly = layoutOf([
+      { pid: 211, type: 0x1b },
+      { pid: 257, type: 0x0f },
+    ]);
+    expect(run.moves.consider(partly, new Set([256, 257]))).toBe("looking");
+    run.moves.giveUp();
+    expect(run.moves.consider(partly, new Set([256, 257, 211]))).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+  });
+
+  it("starts a new run for a move that had to wait when packets came on its clock's own PID meanwhile", () => {
+    const { run } = playing(BASE_CLOCKED);
+    expect(run.moves.consider(NEXT_CLOCKED, new Set([256, 257, 300, 400]))).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+    expect(run.moves.consider(NEXT_CLOCKED, new Set([256, 257, 300]))).toBe("looking");
+  });
+
+  it("starts a new run for a change that had to wait and is no move, whatever came meanwhile", () => {
+    const { run } = playing();
+    const hevc = layoutOf([
+      { pid: 256, type: 0x24 },
+      { pid: 257, type: 0x0f },
+    ]);
+    expect(run.moves.consider(hevc, new Set([0]))).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+    // A move of the sound alone gets one too, as when it came in its turn.
+    const sound = layoutOf([
+      { pid: 256, type: 0x1b },
+      { pid: 258, type: 0x0f },
+    ]);
+    expect(run.moves.consider(sound, new Set([256]))).toEqual({ no: "the video stayed on its PID" });
   });
 });
