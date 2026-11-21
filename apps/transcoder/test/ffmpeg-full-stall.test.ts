@@ -260,6 +260,8 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
             started.push({ reason, at: (Date.now() - liveSince) / 1000 });
           },
           handover: () => undefined,
+          layoutChanged: () => undefined,
+          layoutGap: () => undefined,
         });
         try {
           await pipeline.start(url, false);
@@ -312,6 +314,8 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
           started.push({ reason, at: (Date.now() - liveSince) / 1000 });
         },
         handover: () => undefined,
+        layoutChanged: () => undefined,
+        layoutGap: () => undefined,
       });
       try {
         await pipeline.start(url, false);
@@ -357,6 +361,8 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
           started.push(reason);
         },
         handover: () => undefined,
+        layoutChanged: () => undefined,
+        layoutGap: () => undefined,
       });
       try {
         await pipeline.start(url, false);

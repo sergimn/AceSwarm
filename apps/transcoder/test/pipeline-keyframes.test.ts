@@ -110,6 +110,8 @@ describe("Pipeline decoding key frames only", () => {
         reasons.push(reason);
       },
       handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
     };
     const logger = createLogger("test", "silent");
     vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
@@ -411,23 +413,23 @@ describe("Pipeline decoding key frames only", () => {
     expect(instance.status().pendingSource).toBeNull();
   });
 
-  it("decodes every frame of a re-encoded full stream too, whose frames key frames only starved", async () => {
+  it("decodes every frame of a re-encoded full stream, which key frames alone would make a slideshow of", async () => {
     const instance = start();
     await instance.start("http://e1/play", false);
+    expect(skipsFrames(runs[0])).toBe(true);
     await opened(0, MPEG2);
     await runsStarted(2);
     expect(runs[1]).toContain("libx264");
-    expect(skipsFrames(runs[1])).toBe(true);
+    expect(skipsFrames(runs[1])).toBe(false);
 
+    // Every frame is what the settings want for it: there is nothing to fall back from.
     await opened(1, MPEG2);
     await instance.sync();
-    clock.now += KEY_FRAMES_PATIENCE_MS;
+    clock.now += 10 * KEY_FRAMES_PATIENCE_MS;
     await instance.sync();
-    await runsStarted(3);
-    expect(runs[2]).toContain("libx264");
-    expect(skipsFrames(runs[2])).toBe(false);
-    expect(reasons).toEqual(["start", "transcode", "all-frames"]);
-    expect(instance.decoding()).toBe("all-frames-fallback");
+    await noMoreRuns(2);
+    expect(reasons).toEqual(["start", "transcode"]);
+    expect(instance.decoding()).toBe("all-frames");
   });
 
   it("waits the patience again when the data stops coming for a while", async () => {

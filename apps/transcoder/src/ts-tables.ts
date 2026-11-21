@@ -134,7 +134,8 @@ export function videoCodecOfLayout(layout: Layout): string | undefined {
 }
 
 /** What changed between two layouts, as far as the video goes: its codec, only its PID, or something else. */
-export type LayoutChangeKind = "codec" | "pid" | "other";
+export const LAYOUT_CHANGE_KINDS = ["codec", "pid", "other"] as const;
+export type LayoutChangeKind = (typeof LAYOUT_CHANGE_KINDS)[number];
 
 export function changeKind(previous: Layout, next: Layout): LayoutChangeKind {
   const before = firstVideo(previous);

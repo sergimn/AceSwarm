@@ -84,7 +84,12 @@ describe("Pipeline", () => {
         inputTimeoutSeconds: 60,
       },
     };
-    const events = { generationStarted: () => undefined, handover: () => undefined };
+    const events = {
+      generationStarted: () => undefined,
+      handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
+    };
     const logger = createLogger("test", "silent");
     const sources = fakeSources();
     opened = sources.opened;
@@ -460,7 +465,12 @@ describe("Pipeline with a source's live edge", () => {
       },
       liveEdge: { staleAfterMs: 60_000, noLiveAfterPolls: 10 },
     };
-    const events = { generationStarted: () => undefined, handover: () => undefined };
+    const events = {
+      generationStarted: () => undefined,
+      handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
+    };
     pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
       spawner: () => {
         const child = silentProcess();
@@ -613,6 +623,13 @@ describe("Pipeline with a source's live edge", () => {
     // Nothing of it is published from now on, and what was is older than the threshold.
     await wrote(1, 4);
     expect(await playlist(instance)).toBeUndefined();
+    // Frames its ffmpeg still tells of reach no player, so they are not the stream's last video.
+    const lastFrameAt = instance.status().lastFrameAt;
+    clock.now += 1000;
+    frames(500);
+    await nextTurn();
+    expect(instance.status().frames).toBe(500);
+    expect(instance.status().lastFrameAt).toBe(lastFrameAt);
     expect(instance.status()).toMatchObject({
       liveEdge: { state: "stale" },
       error: "stopped reading: the broadcast's live edge did not move for 60s",

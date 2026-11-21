@@ -38,7 +38,12 @@ vi.mock("node:fs/promises", async (original) => {
   return { ...real, rm: rmAsTold };
 });
 
-const events = { generationStarted: () => undefined, handover: () => undefined };
+const events = {
+  generationStarted: () => undefined,
+  handover: () => undefined,
+  layoutChanged: () => undefined,
+  layoutGap: () => undefined,
+};
 
 /** An ffmpeg process that takes its input and says nothing. */
 function quietProcess(): ChildProcess {

@@ -84,13 +84,13 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
 }
 
 /**
- * A layout with one program: its video on `videoPid` with stream type `type`, and AAC audio next
- * to it. The program's table is on `pmtPid`.
+ * A layout with one program: its video on `videoPid` with stream type `type`, and audio of
+ * `audioType` (AAC unless said) next to it. The program's table is on `pmtPid`.
  */
-export function layoutOf(videoPid: number, type = 0x1b, pmtPid = 4096): Layout {
+export function layoutOf(videoPid: number, type = 0x1b, pmtPid = 4096, audioType = 0x0f): Layout {
   const streams = [
     { pid: videoPid, type, descriptors: new Uint8Array(0) },
-    { pid: videoPid + 1, type: 0x0f, descriptors: new Uint8Array(0) },
+    { pid: videoPid + 1, type: audioType, descriptors: new Uint8Array(0) },
   ];
   const key = `1@${String(pmtPid)}[${streams.map((entry) => `${String(entry.pid)}:${String(entry.type)}:`).join(",")}]`;
   return { programs: [{ number: 1, pmtPid, pcrPid: videoPid, streams }], key };

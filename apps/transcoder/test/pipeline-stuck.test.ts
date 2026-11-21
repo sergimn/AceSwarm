@@ -123,6 +123,8 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         reasons.push(reason);
       },
       handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
     };
     const sources = fakeSources();
     readers = sources.opened;

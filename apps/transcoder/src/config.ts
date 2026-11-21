@@ -16,7 +16,8 @@ const schema = z.object({
    * video: smooth low-res preview (decodes every frame).
    * keyframes: decodes only keyframes, about one preview frame per second; far cheaper on CPUs
    * without a hardware H.264 decoder such as the Raspberry Pi 5. A stream whose broadcast has no
-   * key frames ffmpeg can use is decoded in full after a while (see `decodesKeyFramesOnly`).
+   * key frames ffmpeg can use is decoded in full after a while, and one whose full stream is
+   * re-encoded always is (see `decodesKeyFramesOnly`).
    */
   PREVIEW_MODE: z.enum(["video", "keyframes"]).default("video"),
   /**

@@ -29,8 +29,8 @@ export const REOPENS_AFTER_FALLBACK = 5;
  * - `key-frames`: key frames only, and they gave a frame (in this run or an earlier one), so it stays so;
  * - `key-frames-waiting`: key frames only, with no frame of them yet, so it may still fall back;
  * - `all-frames-fallback`: every frame, because key frames only gave no frame for the patience;
- * - `all-frames`: every frame, as the settings want (`PREVIEW_MODE=video`, or a re-encoded full
- *   stream with `LOW_CPU_PREVIEWS`).
+ * - `all-frames`: every frame, as the settings want (`PREVIEW_MODE=video`), or as a re-encoded full
+ *   stream needs.
  */
 export const DECODINGS = ["key-frames", "key-frames-waiting", "all-frames-fallback", "all-frames"] as const;
 export type Decoding = (typeof DECODINGS)[number];
@@ -43,7 +43,7 @@ export type Decoding = (typeof DECODINGS)[number];
 export class KeyFrames {
   /**
    * Decodes every frame from now on, though the previews wanted key frames only. It is the
-   * broadcast's trait, so it stays for every source of the stream.
+   * broadcast's trait, so it stays for every source of the stream, until `back`.
    */
   allFrames = false;
   /** A run got a frame with key frames only decoding: a source that gives none is slow, not the trait. */
@@ -54,6 +54,14 @@ export class KeyFrames {
    * starts late still reaches the patience. The next runs start from it.
    */
   carried = 0;
+
+  /**
+   * The broadcast sent IDR pictures alone for a while, after a stall had the stream re-encoded (see
+   * `SourceFeeds.onCutPoint`): key frames only decoding gives a picture of each, so it comes back.
+   */
+  readonly back = (): void => {
+    this.allFrames = false;
+  };
 
   /**
    * Notes a progress block of a run. The last one ffmpeg prints as it is stopped says nothing: it

@@ -119,6 +119,12 @@ export class Generation {
   frames = 0;
   /** How many frames it had when the broadcast last moved its streams to other PIDs (see `SourceFeeds.onMove`). */
   framesAtMove = 0;
+  /**
+   * When the broadcast changed the layout of the source players get while this run went on with
+   * it, or the run whose place it took (see `LayoutChanges`), until players get a frame of it that
+   * came after (see `show`).
+   */
+  gapSince: number | undefined;
   lastFrameAt: number | undefined;
   fps: number | undefined;
   videoCodec: string | undefined;
@@ -131,7 +137,7 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
-  /** The run that took over from this one mid-stream, if one did (see `takeOver`). */
+  /** The run that took over from this one mid-stream, or its place (see `takeOver`, `replaces`), if one did. */
   successor: Generation | undefined;
   /** The timer that removes its directory (see `removeLater`). */
   private removal: NodeJS.Timeout | undefined;
@@ -184,6 +190,37 @@ export class Generation {
     for (const variant of VARIANTS) {
       this.publishFrom[variant] = -1;
     }
+  }
+
+  /**
+   * Takes the place of `old`, a run on the same source that stops (see `Pipeline.swap`): the
+   * handover `old` was part of goes on with this one, and so do the last frame players got (until
+   * this one has its own: a run that took over mid-stream carries it, as does one that replaced a
+   * stuck run) and the wait at a layout change (see `gapSince`): `old` is retired, and its last
+   * frames end no wait. Frames that the run before `old` still writes out count for this one (see
+   * `SourceFeeds.drain`).
+   */
+  replaces(old: Generation): void {
+    this.handoverSince = old.handoverSince;
+    this.publishedFrameAt = old.publishedFrameAt;
+    this.gapSince = old.gapSince;
+    old.successor = this;
+  }
+
+  /**
+   * Its newest frame is one players can get now. When that is the first to come after a layout
+   * change (see `gapSince`), returns how long players had no new frame, in ms: since the last one
+   * they got, which may be one that the run before it wrote out after the change (see
+   * `SourceFeeds.drain`). ffmpeg tells of its frames once a second, so that is about as exact.
+   */
+  show(): number | undefined {
+    const { gapSince, lastFrameAt, publishedFrameAt: before } = this;
+    this.publishedFrameAt = lastFrameAt ?? before;
+    if (gapSince === undefined || lastFrameAt === undefined || lastFrameAt <= gapSince) {
+      return undefined;
+    }
+    this.gapSince = undefined;
+    return before === undefined ? undefined : lastFrameAt - before;
   }
 
   /**
