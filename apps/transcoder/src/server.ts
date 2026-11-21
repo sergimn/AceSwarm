@@ -9,6 +9,7 @@ import { z } from "zod";
 import { DECODINGS } from "./key-frames.ts";
 import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
+import type { OpenSource } from "./source-reader.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
 
@@ -19,7 +20,7 @@ const startQuery = z.object({ handover: z.enum(["true", "false"]).default("false
 /** A stream has a standby on at most a few other paths; the limit only guards against mistakes. */
 const standbySource = z.union([httpUrl, z.object({ source: httpUrl, stat: httpUrl.optional() })]);
 const standbysBody = z.object({ sources: z.array(standbySource).max(16) });
-/** How many times ffmpeg opens a source again that a standby reader just let go of (see `start`). */
+/** How many times the pipeline opens a source again that a standby reader just let go of (see `start`). */
 const REOPENS_AFTER_RELEASE = 5;
 
 /**
@@ -28,12 +29,18 @@ const REOPENS_AFTER_RELEASE = 5;
  */
 export class PipelineManager {
   private readonly pipelines = new Map<string, Pipeline>();
+  /**
+   * Streams whose pipeline is still stopping. It removes the stream's files as its last step, and
+   * a new pipeline of the stream writes to the same place: that one starts after it.
+   */
+  private readonly stopping = new Map<string, Promise<void>>();
   private readonly standbys = new Map<string, StandbyReaders>();
   private readonly settings: PipelineSettings;
   private readonly logger: Logger;
   private readonly spawner: Spawner | undefined;
   private readonly standbySettings: StandbyReaderSettings | undefined;
   private readonly watchLiveEdge: WatchLiveEdge;
+  private readonly openSource: OpenSource | undefined;
   /** Shared by every stream's standby readers, so that few decode checks run at once. */
   private readonly decoder: DecodeChecker;
   readonly generations: Counter<"stream" | "reason">;
@@ -45,13 +52,14 @@ export class PipelineManager {
     logger: Logger,
     spawner?: Spawner,
     standbySettings?: StandbyReaderSettings,
-    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker } = {},
+    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker; openSource?: OpenSource } = {},
   ) {
     this.settings = settings;
     this.logger = logger;
     this.spawner = spawner;
     this.standbySettings = standbySettings;
     this.watchLiveEdge = options.watchLiveEdge ?? watchLiveEdge;
+    this.openSource = options.openSource;
     this.decoder =
       options.decoder ??
       createDecodeChecker(
@@ -164,6 +172,7 @@ export class PipelineManager {
   }
 
   async start(id: string, source: string, handover: boolean, stat?: string): Promise<PipelineStatus> {
+    await this.stopping.get(id);
     let pipeline = this.pipelines.get(id);
     if (pipeline === undefined) {
       pipeline = new Pipeline(
@@ -178,13 +187,14 @@ export class PipelineManager {
             this.handovers.inc({ stream, result });
           },
         },
-        { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge },
+        { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
       );
       this.pipelines.set(id, pipeline);
     }
-    // A standby that becomes the source: ffmpeg reads it from now on, and the engine allows one
-    // reader per session. Right after the standby's reader lets go, the engine may still refuse a
-    // new one for a moment, so ffmpeg opens the source again if it fails before any video.
+    // A standby that becomes the source: the pipeline reads it from now on, for ffmpeg, and the
+    // engine allows one reader per session. Right after the standby's reader lets go, the engine
+    // may still refuse a new one for a moment, so the pipeline opens the source again if its run
+    // fails before any video.
     const released = (await this.standbys.get(id)?.release(source)) ?? false;
     await pipeline.start(source, handover, released ? REOPENS_AFTER_RELEASE : 0, stat);
     return pipeline.status();
@@ -234,8 +244,17 @@ export class PipelineManager {
     this.pipelines.delete(id);
     this.standbys.get(id)?.closeAll();
     this.standbys.delete(id);
-    await pipeline?.stop();
-    return pipeline !== undefined;
+    if (pipeline === undefined) {
+      return false;
+    }
+    const stopped = pipeline.stop().finally(() => {
+      if (this.stopping.get(id) === stopped) {
+        this.stopping.delete(id);
+      }
+    });
+    this.stopping.set(id, stopped);
+    await stopped;
+    return true;
   }
 
   async stopAll(): Promise<void> {

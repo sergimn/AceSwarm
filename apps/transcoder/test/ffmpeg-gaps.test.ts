@@ -213,7 +213,6 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with gaps in the video's timestamp
     mkdirSync(join(output, "full"), { recursive: true });
     mkdirSync(join(output, "preview"), { recursive: true });
     return {
-      source: "pipe:0",
       directory: output,
       fullMode,
       previewMode: "video",

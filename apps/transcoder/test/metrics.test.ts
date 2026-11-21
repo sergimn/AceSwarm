@@ -10,6 +10,7 @@ import { createService, type Service } from "@aceswarm/shared/service";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager } from "../src/server.ts";
+import { fakeSources } from "./fake-source.ts";
 
 const logger = createLogger("test", "silent");
 
@@ -54,11 +55,13 @@ describe("the transcoder's metrics", () => {
       },
     };
     service = createService({ name: "test", logger });
-    manager = new PipelineManager(service, settings, logger, () => {
+    const spawner = (): ChildProcess => {
       const child = fakeFfmpeg();
       children.push(child);
       return child;
-    });
+    };
+    // No source is read: nothing comes of one, as with an engine still looking for peers.
+    manager = new PipelineManager(service, settings, logger, spawner, undefined, { openSource: fakeSources().open });
   });
 
   afterEach(async () => {

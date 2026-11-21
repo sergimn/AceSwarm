@@ -1,10 +1,11 @@
 import type { ChildProcess } from "node:child_process";
 import type { FfmpegPlan } from "./ffmpeg-args.ts";
 import type { LiveEdgeSettings, WatchLiveEdge } from "./live-edge.ts";
+import type { OpenSource } from "./source-reader.ts";
 import type { MemoryReader, StuckLimits } from "./stuck-runs.ts";
 
 /** What every ffmpeg run of a pipeline does, other than what each run decides for itself. */
-export type PlanSettings = Omit<FfmpegPlan, "source" | "directory" | "fullMode" | "allFrames">;
+export type PlanSettings = Omit<FfmpegPlan, "directory" | "fullMode" | "allFrames" | "midStream">;
 
 export interface PipelineSettings {
   hlsDir: string;
@@ -27,11 +28,12 @@ export interface PipelineEvents {
 
 export type Spawner = (command: string, args: string[]) => ChildProcess;
 
-/** What tests replace: how ffmpeg starts, the clock, and how a source's live edge is followed. */
+/** What tests replace: how ffmpeg starts, the clock, and how a source is read and its live edge followed. */
 export interface PipelineOptions {
   spawner?: Spawner | undefined;
   now?: () => number;
   watchLiveEdge?: WatchLiveEdge;
+  openSource?: OpenSource | undefined;
   /** How much memory an ffmpeg process holds (see `StuckLimits.maxMemoryGrowthBytes`). */
   memoryOf?: MemoryReader;
 }

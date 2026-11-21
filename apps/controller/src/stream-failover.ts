@@ -3,6 +3,7 @@ import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { EngineSession } from "./acestream.ts";
 import type { EngineHandle } from "./engines.ts";
+import { lastSignOfVideo } from "./health.ts";
 import type { RecoverySteps } from "./recovery-steps.ts";
 import type { OpenSession } from "./standby-engine.ts";
 import type { TakenStandby } from "./standby.ts";
@@ -119,11 +120,13 @@ export class StreamFailover {
    * is hot: it fails over now rather than once the stall shows. Returns true when it tried.
    */
   async failOverEarly(): Promise<boolean> {
-    const lastFrameAt = this.host.playing().pipeline?.lastFrameAt;
-    if (lastFrameAt === null || lastFrameAt === undefined || !this.hasHot()) {
+    // A layout change of the broadcast counts as its video (see `lastSignOfVideo`): the standbys
+    // read the same broadcast, so a move would not bring the picture back any sooner.
+    const lastVideoAt = lastSignOfVideo(this.host.playing().pipeline);
+    if (lastVideoAt === undefined || !this.hasHot()) {
       return false;
     }
-    const quietMs = this.host.now() - Date.parse(lastFrameAt);
+    const quietMs = this.host.now() - lastVideoAt;
     if (quietMs < this.engines.standbys.settings.failoverAfterMs) {
       return false;
     }
@@ -224,8 +227,9 @@ export class StreamFailover {
     if (pipeline === undefined) {
       return Infinity;
     }
-    const lastFrameAt = pipeline.lastFrameAt === null ? 0 : Date.parse(pipeline.lastFrameAt);
-    return lastFrameAt + Math.min(this.engines.standbys.settings.failoverAfterMs / 2, FRESH_MARGIN_MS);
+    return (
+      (lastSignOfVideo(pipeline) ?? 0) + Math.min(this.engines.standbys.settings.failoverAfterMs / 2, FRESH_MARGIN_MS)
+    );
   }
 
   /** Paths a standby may take the stream to: another one that is up and allowed. */

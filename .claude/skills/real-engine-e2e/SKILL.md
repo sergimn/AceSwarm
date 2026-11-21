@@ -9,7 +9,7 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 
 ## 1. Rules
 
-- **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers and stopped broadcasts (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput` in `e2e/tests/mesh.ts`).
+- **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers, stopped broadcasts and broadcasts that change their layout (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput`, `setBroadcastLayout` in `e2e/tests/mesh.ts`).
 - **The suite runs in CI only.** It needs four machines joined by a mesh, so there is no local or single-machine run. `npm run check` covers typecheck, lint, format and unit tests, not E2E.
 - **No stream loads in a cloud sandbox.** The engine starts and its API answers, but its peer-to-peer traffic doesn't get out, so `getstream` answers "failed to load content". That says nothing about the code. Streams play in CI and on the Testing environment.
 - Never skip, disable or loosen a test to get green. `retries: 0` is on purpose: no test is run again. `openApp` only loads a page again, and says so.
@@ -33,7 +33,7 @@ Four jobs start together:
 | AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`           | the result for Docker |
 | AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6` | the result for Podman |
 
-- The result is the **Run the tests** step of each stack job, about 14 minutes. Playwright stops at 30. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
+- The result is the **Run the tests** step of each stack job, about half an hour. Playwright stops at 45 minutes. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
 - Specs run in file order with one worker, and each starts from `resetStack`. Most are serial: after a test fails, the rest of that file is skipped, so read the first failure.
 - A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
 - **Stop AceSwarm** on the Podman job may print "rootless netns: kill network process: permission denied". That step is allowed to fail and is not a test failure.

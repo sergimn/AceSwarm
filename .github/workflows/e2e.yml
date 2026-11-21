@@ -49,7 +49,7 @@ jobs:
       actions: write
     runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -116,7 +116,7 @@ jobs:
       actions: write
     runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -178,7 +178,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: 60
     strategy:
       # Each stack runner tests on its own: once both have joined the mesh, one failing must not
       # cancel the other. A failure up to the join cancels the whole run on purpose.
@@ -262,8 +262,8 @@ jobs:
           e2e/mesh.sh wait-file source broadcasts.json
           e2e/stack.sh check
       - name: Run the tests
-        # About 14 minutes. Playwright stops at 30 (globalTimeout) and still writes its report.
-        timeout-minutes: 35
+        # About half an hour. Playwright stops at 45 minutes (globalTimeout) and still writes its report.
+        timeout-minutes: 50
         run: npm run e2e
       - name: Tell the other runners the tests are done
         # Also after failed tests, but not in a cancelled run: the other jobs are being cancelled

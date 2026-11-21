@@ -38,8 +38,9 @@ const schema = z.object({
   /** How long a new source may take to deliver video while the old one keeps playing. */
   HANDOVER_TIMEOUT_SECONDS: envInt(120),
   /**
-   * ffmpeg waits this long for data from the engine before giving up. A handover waits at least
-   * HANDOVER_TIMEOUT_SECONDS: a new engine on a slow swarm can take longer than this to deliver.
+   * A source's reader waits this long for data from the engine before giving up (see
+   * `readSource`). A handover waits at least HANDOVER_TIMEOUT_SECONDS: a new engine on a slow swarm
+   * can take longer than this to deliver.
    */
   INPUT_TIMEOUT_SECONDS: envInt(60),
   /**

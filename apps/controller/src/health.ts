@@ -59,6 +59,28 @@ function lateReason(edge: LiveEdgeView): string {
 }
 
 /**
+ * When the stream last showed that it has video: its last new frame, or after that, the moment its
+ * broadcast changed layout mid-stream (see `PipelineStatus.layoutChangedAt`). A broadcast that
+ * moves its video to another PID or codec often sends nothing for a while first, and the
+ * transcoder then needs a few seconds to show video from the new layout. The change itself tells
+ * that the broadcast is back, so the time without frames counts from it: the stream is not taken
+ * for stalled, or moved to a standby, for a pause that the transcoder is already getting over.
+ * The transcoder only reports a change that followed video (a run that showed frames of its own),
+ * so tables that keep changing over a stream without video don't hold a stall off.
+ * Undefined while the stream showed no video yet.
+ */
+export function lastSignOfVideo(pipeline: PipelineStatus | undefined): number | undefined {
+  if (pipeline === undefined || pipeline.lastFrameAt === null) {
+    return undefined;
+  }
+  const frame = Date.parse(pipeline.lastFrameAt);
+  // A transcoder older than the field sends none: no change, as far as the controller can tell.
+  const layoutChangedAt = pipeline.layoutChangedAt ?? null;
+  // Once the run that took over failed, nothing is coming of the change.
+  return layoutChangedAt === null || pipeline.state === "exited" ? frame : Math.max(frame, Date.parse(layoutChangedAt));
+}
+
+/**
  * When the transcoder started the stream's ffmpeg again by itself (see `PipelineStatus.restartedAt`)
  * after the stream's last video, and within the startup grace of that video. Its new run starts like
  * one the controller started: it may take a while, as a broadcast whose copy can't be cut takes two
@@ -98,8 +120,7 @@ export function evaluateHealth(inputs: HealthInputs): Health {
       ? { state: "stalled", healthy: false, reason: lateReason(edge), lagging: true }
       : { state: "stale-source", healthy: false, reason: staleReason(edge, now) };
   }
-  const lastFrame =
-    pipeline?.lastFrameAt === null || pipeline === undefined ? undefined : Date.parse(pipeline.lastFrameAt);
+  const lastFrame = lastSignOfVideo(pipeline);
   const restartedAt = restartedAfterVideo(pipeline, lastFrame, inputs.startupGraceMs);
   if (restartedAt !== undefined && pipeline?.state !== "exited" && now - restartedAt <= inputs.startupGraceMs) {
     return { state: "starting", healthy: false, reason: "the transcoder started ffmpeg again; waiting for video" };
@@ -115,7 +136,9 @@ export function evaluateHealth(inputs: HealthInputs): Health {
     };
   }
   if (lastFrame !== undefined) {
-    return { state: "stalled", healthy: false, reason: `no new video for ${seconds(now - lastFrame)}` };
+    // How long players really got nothing new: a layout change in between brought no frame.
+    const frame = Date.parse(pipeline?.lastFrameAt ?? "");
+    return { state: "stalled", healthy: false, reason: `no new video for ${seconds(now - frame)}` };
   }
   const elapsed = now - inputs.attemptStartedAt;
   if (elapsed <= inputs.startupGraceMs) {

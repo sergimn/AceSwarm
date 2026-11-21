@@ -211,7 +211,7 @@ flowchart LR
 
 - **controller:** the web UI and API. It runs one supervisor per stream, which creates the stream's engine, watches its health and recovers it.
 - **cleanup:** removes the engines when the whole stack goes down (`docker compose down` or `stop`). A controller restart leaves them running, so the streams play on.
-- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails.
+- **transcoder:** reads each stream once and runs it through ffmpeg. It produces a full-quality HLS stream (copied while the video is H.264, re-encoded while it is not), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails. When a broadcast moves its video to another PID or codec mid-stream, ffmpeg starts over on the same engine session, right at the change.
 - **netgw:** the network gateway. Every engine routes through it. It owns the WireGuard tunnels, routes each engine through its path, probes the paths, and counts each engine's peers from connection tracking.
 - **engine:** the Acestream engine. It starts as root only to point its default route at the gateway, then drops to an unprivileged user with no capabilities.
 

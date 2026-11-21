@@ -12,10 +12,14 @@
  *
  * With `--inputs`, `POST /inputs/bcN/stop` and `POST /inputs/bcN/start` stop and start broadcast
  * N's input (its ffmpeg container, see e2e/broadcast.sh): its source then sends nothing new while
- * it keeps its peers and the window it has, as a broadcast that stops does.
+ * it keeps its peers and the window it has, as a broadcast that stops does. And
+ * `POST /inputs/bcN/layout/default|moved|hevc` starts its input again with another layout (see
+ * `start_input` there): its video on other PIDs, or in another codec, as a broadcast that changes
+ * its layout mid-stream.
  */
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 const PEER_TTL_MS = 120_000;
@@ -155,16 +159,28 @@ export function compactPeers(peers: Peer[]): Buffer {
   );
 }
 
-/** The input container of broadcast `bcN` and what to do with it, for `POST /inputs/bcN/stop|start`. */
+const BROADCAST_SCRIPT = join(import.meta.dirname, "broadcast.sh");
+
+/**
+ * The command for a request about broadcast `bcN`'s input, program first: `docker stop|start` of
+ * its container for `POST /inputs/bcN/stop|start`, and `broadcast.sh input N LAYOUT` for
+ * `POST /inputs/bcN/layout/LAYOUT`. Undefined for anything else.
+ */
 export function inputCommand(method: string | undefined, path: string): string[] | undefined {
-  const match = /^\/inputs\/bc(\d{1,2})\/(stop|start)$/.exec(path);
-  return method === "POST" && match !== null
-    ? [match[2] ?? "", `aceswarm-broadcast-input-${match[1] ?? ""}`]
-    : undefined;
+  if (method !== "POST") {
+    return undefined;
+  }
+  const control = /^\/inputs\/bc(\d{1,2})\/(stop|start)$/.exec(path);
+  if (control !== null) {
+    return ["docker", control[2] ?? "", `aceswarm-broadcast-input-${control[1] ?? ""}`];
+  }
+  const layout = /^\/inputs\/bc(\d{1,2})\/layout\/(default|moved|hevc)$/.exec(path);
+  return layout === null ? undefined : ["bash", BROADCAST_SCRIPT, "input", layout[1] ?? "", layout[2] ?? ""];
 }
 
-function controlInput(command: string[], response: ServerResponse): void {
-  execFile("docker", command, { timeout: 30_000 }, (error) => {
+function controlInput([program = "", ...args]: string[], response: ServerResponse): void {
+  const command = [program, ...args];
+  execFile(program, args, { timeout: 30_000 }, (error) => {
     process.stdout.write(`${new Date().toISOString()} input ${command.join(" ")}: ${error?.message ?? "done"}\n`);
     response.writeHead(error === null ? 204 : 500);
     response.end(error === null ? undefined : error.message);

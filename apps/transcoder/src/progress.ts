@@ -52,8 +52,47 @@ function toBlock(values: Record<string, string>): ProgressBlock {
   };
 }
 
-/** Extracts the codec of the first input video stream from ffmpeg's stderr banner. */
+/** Extracts the codec of a video stream from the line of ffmpeg's banner that lists it. */
 export function parseInputVideoCodec(stderrLine: string): string | undefined {
   const match = /^\s*Stream #0:\d+.*?: Video: ([\w-]+)/.exec(stderrLine);
   return match?.[1];
+}
+
+/**
+ * Splits what a process writes into lines. Its output comes in chunks of any size, so a line can
+ * come in two of them: the part without its end waits for the rest.
+ */
+export class Lines {
+  private rest = "";
+
+  /** Feeds the next chunk, and returns the lines it completed, trimmed, without the empty ones. */
+  push(chunk: string): string[] {
+    const parts = (this.rest + chunk).split(/[\r\n]/);
+    this.rest = parts.pop() ?? "";
+    return parts.map((line) => line.trim()).filter((line) => line.length > 0);
+  }
+}
+
+/**
+ * Finds the codec of the source's video in ffmpeg's banner, fed line by line. ffmpeg lists its
+ * input's streams first and its outputs' later, in the same words (`Stream #0:0: Video: h264` is
+ * also the full output of a run that re-encodes), so only the lines before its stream mapping
+ * count, and only the first video stream.
+ */
+export class InputBanner {
+  private done = false;
+
+  /** The codec, when `line` is the one that names it; undefined for any other line. */
+  push(line: string): string | undefined {
+    if (this.done) {
+      return undefined;
+    }
+    if (/^(Stream mapping:|Output #)/.test(line)) {
+      this.done = true;
+      return undefined;
+    }
+    const codec = parseInputVideoCodec(line);
+    this.done = codec !== undefined;
+    return codec;
+  }
 }

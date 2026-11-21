@@ -146,7 +146,7 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
     const output = join(directory, "plain");
     mkdirSync(join(output, "full"), { recursive: true });
     mkdirSync(join(output, "preview"), { recursive: true });
-    const plan: FfmpegPlan = { ...PLAN_SETTINGS, source: "pipe:0", directory: output, fullMode: "copy" };
+    const plan: FfmpegPlan = { ...PLAN_SETTINGS, directory: output, fullMode: "copy" };
     const child = spawn(FFMPEG ?? "ffmpeg", buildFfmpegArgs(plan), { stdio: ["pipe", "pipe", "ignore"] });
     let frames = 0;
     child.stdout.setEncoding("utf8").on("data", (text: string) => {

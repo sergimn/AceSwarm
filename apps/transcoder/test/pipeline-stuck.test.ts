@@ -8,6 +8,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
 
 const H264 = "  Stream #0:0[0x100]: Video: h264 (High), yuv420p(progressive), 1920x1080, 25 fps\n";
 const HEVC = "  Stream #0:0[0x100]: Video: hevc (Main), yuv420p(tv), 1920x1080, 25 fps\n";
@@ -59,6 +60,8 @@ describe("Pipeline with a run that goes on but is stuck", () => {
   const memory = new Map<number, number>();
   const streamLogger = createLogger("test", "silent");
   let warn = vi.spyOn(streamLogger, "warn");
+  /** The source each run opened, in the same order. */
+  let readers: FakeSource[] = [];
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-stuck-test-"));
@@ -101,6 +104,8 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       },
       handover: () => undefined,
     };
+    const sources = fakeSources();
+    readers = sources.opened;
     const logger = createLogger("test", "silent");
     vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
     pipeline = new Pipeline("s1", settings, logger, events, {
@@ -114,6 +119,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       },
       now: () => clock.now,
       memoryOf: (pid) => memory.get(pid) ?? 80 * MB,
+      openSource: sources.open,
     });
     return pipeline;
   }
@@ -243,6 +249,11 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
     );
 
+    // The source's tables and ffmpeg both say the video is H.264: the run re-encodes it all the same.
+    expect(readers[2]?.layout(layoutOf(256))).toBe(false);
+    (children[2]?.stderr as PassThrough).write(H264);
+    await nextTurn();
+    expect(runs).toHaveLength(3);
     // It plays, and the stream's later runs re-encode too: a run started again for its memory, and
     // one on another source.
     for (let at = 1; at <= 70; at += 1) {
