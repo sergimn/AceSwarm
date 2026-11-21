@@ -158,6 +158,8 @@ interface Search {
   before: Moved | undefined;
   leadPid: number;
   held: { pid: number; bytes: Uint8Array }[];
+  /** Whether video came on the lead PID: a PES packet of a video stream began there. */
+  video: boolean;
   bytes: number;
   since: number;
   reader: SettingsReader;
@@ -285,6 +287,13 @@ export class PidMoves {
   private lead: { pid: number; watched: Watched } | undefined;
   private moved: Moved | undefined;
   private search: Search | undefined;
+  /**
+   * The last move that was looked at, if it was given up because the stream changed again while
+   * video came on its PIDs: its layout, since when it was looked at, and when it was given up.
+   * Tables that keep switching between the run's layout and that move must not start its patience
+   * over each time (see `lookedSince`). Cleared by a look that saw no video, a carried move and a new run.
+   */
+  private lastLook: { key: string; since: number; at: number } | undefined;
 
   constructor(now: () => number) {
     this.now = now;
@@ -301,6 +310,7 @@ export class PidMoves {
     this.lead = undefined;
     this.moved = undefined;
     this.search = undefined;
+    this.lastLook = undefined;
     let checkable = true;
     for (const program of layout.programs) {
       for (const entry of program.streams) {
@@ -334,10 +344,11 @@ export class PidMoves {
    * - "looking": its streams moved to other PIDs. Their packets are held until the stream shows
    *   whether the decoders can go on (see `packet`).
    * - `no`: it is another stream now, or one that can't be checked; with the reason. So is a move
-   *   that `waited` for its turn (see `FollowBrake`): the run was given the stream as it came
-   *   meanwhile, new tables and all, so it is not where a move could take it on from.
+   *   that had to wait its turn (see `FollowBrake`), where something came on the PIDs it takes the
+   *   run's streams to meanwhile: the run was given the stream as it came, so it is not where a move
+   *   could take it on from. `waited` has the PIDs that carried packets while the change waited.
    */
-  consider(next: Layout, waited = false): "carried" | "looking" | { no: string } {
+  consider(next: Layout, waited?: ReadonlySet<number>): "carried" | "looking" | { no: string } {
     const { base, real, lead } = this;
     if (base === undefined || real === undefined) {
       return { no: "no run reads the stream yet" };
@@ -346,11 +357,13 @@ export class PidMoves {
       this.moved ??= this.inPlace();
       return "carried";
     }
-    if (waited) {
-      return { no: "the change had to wait its turn, and the run got the stream as it came meanwhile" };
-    }
     const places = placesOf(base, next);
     const stays = placesOf(real, next);
+    // Where nothing came on the PIDs it moves streams to, the run got nothing of it but tables meanwhile.
+    const heard = (pid: number): boolean => waited?.has(pid) === true && stays?.get(pid) !== pid;
+    if (waited !== undefined && (places === undefined || places.keys().some(heard))) {
+      return { no: "the change had to wait its turn, and the run got the stream as it came meanwhile" };
+    }
     if (places === undefined || stays === undefined) {
       return { no: "the streams are not the same ones on other PIDs" };
     }
@@ -377,8 +390,9 @@ export class PidMoves {
       before: this.moved,
       leadPid,
       held: [],
+      video: false,
       bytes: 0,
-      since: this.now(),
+      since: this.lookedSince(next),
       reader: new SettingsReader(lead.watched.kind),
       candidate: undefined,
       start: undefined,
@@ -387,6 +401,20 @@ export class PidMoves {
     // While it is looked at, the run's PIDs go on as they do, and nothing else is let in.
     this.moved ??= this.inPlace();
     return "looking";
+  }
+
+  /**
+   * Since when the move to `next` is looked at: now, or since the same move was first looked at, if
+   * the last look at it was given up less than the patience ago with video on its PIDs. Tables that
+   * keep switching between the run's layout and a move while the video is on the move's PIDs would
+   * otherwise keep the run waiting for as long as they switch, each look shorter than the patience,
+   * and no new run would take over. Tables that switch while the video stays where the run reads it
+   * see none on the move's video PID, and cost nothing, whatever else stays on its PID.
+   */
+  private lookedSince(next: Layout): number {
+    const { lastLook } = this;
+    const now = this.now();
+    return lastLook?.key === next.key && now - lastLook.at < PATIENCE_MS ? lastLook.since : now;
   }
 
   /** Gives up on a move that took too long to show a picture to go on from. */
@@ -402,8 +430,12 @@ export class PidMoves {
   giveUp(): Uint8Array[] {
     const { search } = this;
     this.search = undefined;
-    this.moved = search === undefined ? this.moved : search.before;
-    return search?.held.map((packet) => packet.bytes) ?? [];
+    if (search === undefined) {
+      return [];
+    }
+    this.moved = search.before;
+    this.lastLook = search.video ? { key: search.layout.key, since: search.since, at: this.now() } : undefined;
+    return search.held.map((packet) => packet.bytes);
   }
 
   /**
@@ -453,6 +485,7 @@ export class PidMoves {
     const pes = pesStart(bytes, 0, parts);
     let why: string | undefined;
     if (pid === search.leadPid) {
+      search.video ||= pes !== undefined && ((bytes[parts.payloadAt + 3] ?? 0) & 0xf0) === 0xe0;
       // Also once a picture to go on from is found: until the move is on, the video must not show other settings.
       why = this.lookForStart(search, bytes, parts, pes) ? undefined : "the video's decoder settings differ";
     } else if (pes !== undefined && !this.audioFits(search, pid, bytes, parts, pes)) {
@@ -524,6 +557,8 @@ export class PidMoves {
     this.moved = moved;
     this.real = search.layout;
     this.search = undefined;
+    // The run reads another layout now: what was looked at before was a move from the one it left.
+    this.lastLook = undefined;
     const out = new Uint8Array(search.bytes);
     let length = 0;
     for (const [index, { pid, bytes }] of search.held.entries()) {
