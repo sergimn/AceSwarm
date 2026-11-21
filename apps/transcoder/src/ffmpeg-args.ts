@@ -1,4 +1,6 @@
-export type FullMode = "copy" | "transcode";
+/** What the full output does with the video: passes H.264 on as it is, or re-encodes it to H.264. */
+export const FULL_MODES = ["copy", "transcode"] as const;
+export type FullMode = (typeof FULL_MODES)[number];
 /** PREVIEW_MODE's two modes, or thumbnails (no preview) with LOW_CPU_PREVIEWS; see the transcoder's config. */
 export type PreviewMode = "video" | "keyframes" | "thumbnails";
 
@@ -37,9 +39,10 @@ export interface FfmpegPlan {
 
 /**
  * Whether ffmpeg decodes key frames only (`-skip_frame nokey`), which previews the stream for a
- * fraction of the CPU: with `PREVIEW_MODE=keyframes`, and with `LOW_CPU_PREVIEWS` (thumbnails mode)
- * while the full stream is copied (a re-encoded one needs every frame). It only affects decoding,
- * so the copied full stream keeps every frame.
+ * fraction of the CPU: with `PREVIEW_MODE=keyframes` and with `LOW_CPU_PREVIEWS` (thumbnails mode),
+ * while the full stream is copied. It only affects decoding, so the copied full stream keeps every
+ * frame. A re-encoded full stream needs every frame decoded, or it would be made of the key frames
+ * alone: a picture every few seconds.
  *
  * It needs the broadcast to have key frames that ffmpeg takes for one: IDR frames, or frames with
  * a recovery point (SEI). A broadcast without them (an open GOP whose I frames are no recovery
@@ -48,8 +51,8 @@ export interface FfmpegPlan {
  * before every output has started. The pipeline then starts the stream again with `allFrames`.
  */
 export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "fullMode" | "allFrames">): boolean {
-  const keyFrames = plan.previewMode === "keyframes" || (plan.previewMode === "thumbnails" && plan.fullMode === "copy");
-  return keyFrames && plan.allFrames !== true;
+  const keyFrames = plan.previewMode === "keyframes" || plan.previewMode === "thumbnails";
+  return keyFrames && plan.fullMode === "copy" && plan.allFrames !== true;
 }
 
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {

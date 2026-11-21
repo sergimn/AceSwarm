@@ -48,7 +48,8 @@ export interface FeedHost {
   retire: (run: Generation) => void;
   /**
    * The broadcast moved the run's streams to other PIDs mid-stream, and the run reads on (see
-   * `PidMoves`): the stream showed a picture to go on from, so its video is there.
+   * `PidMoves`): the stream showed a picture to go on from, so its video is there. Such a move
+   * always takes the video to another PID: one where the video stays takes a new run.
    */
   moved: (run: Generation) => void;
 }
@@ -256,8 +257,13 @@ export class SourceFeeds {
       }
       const done = run.state === "exited" || this.now() - (run.handedOverAt ?? 0) >= DRAIN_TIMEOUT_MS;
       await this.host.publish(run);
-      // The frames it still wrote out are the stream's newest, until the run after it has its own.
-      const { successor, publishedFrameAt } = run;
+      // The frames it still wrote out are the stream's newest, until the run after it has its own:
+      // the one that took over, or the one that took that one's place.
+      let { successor } = run;
+      while (successor?.successor !== undefined) {
+        successor = successor.successor;
+      }
+      const { publishedFrameAt } = run;
       if (successor !== undefined && publishedFrameAt !== undefined) {
         successor.publishedFrameAt = Math.max(successor.publishedFrameAt ?? 0, publishedFrameAt);
       }

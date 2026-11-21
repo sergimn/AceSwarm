@@ -4,12 +4,14 @@ import type { PipelineStatus, StandbyReaderStatus, StandbySource } from "@aceswa
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
 import type { Service } from "@aceswarm/shared/service";
-import { Counter, Gauge } from "@prometheus-io/client";
+import { Counter, Gauge, Histogram } from "@prometheus-io/client";
 import { z } from "zod";
+import { FULL_MODES } from "./ffmpeg-args.ts";
 import { DECODINGS } from "./key-frames.ts";
 import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
 import type { OpenSource } from "./source-reader.ts";
+import { LAYOUT_CHANGE_KINDS } from "./ts-tables.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
 
@@ -45,6 +47,8 @@ export class PipelineManager {
   private readonly decoder: DecodeChecker;
   readonly generations: Counter<"stream" | "reason">;
   readonly handovers: Counter<"stream" | "result">;
+  readonly layoutChanges: Counter<"stream" | "kind" | "run">;
+  readonly layoutGaps: Histogram<"stream">;
 
   constructor(
     service: Service,
@@ -83,6 +87,28 @@ export class PipelineManager {
       labelNames: ["stream", "result"],
       registers,
     });
+    this.layoutChanges = new Counter({
+      name: "aceswarm_pipeline_layout_changes_total",
+      help:
+        "Changes of the layout of the stream's broadcast that its ffmpeg followed mid-stream, by kind (codec: " +
+        "the video's codec changed; pid: the video moved to another PID; other: something else ffmpeg reads, " +
+        "such as the sound) and by run (new: a new ffmpeg run took over; same: the same run reads on over a " +
+        "move to other PIDs). Tables that change around the streams ffmpeg reads don't count",
+      labelNames: ["stream", "kind", "run"],
+      registers,
+    });
+    this.layoutGaps = new Histogram({
+      name: "aceswarm_pipeline_layout_change_gap_seconds",
+      help:
+        "At each layout change of the stream's broadcast that its ffmpeg followed, how long players got no new " +
+        "video frame: from the last one before it to the first one after it, once that came. ffmpeg tells of " +
+        "its frames once a second, so a change without a pause shows about 1 second",
+      labelNames: ["stream"],
+      // A move the same run reads on over takes a second or two, a new run a few seconds, a change
+      // in the middle of a group of pictures up to two key frame intervals.
+      buckets: [0.5, 1, 1.5, 2, 3, 5, 8, 13, 20, 30, 60],
+      registers,
+    });
     // The client calls collect() on every scrape; one gauge refreshes all of them. It is registered
     // before the gauges it fills, because a scrape reads each metric in turn: the ones before it
     // would show the previous scrape's values.
@@ -95,6 +121,8 @@ export class PipelineManager {
         fps.reset();
         lastFrame.reset();
         decoding.reset();
+        fullMode.reset();
+        videoCodec.reset();
         standbyReaders.reset();
         for (const [stream, readers] of this.standbys) {
           for (const reader of readers.status()) {
@@ -111,11 +139,20 @@ export class PipelineManager {
           }
         }
         for (const [stream, pipeline] of this.pipelines) {
+          // A stream before its first run has none of these.
           const current = pipeline.decoding();
-          if (current !== undefined) {
-            for (const candidate of DECODINGS) {
-              decoding.set({ stream, decoding: candidate }, candidate === current ? 1 : 0);
-            }
+          if (current === undefined) {
+            continue;
+          }
+          for (const candidate of DECODINGS) {
+            decoding.set({ stream, decoding: candidate }, candidate === current ? 1 : 0);
+          }
+          const { mode, videoCodec: codec } = pipeline.status();
+          for (const candidate of FULL_MODES) {
+            fullMode.set({ stream, mode: candidate }, candidate === mode ? 1 : 0);
+          }
+          if (codec !== null) {
+            videoCodec.set({ stream, codec }, 1);
           }
         }
         total.set(this.pipelines.size);
@@ -147,9 +184,27 @@ export class PipelineManager {
         "How the stream's ffmpeg run decodes the broadcast, or its last run while none runs (1 for that way, 0 for the others): " +
         "key-frames (key frames only, which gave a frame), key-frames-waiting (key frames only, no frame yet), " +
         "all-frames-fallback (every frame, because key frames only gave none in time, as for a broadcast without IDR frames), " +
-        "all-frames (every frame, as PREVIEW_MODE=video, or a re-encoded full stream with LOW_CPU_PREVIEWS, need). " +
+        "all-frames (every frame, as PREVIEW_MODE=video, or a re-encoded full stream, need). " +
         "No value before its first run",
       labelNames: ["stream", "decoding"],
+      registers,
+    });
+    const fullMode = new Gauge({
+      name: "aceswarm_pipeline_full_mode",
+      help:
+        "What the stream's ffmpeg run does with the video of the full screen output, or its last run while none " +
+        "runs (1 for that mode, 0 for the other): copy (H.264, passed on as it is) or transcode (re-encoded to " +
+        "H.264). No value before its first run",
+      labelNames: ["stream", "mode"],
+      registers,
+    });
+    const videoCodec = new Gauge({
+      name: "aceswarm_pipeline_video_codec",
+      help:
+        "The codec of the video of the stream's source, as ffmpeg names it (1 for the current one only): what " +
+        "ffmpeg found, or else what the source's program tables say. No value before its first run, or while " +
+        "neither tells",
+      labelNames: ["stream", "codec"],
       registers,
     });
     const standbyReaders = new Gauge({
@@ -186,10 +241,23 @@ export class PipelineManager {
           handover: (stream, result) => {
             this.handovers.inc({ stream, result });
           },
+          layoutChanged: (stream, kind, run) => {
+            this.layoutChanges.inc({ stream, kind, run });
+          },
+          layoutGap: (stream, ms) => {
+            this.layoutGaps.observe({ stream }, ms / 1000);
+          },
         },
         { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
       );
       this.pipelines.set(id, pipeline);
+      // Every series of the stream starts at 0: Prometheus sees no increase in one that first comes with a value.
+      for (const kind of LAYOUT_CHANGE_KINDS) {
+        for (const run of ["new", "same"] as const) {
+          this.layoutChanges.inc({ stream: id, kind, run }, 0);
+        }
+      }
+      this.layoutGaps.zero({ stream: id });
     }
     // A standby that becomes the source: the pipeline reads it from now on, for ffmpeg, and the
     // engine allows one reader per session. Right after the standby's reader lets go, the engine
