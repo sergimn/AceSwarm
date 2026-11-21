@@ -96,8 +96,8 @@ export class SourceFeeds {
     if (fails && !this.reencoding) {
       // Key frames are counted from here on; after a copy that came back and failed again, for longer.
       this.counting = undefined;
-      if (this.cameBack) {
-        this.cutPoints.failedAgain();
+      if (this.cameBackAt !== undefined) {
+        this.cutPoints.failedAgain(this.now() - this.cameBackAt);
       }
     }
     this.reencoding = fails;
@@ -106,10 +106,13 @@ export class SourceFeeds {
   private reencoding = false;
   /** Tells when a copy can come back (see `onCutPoint`). */
   private readonly cutPoints: CutPointWatch;
-  /** The connection whose cut points it counts: another source's time stamps go by another clock. */
-  private counting: Connection | undefined;
-  /** Whether a copy came back once already (see `CutPointWatch.failedAgain`). */
-  private cameBack = false;
+  /**
+   * The run whose cut points it counts: another source's time stamps go by another clock, and
+   * after a change of layout or a move to other PIDs, the video may come from another encoder.
+   */
+  private counting: Generation | undefined;
+  /** When a copy came back last, if one did (see `CutPointWatch.failedAgain`). */
+  private cameBackAt: number | undefined;
   /** The codec of the video the stream's sources carried last, as far as known. */
   private codec: string | undefined;
   /** What ffmpeg found the video of a layout to be, where its tables say otherwise, or nothing. */
@@ -243,6 +246,9 @@ export class SourceFeeds {
     }
     const details = { generation: run.number, from: describeLayout(previous), to: describeLayout(layout) };
     if (!inPlace) {
+      if (this.counting === run) {
+        this.counting = undefined;
+      }
       this.logger.info(details, "the broadcast moved its streams to other PIDs; the same ffmpeg run reads on");
       this.host.moved(run);
       return;
@@ -272,31 +278,36 @@ export class SourceFeeds {
    * `CutPointWatch`), the broadcast has key frames again: a run that copies the video takes over
    * right at this unit, on the same connection, as at a change of layout, and the stream's later
    * runs copy it too. One that then can't be cut again is found out as before (see `StuckRuns`).
-   * Key frames only decoding comes back where the copy does at an IDR picture: of recovery points
-   * alone, ffmpeg 9's decoder shows next to nothing that way (an intra refresh never ends, and an
-   * open GOP with B-frames gets stuck in the decoder's reordering).
+   * Key frames only decoding comes back where every cut point that counted was an IDR picture: of
+   * recovery points, ffmpeg 9's decoder shows next to nothing that way (an intra refresh never
+   * ends, and an open GOP with B-frames gets stuck in the decoder's reordering).
    */
-  private onCutPoint(connection: Connection, pts: number | undefined, point: CutPoint): Sink | undefined {
+  private onCutPoint(
+    connection: Connection,
+    pts: number | undefined,
+    point: Exclude<CutPoint, "none">,
+  ): Sink | undefined {
     const run = connection.run;
     const { layout } = run;
     if (!this.watchesCuts(run) || layout === undefined) {
       return undefined;
     }
-    if (this.counting !== connection) {
-      this.counting = connection;
+    if (this.counting !== run) {
+      this.counting = run;
       this.cutPoints.reset();
     }
-    if (!this.cutPoints.cutPoint(pts)) {
+    if (!this.cutPoints.cutPoint(pts, point)) {
       return undefined;
     }
+    const { onlyIdrs } = this.cutPoints;
     this.logger.info(
-      { generation: run.number, seconds: this.cutPoints.waitMs / 1000, at: point },
+      { generation: run.number, seconds: this.cutPoints.waitMs / 1000, at: point, onlyIdrs },
       "the broadcast's video has key frames again; copying the full stream again",
     );
     this.reencoding = false;
-    this.cameBack = true;
+    this.cameBackAt = this.now();
     this.cutPoints.reset();
-    if (point === "idr") {
+    if (onlyIdrs) {
       this.host.keyFramesBack();
     }
     return this.host.succeed(run, { layout, mode: "copy", midStream: true, drain: true }, "key-frames")?.sink;

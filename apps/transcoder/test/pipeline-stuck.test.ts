@@ -99,7 +99,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(previewMode: PipelineSettings["plan"]["previewMode"] = "video"): Pipeline {
+  function start(previewMode: PipelineSettings["plan"]["previewMode"] = "video", stallMs = 30_000): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -116,7 +116,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
       },
-      stuck: { fullOutputStallMs: 30_000, maxMemoryGrowthBytes: 512 * MB },
+      stuck: { fullOutputStallMs: stallMs, maxMemoryGrowthBytes: 512 * MB },
     };
     const events = {
       generationStarted: (_id: string, reason: string) => {
@@ -440,7 +440,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       expect(instance.status().mode).toBe("copy");
       expect(instance.decoding()).toBe("key-frames");
       expect(info).toHaveBeenCalledWith(
-        { generation: run + 1, seconds: 60, at: "idr" },
+        { generation: run + 1, seconds: 60, at: "idr", onlyIdrs: true },
         "the broadcast's video has key frames again; copying the full stream again",
       );
       // The copy reads on from the connection the re-encode had, where the re-encode's input ended,
@@ -487,6 +487,19 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         expect(runs).toHaveLength(again + 2);
       });
       expect(fullCodec(runs.at(-1))).toBe("copy");
+    });
+
+    it("allows cut points no further apart than half the stall time", async () => {
+      const instance = start("video", 8000);
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      const source = readers.at(-1);
+      // 4.5 s apart: close enough for a stall time of 30 s, but not under half of this one.
+      for (let at = 0; at <= 180; at += 4.5) {
+        expect(source?.cutPoint(Math.round(at * 90_000))).toBe(false);
+      }
+      expect(runs).toHaveLength(run + 1);
+      expect(keyFrames(source, 200 * 90_000, 120)).toBe(60);
     });
 
     it("counts the cut points of one source at a time: each has a clock of its own", async () => {

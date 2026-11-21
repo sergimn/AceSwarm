@@ -11,12 +11,14 @@
  *   FFMPEG_BIN=$PWD/ffmpeg npx vitest run apps/transcoder/test/ffmpeg-cut-points.test.ts
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cutPointOf, type CutPoint } from "../src/h264-cut-points.ts";
 import { PACKET_BYTES, TsPackets } from "../src/ts-packets.ts";
+import { TsWriter } from "./es-fixtures.ts";
+import { concatBytes, tablePackets } from "./ts-fixtures.ts";
 
 const FFMPEG = process.env["FFMPEG_BIN"];
 /** Where ffmpeg's MPEG-TS muxer puts the first stream. */
@@ -41,9 +43,22 @@ const KINDS = {
   ],
 } as const;
 
-/** The access units of the video, one per PES as ffmpeg muxes them, each from its first byte on. */
-function accessUnits(file: string): Uint8Array[] {
-  const units: number[][] = [];
+/** A PES header's time stamp (90 kHz) at `at`. */
+function timeAt(data: Uint8Array, at: number): number {
+  const high = ((data[at] ?? 0) >> 1) & 7;
+  const low = ((data[at + 1] ?? 0) << 22) + (((data[at + 2] ?? 0) >> 1) << 15) + ((data[at + 3] ?? 0) << 7);
+  return high * 2 ** 30 + low + ((data[at + 4] ?? 0) >> 1);
+}
+
+interface AccessUnit {
+  bytes: number[];
+  pts: number;
+  dts: number;
+}
+
+/** The access units of the video, one per PES as ffmpeg muxes them, each from its first byte on, and their times. */
+function accessUnits(file: string): AccessUnit[] {
+  const units: AccessUnit[] = [];
   new TsPackets().push(readFileSync(file), (data, at) => {
     const pid = (((data[at + 1] ?? 0) & 0x1f) << 8) | (data[at + 2] ?? 0);
     if (pid !== VIDEO_PID || ((data[at + 3] ?? 0) & 0x10) === 0) {
@@ -52,29 +67,51 @@ function accessUnits(file: string): Uint8Array[] {
     const adaptation = ((data[at + 3] ?? 0) & 0x20) === 0 ? 0 : 1 + (data[at + 4] ?? 0);
     let payload = at + 4 + adaptation;
     if (((data[at + 1] ?? 0) & 0x40) !== 0) {
+      const pts = timeAt(data, payload + 9);
+      const dts = ((data[payload + 7] ?? 0) & 0x40) === 0 ? pts : timeAt(data, payload + 14);
       payload += 9 + (data[payload + 8] ?? 0);
-      units.push([]);
+      units.push({ bytes: [], pts, dts });
     }
-    units.at(-1)?.push(...data.subarray(payload, at + PACKET_BYTES));
+    units.at(-1)?.bytes.push(...data.subarray(payload, at + PACKET_BYTES));
   });
-  return units.map((unit) => Uint8Array.from(unit));
+  return units;
+}
+
+/** Where the NAL unit after the first start code at or after `from` begins whose header passes `test`. */
+function nalAt(bytes: readonly number[], from: number, test: (header: number) => boolean): number | undefined {
+  for (let at = from; at + 3 < bytes.length; at += 1) {
+    if (bytes[at] === 0 && bytes[at + 1] === 0 && bytes[at + 2] === 1 && test(bytes[at + 3] ?? 0)) {
+      return at + 3;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The same video with `edit` made to each access unit that has an SEI unit whose first message is
+ * a recovery point (as x264 writes them), given where that SEI unit begins; muxed again as it was.
+ */
+function edited(file: string, name: string, edit: (bytes: number[], sei: number) => number[]): string {
+  const writer = new TsWriter();
+  const parts = [tablePackets([{ pid: VIDEO_PID, type: 0x1b }])];
+  for (const { bytes, pts, dts } of accessUnits(file)) {
+    const sei = nalAt(bytes, 0, (header) => header === 0x06);
+    const unit = sei === undefined || bytes[sei + 1] !== 6 ? bytes : edit(bytes, sei);
+    parts.push(writer.pes(VIDEO_PID, "video", Uint8Array.from(unit), { pts, dts, pcr: dts - 9000 }));
+  }
+  const path = `${file.slice(0, -".ts".length)}-${name}.ts`;
+  writeFileSync(path, concatBytes(...parts));
+  return path;
 }
 
 /** Whether ffmpeg flags each video packet as a key frame, in the order it demuxes them. */
 function ffmpegKeys(file: string): boolean[] {
-  const listing = execFileSync(FFMPEG ?? "", [
-    "-v",
-    "error",
-    "-i",
-    file,
-    "-map",
-    "0:v",
-    "-c",
-    "copy",
-    "-f",
-    "framecrc",
-    "-",
-  ]);
+  const listing = execFileSync(
+    FFMPEG ?? "",
+    ["-v", "error", "-i", file, "-map", "0:v", "-c", "copy", "-f", "framecrc", "-"],
+    // What its parser says of a crafted stream goes to the error, if ffmpeg fails.
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   return listing
     .toString()
     .split("\n")
@@ -90,7 +127,7 @@ function agree(file: string): { points: CutPoint[]; units: number } {
   const keys = ffmpegKeys(file);
   const units = accessUnits(file);
   expect(units).toHaveLength(keys.length);
-  const points = units.map((unit) => cutPointOf(unit.subarray(0, HEAD_BYTES)));
+  const points = units.map((unit) => cutPointOf(Uint8Array.from(unit.bytes.slice(0, HEAD_BYTES))));
   expect(points.map((point) => (point === undefined ? undefined : point !== "none"))).toEqual(keys);
   return { points: points.filter((point) => point !== undefined && point !== "none"), units: units.length };
 }
@@ -115,7 +152,7 @@ function keyFramesOnlyPictures(file: string): number {
     .filter((line) => line.includes("Parsed_showinfo") && line.includes(" n:")).length;
 }
 
-describe.skipIf(FFMPEG === undefined)("cutsAt and ffmpeg's own key frames", () => {
+describe.skipIf(FFMPEG === undefined)("cutPointOf and ffmpeg's own key frames", () => {
   let directory: string;
 
   beforeAll(() => {
@@ -154,6 +191,36 @@ describe.skipIf(FFMPEG === undefined)("cutsAt and ffmpeg's own key frames", () =
       "filter_units=remove_types=6",
     );
     expect(agree(file).points).toEqual(["idr"]);
+  });
+
+  // Units that look like cut points without being ones to ffmpeg: it is the parser's reading of
+  // them that counts, not what the standard says.
+  it("finds none where ffmpeg reads no recovery point: after a message it refuses, or in a data partition", () => {
+    const open = encode("open-gop", KINDS["I frames of an open GOP, with recovery points"]);
+    // User data shorter than its UUID before the recovery point, in the same SEI unit.
+    const refused = edited(open, "refused", (bytes, sei) => [
+      ...bytes.slice(0, sei + 1),
+      5,
+      4,
+      ...Array.from({ length: 4 }, () => 0xaa),
+      ...bytes.slice(sei + 1),
+    ]);
+    expect(agree(refused).points).toEqual(["idr"]);
+    // Long enough, it changes nothing.
+    const read = edited(open, "read", (bytes, sei) => [
+      ...bytes.slice(0, sei + 1),
+      5,
+      16,
+      ...Array.from({ length: 16 }, () => 0xaa),
+      ...bytes.slice(sei + 1),
+    ]);
+    expect(agree(read).points).toEqual(["idr", ...Array.from({ length: 5 }, () => "recovery-point")]);
+    // The picture's slice as a data partition (NAL unit type 2), which ffmpeg's parser skips.
+    const partitioned = edited(open, "partition", (bytes, sei) => {
+      const slice = nalAt(bytes, sei, (header) => (header & 0x1f) === 1) ?? 0;
+      return bytes.map((byte, at) => (at === slice ? (byte & 0xe0) | 2 : byte));
+    });
+    expect(agree(partitioned).points).toEqual(["idr"]);
   });
 
   // Why key frames only decoding comes back with a copy only at an IDR picture (see `SourceFeeds`).

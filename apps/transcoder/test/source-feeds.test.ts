@@ -13,9 +13,14 @@ function feeds(): {
   sources: FakeSource[];
   succeeded: Succession[];
   run: (mode: FullMode) => Generation;
+  /** How many times key frames only decoding came back. */
+  backs: { count: number };
+  clock: { now: number };
 } {
   const sources = fakeSources();
   const succeeded: Succession[] = [];
+  const backs = { count: 0 };
+  const clock = { now: 0 };
   let number = 0;
   const generation = (mode: FullMode): Generation => {
     number += 1;
@@ -36,11 +41,13 @@ function feeds(): {
       publish: () => Promise.resolve(),
       retire: () => undefined,
       moved: () => undefined,
-      keyFramesBack: () => undefined,
+      keyFramesBack: () => {
+        backs.count += 1;
+      },
     },
     sources.open,
     createLogger("test", "silent"),
-    () => 0,
+    () => clock.now,
     30_000,
   );
   const run = (mode: FullMode): Generation => {
@@ -48,7 +55,35 @@ function feeds(): {
     stream.open(opened);
     return opened;
   };
-  return { feeds: stream, sources: sources.opened, succeeded, run };
+  return { feeds: stream, sources: sources.opened, succeeded, run, backs, clock };
+}
+
+/**
+ * Cut points every 2 s from `from` (in seconds of the time stamps) for up to `seconds`, IDR
+ * pictures unless `point` says otherwise for one; returns when the feeds handed over, in seconds after `from`.
+ */
+function cutPoints(
+  source: FakeSource | undefined,
+  from: number,
+  seconds: number,
+  point: (at: number) => "idr" | "recovery-point" = () => "idr",
+): number | undefined {
+  for (let at = 0; at <= seconds; at += 2) {
+    if (source?.cutPoint((from + at) * 90_000, point(at)) === true) {
+      return at;
+    }
+  }
+  return undefined;
+}
+
+/** A stream that re-encodes because a copy failed, with a run that watches its H.264 source. */
+function reencoding(): ReturnType<typeof feeds> & { source: FakeSource | undefined } {
+  const made = feeds();
+  made.run("transcode");
+  made.feeds.copyFails = true;
+  const source = made.sources.at(-1);
+  expect(source?.layout(layoutOf(256))).toBe(false);
+  return { ...made, source };
 }
 
 describe("SourceFeeds watching for key frames", () => {
@@ -88,19 +123,58 @@ describe("SourceFeeds watching for key frames", () => {
   });
 
   it("hands over to a run that copies, which drains the old one, and watches no more", () => {
-    const { feeds: stream, sources, succeeded, run } = feeds();
-    run("transcode");
-    stream.copyFails = true;
-    const source = sources.at(-1);
-    expect(source?.layout(layoutOf(256))).toBe(false);
-    let handedOver: number | undefined;
-    for (let at = 0; at <= 120 && handedOver === undefined; at += 2) {
-      handedOver = source?.cutPoint(at * 90_000) === true ? at : undefined;
-    }
-    expect(handedOver).toBe(60);
+    const { feeds: stream, source, succeeded, backs } = reencoding();
+    expect(cutPoints(source, 0, 120)).toBe(60);
     expect(succeeded).toEqual([{ layout: layoutOf(256), mode: "copy", midStream: true, drain: true }]);
     expect(stream.copyFails).toBe(false);
     expect(stream.startMode()).toBe("copy");
     expect(source?.request.cutPoints?.watching()).toBe(false);
+    expect(backs.count).toBe(1);
+  });
+
+  it("decodes key frames only again only where every cut point of the minute was an IDR picture", () => {
+    const { source, backs } = reencoding();
+    expect(cutPoints(source, 0, 120, (at) => (at === 30 ? "recovery-point" : "idr"))).toBe(60);
+    expect(backs.count).toBe(0);
+  });
+
+  it("starts the count over at a change of layout or a move to other PIDs, but not at tables that change around the run's streams", () => {
+    const { source } = reencoding();
+    expect(cutPoints(source, 0, 30)).toBeUndefined();
+    // The program's table on another PID.
+    source?.move(layoutOf(256, 0x1b, 0x20_00), true);
+    expect(cutPoints(source, 32, 30)).toBe(28);
+
+    const moved = reencoding().source;
+    expect(cutPoints(moved, 0, 30)).toBeUndefined();
+    // The same streams on other PIDs, maybe from another encoder.
+    moved?.move(layoutOf(211));
+    expect(cutPoints(moved, 32, 56)).toBeUndefined();
+    expect(cutPoints(moved, 90, 2)).toBe(2);
+
+    // A change of layout, which a new run on the same connection takes over at.
+    const { source: changed, succeeded } = reencoding();
+    expect(cutPoints(changed, 0, 30)).toBeUndefined();
+    expect(changed?.layout(layoutOf(300))).toBe(true);
+    expect(succeeded.map((how) => how.mode)).toEqual(["transcode"]);
+    expect(cutPoints(changed, 32, 56)).toBeUndefined();
+    expect(cutPoints(changed, 90, 2)).toBe(2);
+  });
+
+  it("waits twice as long after a copy that failed again, and a minute again after one that played for half an hour", () => {
+    const { feeds: stream, source, sources, run, clock } = reencoding();
+    expect(cutPoints(source, 0, 60)).toBe(60);
+    /** The copy fails again after that long, and a run re-encodes the stream from a source of its own. */
+    const failsAfter = (ms: number): FakeSource | undefined => {
+      clock.now += ms;
+      stream.copyFails = true;
+      run("transcode");
+      const next = sources.at(-1);
+      expect(next?.layout(layoutOf(256))).toBe(false);
+      return next;
+    };
+    expect(cutPoints(failsAfter(2 * 60_000), 0, 200)).toBe(120);
+    expect(cutPoints(failsAfter(29 * 60_000), 0, 400)).toBe(240);
+    expect(cutPoints(failsAfter(30 * 60_000), 0, 200)).toBe(60);
   });
 });

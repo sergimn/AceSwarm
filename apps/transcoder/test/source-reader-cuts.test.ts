@@ -226,6 +226,50 @@ describe("readSource watching for where a copy of the video can be cut", () => {
     expect(same(sink.bytes(), (await plainly(stream)).bytes())).toBe(true);
   });
 
+  it("lets a unit go on as it came, for none to cut at, once it held 64 packets before the unit's first slice", async () => {
+    const { sink, feed, found, encoder, video } = watched();
+    const first = concatBytes(tablePackets(H264), encoder.picture("idr"));
+    await feed(first);
+    const packets = video(unit("idr", ...H264_SETS, USER_DATA));
+    const sound = Array.from({ length: 70 }, (_, index) =>
+      encoder.writer.pes(257, "audio", adtsFrame(), { pts: START + index * FRAME }),
+    );
+    // The sound comes between the unit's first packet and the one with its slice.
+    const stream = concatBytes(packets.subarray(0, 188), ...sound);
+    await feed(stream);
+    const plain = await plainly(first, stream);
+    expect(same(sink.bytes(), plain.bytes())).toBe(true);
+    await feed(packets.subarray(188));
+    expect(found).toEqual([START]);
+  });
+
+  it("holds nothing back while a move to other PIDs is looked at", async () => {
+    const { feed, found, clock, encoder, video } = watched();
+    await feed(tablePackets(H264), encoder.picture("idr"), encoder.picture("p"));
+    clock.now += 60_000;
+    // The tables move the streams; the move waits for a picture to go on from on the new PIDs.
+    await feed(tablePackets(MOVED, 0x10_00, 1));
+    // What still comes on the old PIDs then.
+    await feed(video(unit("idr", ...H264_SETS)));
+    expect(found).toEqual([START]);
+  });
+
+  it("gives the moves what it hands over at, so that the copy reads on over a move after it", async () => {
+    const { feed, handTo, moves, layouts, clock, encoder } = watched();
+    await feed(tablePackets(H264), encoder.picture("idr"), encoder.picture("p"));
+    const next = recordingSink();
+    handTo.sink = next;
+    // Its decoder settings come with this IDR picture, and with no picture after it.
+    await feed(encoder.picture("idr"), encoder.picture("p"), encoder.picture("p"));
+    expect(next.bytes().length).toBeGreaterThan(0);
+    clock.now += 60_000;
+    const there = new Encoder({ video: 211, audio: 221, start: 5_000_000 });
+    await feed(tablePackets(MOVED, 0x10_00, 1), there.picture("idr"), there.picture("p"));
+    // The stream's first tables, and no change after them.
+    expect(layouts).toHaveLength(1);
+    expect(moves).toHaveLength(1);
+  });
+
   it("hands over after a move to other PIDs with the stream as it comes now: its tables, PIDs and times", async () => {
     const { sink, feed, found, handTo, moves, clock, encoder } = watched();
     await feed(tablePackets(H264), encoder.picture("idr"), encoder.picture("p"), encoder.picture("p"));

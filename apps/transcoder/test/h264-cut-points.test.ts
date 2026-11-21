@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cutPointOf } from "../src/h264-cut-points.ts";
+import { cutPointOf, type CutPoint } from "../src/h264-cut-points.ts";
 
 const START = [0, 0, 0, 1];
 const SHORT_START = [0, 0, 1];
@@ -47,6 +47,18 @@ function recoveryPoint(frames: number): number[] {
   });
 }
 
+/** A buffering period's payload as far as ffmpeg reads it without the SPS: the SPS's number. */
+function bufferingPeriod(sps: number): number[] {
+  return payloadOf((_bit, ue) => {
+    ue(sps);
+  });
+}
+
+/** A payload of that many bytes, for a message whose content doesn't matter. */
+function bytes(length: number): number[] {
+  return Array.from({ length }, () => 7);
+}
+
 /** A payload type or size as SEI writes it: 0xFF bytes for each 255, then the rest. */
 function sizeOf(value: number): number[] {
   return [...Array.from({ length: Math.floor(value / 255) }, () => 0xff), value % 255];
@@ -75,12 +87,15 @@ function unit(...nals: number[][]): Uint8Array {
   return Uint8Array.from(nals.flatMap((nal) => [...START, ...nal]));
 }
 
-const UNREGISTERED = 5;
+const BUFFERING_PERIOD = 0;
 const PIC_TIMING = 1;
+const REGISTERED = 4;
+const UNREGISTERED = 5;
 const RECOVERY_POINT = 6;
-/** An SEI unit with a recovery point after which the frame is whole at once (no frames to wait for). */
+const MASTERING_DISPLAY = 137;
 /** User data longer than 255 bytes, so that its size takes two bytes. */
 const USER_DATA = Array.from({ length: 300 }, (_, index) => index % 7);
+/** An SEI unit with a recovery point after which the frame is whole at once (no frames to wait for). */
 const POINT_SEI = sei({ type: RECOVERY_POINT, payload: recoveryPoint(0) });
 /** An SEI unit with a recovery point at the most frames ffmpeg allows, and one with a frame more. */
 const LATEST_POINT_SEI = sei({ type: RECOVERY_POINT, payload: recoveryPoint(65_535) });
@@ -101,7 +116,7 @@ describe("cutPointOf", () => {
     expect(cutPointOf(unit(AUD, SPS, PPS, [0x61, 0x88, 0x80]))).toBe("none");
   });
 
-  it("cuts at a slice after a recovery point, also after other messages and in a data partition", () => {
+  it("cuts at a slice after a recovery point, also after other messages", () => {
     expect(cutPointOf(unit(AUD, POINT_SEI, SLICE))).toBe("recovery-point");
     const timing = { type: PIC_TIMING, payload: [0x00, 0x00, 0x08, 0x10] };
     const userData = { type: UNREGISTERED, payload: USER_DATA };
@@ -109,7 +124,39 @@ describe("cutPointOf", () => {
     const together = sei(timing, userData, point);
     expect(cutPointOf(unit(AUD, together, SLICE))).toBe("recovery-point");
     const apart = [sei(timing), sei(point)];
-    expect(cutPointOf(unit(AUD, ...apart, PARTITION_A))).toBe("recovery-point");
+    expect(cutPointOf(unit(AUD, ...apart, SLICE))).toBe("recovery-point");
+  });
+
+  it("does not cut at a data partition: ffmpeg's parser takes it for no slice", () => {
+    expect(cutPointOf(unit(AUD, POINT_SEI, PARTITION_A))).toBe("none");
+  });
+
+  it("takes no recovery point after a message ffmpeg refuses in the same SEI unit, where it stops reading", () => {
+    const point = { type: RECOVERY_POINT, payload: recoveryPoint(0) };
+    const after = (type: number, payload: number[]): CutPoint | undefined =>
+      cutPointOf(unit(AUD, sei({ type, payload }, point), SLICE));
+    // User data with less than its UUID.
+    expect(after(UNREGISTERED, bytes(4))).toBe("none");
+    expect(after(UNREGISTERED, bytes(16))).toBe("recovery-point");
+    // Picture timing longer than ffmpeg keeps.
+    expect(after(PIC_TIMING, bytes(41))).toBe("none");
+    expect(after(PIC_TIMING, bytes(40))).toBe("recovery-point");
+    // A buffering period for an SPS number that can't be.
+    expect(after(BUFFERING_PERIOD, bufferingPeriod(32))).toBe("none");
+    expect(after(BUFFERING_PERIOD, bufferingPeriod(31))).toBe("recovery-point");
+    // Too short a mastering display colour volume.
+    expect(after(MASTERING_DISPLAY, bytes(23))).toBe("none");
+    expect(after(MASTERING_DISPLAY, bytes(24))).toBe("recovery-point");
+    // Captions: whether ffmpeg reads them goes deeper than their size, so they count as refused.
+    expect(after(REGISTERED, [0xb5, 0x00, 0x31, 0x47, 0x41, 0x39, 0x34, 0x03, 0x00, 0xff])).toBe("none");
+    // A type ffmpeg doesn't read is skipped.
+    expect(after(200, bytes(3))).toBe("recovery-point");
+    // In an SEI unit of its own, a refused message takes nothing from the recovery point.
+    const apart = unit(AUD, sei({ type: UNREGISTERED, payload: bytes(4) }), sei(point), SLICE);
+    expect(cutPointOf(apart)).toBe("recovery-point");
+    // Nor does one after it.
+    const later = unit(AUD, sei(point, { type: UNREGISTERED, payload: bytes(1) }), SLICE);
+    expect(cutPointOf(later)).toBe("recovery-point");
   });
 
   it("reads the messages without the bytes that prevent start codes in them", () => {
