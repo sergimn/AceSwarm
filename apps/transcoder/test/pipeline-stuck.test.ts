@@ -99,7 +99,11 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(previewMode: PipelineSettings["plan"]["previewMode"] = "video", stallMs = 30_000): Pipeline {
+  function start(
+    previewMode: PipelineSettings["plan"]["previewMode"] = "video",
+    stallMs = 30_000,
+    segmentSeconds = 2,
+  ): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -111,7 +115,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         previewBitrateKbps: 400,
         fullTranscodeMaxHeight: 1080,
         audioBitrateKbps: 128,
-        segmentSeconds: 2,
+        segmentSeconds,
         playlistSize: 6,
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
@@ -502,6 +506,48 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       }
       expect(runs).toHaveLength(run + 1);
       expect(keyFrames(source, 200 * 90_000, 120)).toBe(60);
+    });
+
+    it("judges the copy's first segment by the stream's segment time", async () => {
+      const instance = start("video", 30_000, 6);
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      const source = readers.at(-1);
+      // 4 s apart: the first segment of a copy would end 8 s on, longer than a segment of 6 s.
+      for (let at = 0; at <= 180; at += 4) {
+        expect(source?.cutPoint(at * 90_000)).toBe(false);
+      }
+      expect(runs).toHaveLength(run + 1);
+      // 2 s apart: 6 s.
+      expect(keyFrames(source, 200 * 90_000, 120)).toBe(60);
+    });
+
+    it("copies again from a source that waits to take over and still re-encodes once the other came back", async () => {
+      const instance = start();
+      await instance.start("http://engine-1/play", false);
+      await reencoded(0);
+      const active = readers.at(-1);
+      await instance.start("http://engine-2/play", true);
+      const pending = readers.at(-1);
+      expect(pending?.layout(layoutOf(256))).toBe(false);
+      // Its ffmpeg found the video before the other source came back.
+      (children.at(-1)?.stderr as PassThrough).write(H264);
+      await nextTurn();
+      expect(keyFrames(active, 0, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(reasons.at(-1)).toBe("key-frames");
+      });
+      expect(instance.status().mode).toBe("copy");
+      // It would re-encode for as long as it lives, once it took over: it counts a minute of its own.
+      const before = runs.length;
+      expect(pending?.request.cutPoints?.watching()).toBe(true);
+      expect(keyFrames(pending, 3_000_000, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(before + 1);
+      });
+      expect(reasons.at(-1)).toBe("key-frames");
+      expect(fullCodec(runs.at(-1))).toBe("copy");
+      expect(instance.status().pendingSource).toBe("http://engine-2/play");
     });
 
     it("counts the cut points of one source at a time: each has a clock of its own", async () => {

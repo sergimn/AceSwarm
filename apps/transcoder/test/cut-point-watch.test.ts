@@ -29,11 +29,14 @@ function feed(
   return undefined;
 }
 
-/** Feeds IDR pictures with these gaps (seconds), over and over, for 200 s; returns when the watch first said yes, in seconds. */
-function feedGaps(watch: CutPointWatch, gaps: readonly number[]): number | undefined {
+/**
+ * Feeds IDR pictures with these gaps (seconds), over and over, for 200 s from `from` (in seconds of
+ * the time stamps); returns when the watch first said yes, in seconds after `from`.
+ */
+function feedGaps(watch: CutPointWatch, gaps: readonly number[], from = 0): number | undefined {
   let at = 0;
   for (let index = 0; at <= 200; index += 1) {
-    if (watch.cutPoint(ptsOf(at), "idr")) {
+    if (watch.cutPoint(ptsOf(from + at), "idr")) {
       return at;
     }
     at += gaps[index % gaps.length] ?? 1;
@@ -50,6 +53,9 @@ describe("CutPointWatch", () => {
   it("allows gaps of up to 5 s, or half the stall time when that is shorter", () => {
     expect(feed(watchOf(), 0, 200, 5)).toBe(60);
     expect(feed(watchOf(), 0, 200, 5.5)).toBeUndefined();
+    // About a frame more: a key frame every 150 frames at 29.97 frames a second.
+    expect(feed(watchOf(), 0, 200, 5.005)).toBeGreaterThanOrEqual(60);
+    expect(feed(watchOf(), 0, 200, 5.2)).toBeUndefined();
     expect(feed(watchOf(8000), 0, 200, 4)).toBe(60);
     expect(feed(watchOf(8000), 0, 200, 4.5)).toBeUndefined();
   });
@@ -59,6 +65,8 @@ describe("CutPointWatch", () => {
     expect(feedGaps(watchOf(), [1.8, 5])).toBeUndefined();
     // 1.5 s, then 3.4 s: 4.9 s.
     expect(feedGaps(watchOf(), [1.5, 3.4])).toBeGreaterThanOrEqual(60);
+    // 1.9 s, then 3.3 s: 5.2 s, more than about a frame too long.
+    expect(feedGaps(watchOf(), [1.9, 3.3])).toBeUndefined();
   });
 
   it("allows a first segment as long as a segment, where segments are longer than that", () => {
@@ -66,6 +74,10 @@ describe("CutPointWatch", () => {
     expect(feed(watchOf(30_000, 6000), 0, 200, 3)).toBe(60);
     // Every 4 s: the first segment ends 8 s on.
     expect(feed(watchOf(30_000, 6000), 0, 200, 4)).toBeUndefined();
+    // A key frame every 60 frames at 29.97 frames a second: three of them last 6.006 s.
+    expect(feed(watchOf(30_000, 6000), 0, 200, 2.002)).toBeGreaterThanOrEqual(60);
+    // And every 30 for segments of 5 s: 5.005 s.
+    expect(feed(watchOf(30_000, 5000), 0, 200, 1.001)).toBeGreaterThanOrEqual(60);
   });
 
   it("starts over after a gap, a step back in the time stamps, or a unit without one", () => {
@@ -113,6 +125,9 @@ describe("CutPointWatch", () => {
     const watch = watchOf();
     const nearWrap = WRAP / TICKS_PER_SECOND - 30;
     expect(feed(watch, nearWrap, 120, 2)).toBe(60);
+    // A first segment is timed across it too.
+    expect(feedGaps(watchOf(), [1.8, 5], nearWrap)).toBeUndefined();
+    expect(feedGaps(watchOf(), [1.5, 3.4], nearWrap)).toBeGreaterThanOrEqual(60);
   });
 
   it("waits twice as long after each return that ended in a re-encode again, up to half an hour", () => {

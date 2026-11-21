@@ -264,17 +264,21 @@ export class SourceFeeds {
   }
 
   /**
-   * Whether the run re-encodes video that a copy of could come back for: H.264, as far as known. A
-   * run that began to copy before a copy failed (one that is to take over, say) copies already.
+   * Whether the run re-encodes video that a copy of could come back for: H.264, as far as known.
+   * Only a copy that couldn't be cut has a run re-encode H.264 for long (see `copyFails`: a run in
+   * the wrong mode for its video is replaced as soon as that is known), and such a run is watched
+   * even once the stream copies again: one of a source that was waiting to take over when another
+   * source's run came back to copy, say, which would re-encode for as long as it lives. A run that
+   * began to copy before a copy failed (one that is to take over, say) copies already.
    */
   private watchesCuts(run: Generation): boolean {
     const { layout } = run;
     const codec = layout === undefined ? undefined : (this.corrected.get(layout.key) ?? videoCodecOfLayout(layout));
-    return this.copyFails && !run.retired && run.mode === "transcode" && fullModeFor(codec ?? "") === "copy";
+    return !run.retired && run.mode === "transcode" && fullModeFor(codec ?? "") === "copy";
   }
 
   /**
-   * An access unit came that ffmpeg can cut a copy of the video at, while the stream is re-encoded
+   * An access unit came that ffmpeg can cut a copy of the video at, while the run re-encodes it
    * because a copy couldn't be cut (see `copyFails`). Once they came often enough for a while (see
    * `CutPointWatch`), the broadcast has key frames again: a run that copies the video takes over
    * right at this unit, on the same connection, as at a change of layout, and the stream's later

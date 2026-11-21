@@ -87,7 +87,7 @@ function reencoding(): ReturnType<typeof feeds> & { source: FakeSource | undefin
 }
 
 describe("SourceFeeds watching for key frames", () => {
-  it("watches only while a copy failed, and only a run that re-encodes H.264 that a copy could come back for", () => {
+  it("watches only a run that re-encodes H.264 that a copy could come back for, as one does once a copy failed", () => {
     const { feeds: stream, sources, run } = feeds();
     const reencoding = run("transcode");
     const source = sources.at(-1);
@@ -130,6 +130,21 @@ describe("SourceFeeds watching for key frames", () => {
     expect(stream.startMode()).toBe("copy");
     expect(source?.request.cutPoints?.watching()).toBe(false);
     expect(backs.count).toBe(1);
+  });
+
+  it("watches a run that still re-encodes once another source's run came back to copy, as one that waits to take over", () => {
+    const { feeds: stream, source, sources, run, succeeded } = reencoding();
+    // Another source, which is to take over, and re-encodes too.
+    run("transcode");
+    const waiting = sources.at(-1);
+    expect(waiting?.layout(layoutOf(256))).toBe(false);
+    expect(cutPoints(source, 0, 60)).toBe(60);
+    expect(stream.copyFails).toBe(false);
+    // It would re-encode for as long as it lives: it counts a minute of its own.
+    expect(waiting?.request.cutPoints?.watching()).toBe(true);
+    expect(cutPoints(waiting, 500, 60)).toBe(60);
+    expect(succeeded.map((how) => how.mode)).toEqual(["copy", "copy"]);
+    expect(waiting?.request.cutPoints?.watching()).toBe(false);
   });
 
   it("decodes key frames only again only where every cut point of the minute was an IDR picture", () => {

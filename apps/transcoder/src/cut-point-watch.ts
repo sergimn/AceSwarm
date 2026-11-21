@@ -12,10 +12,18 @@ const WRAP = 2 ** 33;
  * (`STANDBY_FAILOVER_SECONDS`), so the copy comes back only where, from each cut point of the
  * wait, the first segment would have been no longer than this (or than a segment, where
  * `SEGMENT_SECONDS` is longer). A broadcast whose cut points are further apart, or too unevenly
- * spaced, keeps being re-encoded. Two cut points come no further apart than this either, nor than
- * half the stall time.
+ * spaced, keeps being re-encoded. Two cut points come no further apart than this either, whatever
+ * the segments, nor than half the stall time (shorter only for a stall time under 10 s, as in tests:
+ * `FULL_OUTPUT_STALL_SECONDS` is at least 10).
  */
 export const MAX_FIRST_SEGMENT_MS = 5000;
+/**
+ * How much longer than those limits a gap or a first segment may be all the same: about a frame.
+ * At the NTSC frame rates (30000/1001 frames a second and the like) a whole number of frames lasts
+ * a little longer than a whole number of seconds: with a key frame every 60 frames at 29.97, they
+ * come 2.002 s apart, and a first segment of three of them lasts 6.006 s where segments are 6 s.
+ */
+export const ROUNDING_MS = 100;
 /** How long cut points have to keep coming that often before the first return to copy. */
 export const STEADY_MS = 60_000;
 /**
@@ -64,9 +72,9 @@ export class CutPointWatch {
   private open: number[] = [];
 
   constructor({ stallMs, segmentMs }: CutPointTimes) {
-    this.maxGapMs = Math.min(MAX_FIRST_SEGMENT_MS, stallMs / 2);
+    this.maxGapMs = Math.min(MAX_FIRST_SEGMENT_MS, stallMs / 2) + ROUNDING_MS;
     this.segmentMs = segmentMs;
-    this.maxFirstSegmentMs = Math.max(MAX_FIRST_SEGMENT_MS, segmentMs);
+    this.maxFirstSegmentMs = Math.max(MAX_FIRST_SEGMENT_MS, segmentMs) + ROUNDING_MS;
   }
 
   /** How long cut points have to keep coming before the next return. */
