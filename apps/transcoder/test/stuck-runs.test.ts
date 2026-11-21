@@ -88,12 +88,16 @@ describe("StuckRuns", () => {
     return watch.check(of);
   }
 
-  /** The first run plays, then its full output stalls for the stall time: it is started again. */
-  async function firstStalls(watch: StuckRuns, stallSeconds = 30): Promise<void> {
+  /**
+   * The first run plays, then its full output stalls for the stall time: it is started again. Its
+   * preview writes every `every` seconds, which has to divide the stall time and be no more than the
+   * pause limit (15 s): a longer gap counts as a pause of the source, and the stall time starts again.
+   */
+  async function firstStalls(watch: StuckRuns, stallSeconds = 30, every = 2): Promise<void> {
     await fullSegment();
     await previewSegment();
     expect(watch.check(generation)).toBeUndefined();
-    expect((await play(watch, stallSeconds / 2, 2, previewSegment))?.reencode).toBe(false);
+    expect((await play(watch, stallSeconds / every, every, previewSegment))?.reencode).toBe(false);
   }
 
   it("leaves a run alone while its full output keeps writing segments", async () => {
@@ -302,9 +306,12 @@ describe("StuckRuns", () => {
       await previewSegment();
       expect(watch.check(generation)).toBeUndefined();
     }
-    // Settled at 1800 MB: that much more is fine for good.
-    for (let second = 0; second < 600; second += 2) {
-      after(2);
+    // Settled at 1800 MB: that much more is fine for good. Both outputs write every 10 s from here
+    // on, as often as a run makes a thumbnail: nothing in it is a stall (30 s) or a pause (15 s).
+    // Steps of 2 s would make 1200 real file system calls, which a slow disk may not get through
+    // within the test's time.
+    for (let second = 0; second < 600; second += 10) {
+      after(10);
       await fullSegment();
       await previewSegment();
       expect(watch.check(generation)).toBeUndefined();
@@ -390,12 +397,15 @@ describe("StuckRuns", () => {
 
     const nextPreview = (): Promise<void> => previewSegment(nextDirectory);
 
-    /** The new run makes previews from 5 s on, but its copy gets no frame: no key frame comes. */
-    async function nextStalls(watch: StuckRuns, stallSeconds = 30): Promise<Stuck | undefined> {
+    /**
+     * The new run makes previews from 5 s on, every `every` seconds (as for `firstStalls`), but its
+     * copy gets no frame: no key frame comes.
+     */
+    async function nextStalls(watch: StuckRuns, stallSeconds = 30, every = 2): Promise<Stuck | undefined> {
       after(5);
       await nextPreview();
       expect(watch.check(next)).toBeUndefined();
-      return play(watch, stallSeconds / 2, 2, nextPreview, next);
+      return play(watch, stallSeconds / every, every, nextPreview, next);
     }
 
     it("re-encodes the full stream when its copy never wrote a segment", async () => {
@@ -411,9 +421,11 @@ describe("StuckRuns", () => {
     });
 
     it("re-encodes with a long stall time too: the new run has that long, and 5 minutes more", async () => {
+      // Every 10 s, as often as a run makes a thumbnail: steps of 2 s over 10 minutes would make 600
+      // real file system calls, which a slow disk may not get through within the test's time.
       const watch = runs(300);
-      await firstStalls(watch, 300);
-      expect((await nextStalls(watch, 300))?.reencode).toBe(true);
+      await firstStalls(watch, 300, 10);
+      expect((await nextStalls(watch, 300, 10))?.reencode).toBe(true);
     });
 
     it("starts a copy again when the new run had full segments before it stalled", async () => {
