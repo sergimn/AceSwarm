@@ -47,7 +47,7 @@
           "refId": "streams"
         },
         "definition": "query_result(aceswarm_stream_info or (last_over_time(aceswarm_stream_info[$__range]) unless on (stream) aceswarm_stream_info))",
-        "regex": "/name=\"(?<text>.*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "regex": "/name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
         "description": "Every stream by name. A deleted stream stays while the dashboard's range covers its life.",
         "includeAll": true,
         "multi": true,

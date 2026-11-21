@@ -45,7 +45,7 @@
         "type": "datasource",
         "query": "loki",
         "current": {},
-        "hide": 0,
+        "hide": 2,
         "refresh": 1
       },
       {
@@ -61,7 +61,7 @@
           "refId": "streams"
         },
         "definition": "query_result((aceswarm_stream_info and on (stream) last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range])) or (last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range]) unless on (stream) aceswarm_stream_info))",
-        "regex": "/name=\"(?<text>.*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "regex": "/name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
         "description": "The streams that were enabled at some time in the dashboard's range, by name. A deleted stream stays while the range covers its life.",
         "includeAll": true,
         "multi": true,
@@ -572,7 +572,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Memory of the stream's engines (aceswarm_engine_memory_bytes), one line for each place an engine has and not for each container, so an engine that replaces another continues its line. playing: the engine the stream plays from. standby: a hot standby on another path. kept: the engine of a failed move, kept to try the move again. starting: a new engine that has no place yet. shared: the engine of the stream's path that every stream on it plays from, when streams share engines. other: an engine that had no place for more than 5 minutes. The path follows each name. An engine that reaches the limit (dashed) is killed and restarted.",
+      "description": "Memory of the stream's engines (aceswarm_engine_memory_bytes), one line for each place an engine has and not for each container, so an engine that replaces another continues its line. playing: the engine the stream plays from. standby: a hot standby on another path. kept: the engine of a failed move, kept to try the move again. starting: a new engine that has no place yet. shared: the engine of the stream's path that every stream on it plays from, shown for a stream that had no engine of its own in the last 2 minutes. other: an engine that had no place for more than 5 minutes. The path follows each name. An engine that reaches the limit (dashed) is killed and restarted.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -592,7 +592,7 @@
           }
         },
         {
-          "expr": "max by (path) (aceswarm_engine_memory_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () aceswarm_engine_memory_bytes{stream=\"$stream\"}",
+          "expr": "max by (path) (aceswarm_engine_memory_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () last_over_time(aceswarm_engine_memory_bytes{stream=\"$stream\"}[2m])",
           "range": true,
           "instant": false,
           "legendFormat": "shared {{path}}",
@@ -603,7 +603,7 @@
           }
         },
         {
-          "expr": "max(aceswarm_engine_memory_limit_bytes{stream=\"$stream\"}) or max(max by (path) (aceswarm_engine_memory_limit_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () aceswarm_engine_memory_bytes{stream=\"$stream\"})",
+          "expr": "max(aceswarm_engine_memory_limit_bytes{stream=\"$stream\"}) or max(max by (path) (aceswarm_engine_memory_limit_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () last_over_time(aceswarm_engine_memory_bytes{stream=\"$stream\"}[2m]))",
           "range": true,
           "instant": false,
           "legendFormat": "Limit",
@@ -684,7 +684,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (increase(aceswarm_stream_recoveries_total{stream=\"$stream\"}[$__interval]))",
+          "expr": "sum by (action) (increase(aceswarm_stream_recoveries_total{stream=\"$stream\"}[$__rate_interval]))",
           "range": true,
           "instant": false,
           "legendFormat": "{{action}}",

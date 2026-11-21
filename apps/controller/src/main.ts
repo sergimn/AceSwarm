@@ -5,7 +5,7 @@ import { NetgwClient, TranscoderClient } from "./clients.ts";
 import { loadConfig } from "./config.ts";
 import { DockerClient } from "./docker.ts";
 import { EngineResourceMonitor } from "./engine-resources.ts";
-import { EngineSlots } from "./engine-slots.ts";
+import { EnginePlaces } from "./engine-places.ts";
 import { EngineManager } from "./engines.ts";
 import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -62,10 +62,7 @@ const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
 );
 
 // What each engine container is for, which the engine gauges carry as labels.
-const engineSlots = new EngineSlots({
-  kept: () => orchestrator.keptEngines(),
-  shared: () => sharedEngines.view(),
-});
+const enginePlaces = new EnginePlaces(() => orchestrator.keptEngines());
 
 // The metrics read the orchestrator lazily at scrape time, after it exists.
 const metrics: ControllerMetrics = new ControllerMetrics(
@@ -77,7 +74,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
     sharedEngines: () => sharedEngines.view(),
     engines: () => engineResources.running(),
     runningSince: (stream) => orchestrator.runningSince(stream),
-    engineSlots: (engines, streams) => engineSlots.resolve(engines, streams),
+    enginePlaces: (engines, streams) => enginePlaces.resolve(engines, streams),
   },
 );
 const sharedEngines = new SharedEngines({

@@ -19,6 +19,8 @@ export interface EngineMemory {
   stream: string;
   /** Container name; a stream briefly has two engines while it moves to another network path. */
   engine: string;
+  /** The network path of a shared engine, from its container's label; null for a stream's own engine. */
+  sharedPath: string | null;
   usedBytes: number;
   limitBytes: number;
   /** The engine's memory cache cap (`--memory-cache-limit`); null when it has none. */
@@ -144,6 +146,7 @@ export class EngineResourceMonitor {
       seen.add(container.Id);
       const stream = container.Labels["aceswarm.stream"] ?? "";
       const engine = (container.Names[0] ?? container.Id).replace(/^\//, "");
+      const sharedPath = container.Labels["aceswarm.shared-path"] ?? null;
       const details = await this.docker.inspectContainer(container.Id);
       if (details !== undefined) {
         this.checkExit(details, stream, engine);
@@ -158,7 +161,7 @@ export class EngineResourceMonitor {
       if (engineCacheOnDisk(details?.Config.Env)) {
         // Nothing to estimate: the stream data is in a file, and what the engine uses above its
         // idle memory is not a cache.
-        memory.push({ stream, engine, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
+        memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
         continue;
       }
       const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
@@ -167,7 +170,7 @@ export class EngineResourceMonitor {
         this.lowestBytes(details, usage.usedBytes),
         cacheLimitBytes,
       );
-      memory.push({ stream, engine, ...usage, cacheLimitBytes, cacheBytes });
+      memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes, cacheBytes });
     }
     for (const id of this.lastExit.keys()) {
       if (!seen.has(id)) {

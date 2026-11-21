@@ -1,6 +1,6 @@
 import type { StreamView } from "@aceswarm/shared/api-types";
 import { expect, test } from "vitest";
-import { EngineSlots, SLOT_HOLD_MS, type EnginePath } from "../src/engine-slots.ts";
+import { EnginePlaces, PLACE_HOLD_MS, type KeptEngine } from "../src/engine-places.ts";
 
 function stream(id: string, over: Partial<StreamView> = {}): StreamView {
   return {
@@ -28,28 +28,22 @@ function stream(id: string, over: Partial<StreamView> = {}): StreamView {
   };
 }
 
-const own = (engine: string): { engine: string; stream: string } => ({ engine, stream: "s1" });
-/** A shared engine: it has no stream. */
-const SHARED = { engine: "shared-direct-1", stream: "" };
+/** An engine of a stream. */
+const own = (engine: string): { engine: string; sharedPath: null } => ({ engine, sharedPath: null });
+/** The direct path's shared engine. */
+const SHARED = { engine: "shared-direct-1", sharedPath: "direct" };
 
-function slotsWith(sources: { kept?: EnginePath[]; shared?: EnginePath[] } = {}): {
-  slots: EngineSlots;
-  clock: { now: number };
-} {
+function placesWith(kept: KeptEngine[] = []): { places: EnginePlaces; clock: { now: number } } {
   const clock = { now: 1_000_000 };
-  const slots = new EngineSlots({
-    kept: () => sources.kept ?? [],
-    shared: () => sources.shared ?? [],
-    now: () => clock.now,
-  });
-  return { slots, clock };
+  const places = new EnginePlaces(
+    () => kept,
+    () => clock.now,
+  );
+  return { places, clock };
 }
 
 test("an engine is the one its stream plays from, a standby, a kept one or a path's shared one", () => {
-  const { slots } = slotsWith({
-    kept: [{ engine: "e3", path: "wg:b" }],
-    shared: [{ engine: "shared-direct-1", path: "direct" }],
-  });
+  const { places } = placesWith([{ engine: "e3", path: "wg:b" }]);
   const streams = [
     stream("s1", {
       engine: { name: "e1", shared: false },
@@ -66,7 +60,7 @@ test("an engine is the one its stream plays from, a standby, a kept one or a pat
     }),
   ];
   const engines = [own("e1"), own("e2"), own("e3"), SHARED];
-  expect(slots.resolve(engines, streams)).toEqual([
+  expect(places.resolve(engines, streams)).toEqual([
     { role: "playing", path: "direct" },
     { role: "standby", path: "wg:a" },
     { role: "kept", path: "wg:b" },
@@ -75,96 +69,92 @@ test("an engine is the one its stream plays from, a standby, a kept one or a pat
 });
 
 test("a failover swaps the roles of two engines, and each keeps its path", () => {
-  const { slots } = slotsWith();
+  const { places } = placesWith();
   const before = stream("s1", {
     engine: { name: "e1", shared: false },
     standbys: [{ path: "wg:a", state: "hot", engine: { name: "e2", shared: false }, reason: null }],
   });
   const engines = [own("e1"), own("e2")];
-  expect(slots.resolve(engines, [before]).map((slot) => slot.role)).toEqual(["playing", "standby"]);
+  expect(places.resolve(engines, [before]).map((place) => place.role)).toEqual(["playing", "standby"]);
 
   const after = stream("s1", {
     path: "wg:a",
     engine: { name: "e2", shared: false },
     standbys: [{ path: "direct", state: "starting", engine: { name: "e1", shared: false }, reason: null }],
   });
-  expect(slots.resolve(engines, [after])).toEqual([
+  expect(places.resolve(engines, [after])).toEqual([
     { role: "standby", path: "direct" },
     { role: "playing", path: "wg:a" },
   ]);
 });
 
 test("an engine in no list keeps the place it had for a while, then counts as a leftover", () => {
-  const { slots, clock } = slotsWith();
+  const { places, clock } = placesWith();
   const playing = stream("s1", {
     engine: { name: "e1", shared: false },
     standbys: [{ path: "wg:a", state: "hot", engine: { name: "e2", shared: false }, reason: null }],
   });
   const engines = [own("e1"), own("e2")];
-  slots.resolve(engines, [playing]);
+  places.resolve(engines, [playing]);
 
   // While a failover hands over, the standby it took is in no list.
   const handingOver = stream("s1", { engine: { name: "e1", shared: false } });
   clock.now += 30_000;
-  expect(slots.resolve(engines, [handingOver])[1]).toEqual({ role: "standby", path: "wg:a" });
-  clock.now += SLOT_HOLD_MS - 30_000;
-  expect(slots.resolve(engines, [handingOver])[1]).toEqual({ role: "standby", path: "wg:a" });
+  expect(places.resolve(engines, [handingOver])[1]).toEqual({ role: "standby", path: "wg:a" });
+  clock.now += PLACE_HOLD_MS - 30_000;
+  expect(places.resolve(engines, [handingOver])[1]).toEqual({ role: "standby", path: "wg:a" });
   clock.now += 1;
-  expect(slots.resolve(engines, [handingOver])[1]).toEqual({ role: "other", path: "" });
+  expect(places.resolve(engines, [handingOver])[1]).toEqual({ role: "other", path: "" });
 
   // It has a place again as soon as it is in a list.
-  expect(slots.resolve(engines, [playing])[1]).toEqual({ role: "standby", path: "wg:a" });
+  expect(places.resolve(engines, [playing])[1]).toEqual({ role: "standby", path: "wg:a" });
 });
 
 test("a new engine is starting until it has a place, and a leftover once that takes too long", () => {
-  const { slots, clock } = slotsWith();
+  const { places, clock } = placesWith();
   const starting = stream("s1", { state: "starting", engine: null });
-  expect(slots.resolve([own("e1")], [starting])).toEqual([{ role: "starting", path: "" }]);
-  clock.now += SLOT_HOLD_MS;
-  expect(slots.resolve([own("e1")], [starting])).toEqual([{ role: "starting", path: "" }]);
+  expect(places.resolve([own("e1")], [starting])).toEqual([{ role: "starting", path: "" }]);
+  clock.now += PLACE_HOLD_MS;
+  expect(places.resolve([own("e1")], [starting])).toEqual([{ role: "starting", path: "" }]);
   clock.now += 1;
-  expect(slots.resolve([own("e1")], [starting])).toEqual([{ role: "other", path: "" }]);
+  expect(places.resolve([own("e1")], [starting])).toEqual([{ role: "other", path: "" }]);
 
   const playing = stream("s1", { engine: { name: "e1", shared: false } });
-  expect(slots.resolve([own("e1")], [playing])).toEqual([{ role: "playing", path: "direct" }]);
+  expect(places.resolve([own("e1")], [playing])).toEqual([{ role: "playing", path: "direct" }]);
 });
 
 test("an engine that is gone is forgotten: a new one with its name starts over", () => {
-  const { slots, clock } = slotsWith();
+  const { places, clock } = placesWith();
   const playing = stream("s1", { engine: { name: "e1", shared: false } });
   const stopped = stream("s1", { state: "stopped", path: null, engine: null });
-  slots.resolve([own("e1")], [playing]);
+  places.resolve([own("e1")], [playing]);
   // The stream was disabled and its engine removed; enabled again, its first engine has the same name.
-  slots.resolve([], [stopped]);
+  places.resolve([], [stopped]);
   clock.now += 1000;
-  expect(slots.resolve([own("e1")], [stopped])).toEqual([{ role: "starting", path: "" }]);
+  expect(places.resolve([own("e1")], [stopped])).toEqual([{ role: "starting", path: "" }]);
 });
 
-test("a shared engine is its path's from the start, and stays so while its path is not known", () => {
-  const sources = { shared: [] as EnginePath[] };
-  const { slots, clock } = slotsWith(sources);
-  // Not listed until its API answers.
-  expect(slots.resolve([SHARED], [])).toEqual([{ role: "shared", path: "" }]);
-  sources.shared = [{ engine: "shared-direct-1", path: "direct" }];
-  expect(slots.resolve([SHARED], [])).toEqual([{ role: "shared", path: "direct" }]);
-  // No longer listed, and for longer than an engine of a stream keeps its place: still shared, on its path.
-  sources.shared = [];
-  clock.now += SLOT_HOLD_MS + 1;
-  expect(slots.resolve([SHARED], [])).toEqual([{ role: "shared", path: "direct" }]);
+test("a shared engine is its path's from its first moment, whatever the streams are doing", () => {
+  const { places, clock } = placesWith();
+  // Still starting, so no stream names it yet: its container says which path it is of.
+  expect(places.resolve([SHARED], [])).toEqual([{ role: "shared", path: "direct" }]);
+  // And for longer than an engine of a stream keeps its place.
+  clock.now += PLACE_HOLD_MS + 1;
+  expect(places.resolve([SHARED], [])).toEqual([{ role: "shared", path: "direct" }]);
 });
 
 test("the engine a stream plays from wins over a standby or a kept engine of the same name", () => {
-  const { slots } = slotsWith({ kept: [{ engine: "e1", path: "wg:b" }] });
+  const { places } = placesWith([{ engine: "e1", path: "wg:b" }]);
   const both = stream("s1", {
     path: "wg:a",
     engine: { name: "e1", shared: false },
     standbys: [{ path: "wg:a", state: "hot", engine: { name: "e1", shared: false }, reason: null }],
   });
-  expect(slots.resolve([own("e1")], [both])).toEqual([{ role: "playing", path: "wg:a" }]);
+  expect(places.resolve([own("e1")], [both])).toEqual([{ role: "playing", path: "wg:a" }]);
 });
 
 test("a stream without a path has an engine without one", () => {
-  const { slots } = slotsWith();
+  const { places } = placesWith();
   const noPath = stream("s1", { path: null, engine: { name: "e1", shared: false } });
-  expect(slots.resolve([own("e1")], [noPath])).toEqual([{ role: "playing", path: "" }]);
+  expect(places.resolve([own("e1")], [noPath])).toEqual([{ role: "playing", path: "" }]);
 });

@@ -51,6 +51,7 @@ test("the dashboards draw engines by their place, never by their container", () 
     expect(ofEngines.length).toBeGreaterThan(0);
     // Every one aggregates the engine gauges, which leaves the container's name out of the legend.
     expect(ofEngines.filter((query) => !/^(?:max|min|sum|avg|count)(?: by \([a-z, ]+\))? ?\(/.test(query))).toEqual([]);
+    expect(ofEngines.filter((query) => /\b(?:by|group_left) ?\([^)]*\bengine\b/.test(query))).toEqual([]);
   }
 });
 

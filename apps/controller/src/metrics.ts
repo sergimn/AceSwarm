@@ -1,7 +1,7 @@
 import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
 import { Counter, Gauge, type Registry } from "@prometheus-io/client";
 import type { EngineCount, EngineMemory } from "./engine-resources.ts";
-import type { EngineSlot } from "./engine-slots.ts";
+import type { EnginePlace } from "./engine-places.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
@@ -13,10 +13,10 @@ export interface MetricSources {
   /** When a stream was last started (see `Orchestrator.runningSince`); undefined while it is disabled. */
   runningSince?: (stream: string) => number | undefined;
   /**
-   * The place of each of these engines, in their order (see `EngineSlots.resolve`): what each is
+   * The place of each of these engines, in their order (see `EnginePlaces.resolve`): what each is
    * for, and its network path. Without it, the engines' role and path labels are empty.
    */
-  engineSlots?: (engines: readonly EngineMemory[], streams: readonly StreamView[]) => EngineSlot[];
+  enginePlaces?: (engines: readonly EngineMemory[], streams: readonly StreamView[]) => EnginePlace[];
 }
 
 /** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
@@ -99,12 +99,12 @@ function setEngineGauges(
   gauges: EngineGauges,
   engines: readonly EngineMemory[],
   streams: readonly StreamView[],
-  slotsOf: MetricSources["engineSlots"],
+  placesOf: MetricSources["enginePlaces"],
 ): void {
-  const slots = slotsOf?.(engines, streams) ?? [];
+  const places = placesOf?.(engines, streams) ?? [];
   for (const [index, engine] of engines.entries()) {
-    const slot = slots[index];
-    const labels = { stream: engine.stream, engine: engine.engine, role: slot?.role ?? "", path: slot?.path ?? "" };
+    const place = places[index];
+    const labels = { stream: engine.stream, engine: engine.engine, role: place?.role ?? "", path: place?.path ?? "" };
     gauges.memory.set(labels, engine.usedBytes);
     gauges.memoryLimit.set(labels, engine.limitBytes);
     gauges.cache.set(labels, engine.cacheBytes);
@@ -243,7 +243,7 @@ export class ControllerMetrics {
           { memory, memoryLimit, cache, cacheLimit },
           engineMemory(),
           current.streams,
-          sources.engineSlots,
+          sources.enginePlaces,
         );
         total.set(current.streams.length);
       },

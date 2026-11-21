@@ -2,7 +2,7 @@ import { Registry } from "@prometheus-io/client";
 import type { StreamView, ViewerView } from "@aceswarm/shared/api-types";
 import { expect, test } from "vitest";
 import type { EngineCount, EngineMemory } from "../src/engine-resources.ts";
-import { EngineSlots } from "../src/engine-slots.ts";
+import { EnginePlaces } from "../src/engine-places.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { SharedEngineView } from "../src/shared-engines.ts";
 
@@ -64,15 +64,31 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
     engine: { name: "e1", shared: false },
     standbys: [],
   };
-  const slots = new EngineSlots({ kept: () => [], shared: () => [{ engine: "e2", path: "wg:a" }] });
+  const places = new EnginePlaces(() => []);
   new ControllerMetrics(
     registry,
     () => ({ streams: [stream], paths: [] }),
     () => [
-      { stream: "s1", engine: "e1", usedBytes: 300, limitBytes: 512, cacheLimitBytes: 128, cacheBytes: 128 },
-      { stream: "", engine: "e2", usedBytes: 900, limitBytes: 0, cacheLimitBytes: null, cacheBytes: 700 },
+      {
+        stream: "s1",
+        engine: "e1",
+        sharedPath: null,
+        usedBytes: 300,
+        limitBytes: 512,
+        cacheLimitBytes: 128,
+        cacheBytes: 128,
+      },
+      {
+        stream: "",
+        engine: "e2",
+        sharedPath: "wg:a",
+        usedBytes: 900,
+        limitBytes: 0,
+        cacheLimitBytes: null,
+        cacheBytes: 700,
+      },
     ],
-    { engineSlots: (engines, streams) => slots.resolve(engines, streams) },
+    { enginePlaces: (engines, streams) => places.resolve(engines, streams) },
   );
   const scrape = await registry.metrics();
   expect(scrape).toContain('aceswarm_stream_peers{stream="s1",kind="uploading"} 1');
@@ -91,6 +107,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
 const sample = (engine: string): EngineMemory => ({
   stream: "s1",
   engine,
+  sharedPath: null,
   usedBytes: 300,
   limitBytes: 512,
   cacheLimitBytes: null,
@@ -101,12 +118,12 @@ test("an engine that replaces another keeps its place's labels, and the one that
   const registry = new Registry();
   const stream = { ...streamOnSharedEngine("s1"), engine: { name: "aceswarm-engine-s1-1", shared: false } };
   let memory = [sample("aceswarm-engine-s1-1")];
-  const slots = new EngineSlots({ kept: () => [], shared: () => [] });
+  const places = new EnginePlaces(() => []);
   new ControllerMetrics(
     registry,
     () => ({ streams: [stream], paths: [] }),
     () => memory,
-    { engineSlots: (engines, streams) => slots.resolve(engines, streams) },
+    { enginePlaces: (engines, streams) => places.resolve(engines, streams) },
   );
   const place = 'role="playing",path="direct"';
   expect(await registry.metrics()).toContain(
@@ -126,7 +143,17 @@ test("without a source for the engines' places, their role and path are empty", 
   new ControllerMetrics(
     registry,
     () => ({ streams: [], paths: [] }),
-    () => [{ stream: "s1", engine: "e1", usedBytes: 300, limitBytes: 512, cacheLimitBytes: null, cacheBytes: 0 }],
+    () => [
+      {
+        stream: "s1",
+        engine: "e1",
+        sharedPath: null,
+        usedBytes: 300,
+        limitBytes: 512,
+        cacheLimitBytes: null,
+        cacheBytes: 0,
+      },
+    ],
   );
   expect(await registry.metrics()).toContain(
     'aceswarm_engine_memory_bytes{stream="s1",engine="e1",role="",path=""} 300',
