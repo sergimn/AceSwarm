@@ -8,6 +8,7 @@ import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
 import { attachFfmpeg } from "./ffmpeg-process.ts";
 import { Generation, modifiedAt, statusWithoutRun, VARIANTS, type GenerationPlan, type Variant } from "./generation.ts";
 import { KeyFrames, REOPENS_AFTER_FALLBACK, type Decoding } from "./key-frames.ts";
+import { LayoutChanges } from "./layout-changes.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
@@ -23,7 +24,7 @@ import { makeRunDirectory, makeRunDirectoryNow, removeStreamFiles } from "./run-
 import { SourceFeeds, type Succession } from "./source-feeds.ts";
 import { readSource } from "./source-reader.ts";
 import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
-import { describeLayout, videoCodecOfLayout } from "./ts-tables.ts";
+import { describeLayout, videoCodecOfLayout, type LayoutChangeKind } from "./ts-tables.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, Spawner } from "./pipeline-settings.ts";
@@ -70,6 +71,8 @@ export class Pipeline {
   private readonly feeds: SourceFeeds;
   /** When the source players get last changed its layout mid-stream (see `succeed`, and `FeedHost.moved`). */
   private layoutChangedAt: number | undefined;
+  /** How often that happens, and how long players wait for video at a change. */
+  private readonly changes: LayoutChanges;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
   private readonly stuck: StuckRuns;
@@ -100,19 +103,23 @@ export class Pipeline {
     this.now = options.now ?? Date.now;
     this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
     this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
+    this.changes = new LayoutChanges(id, events, this.now);
     const host = {
       succeed: (old: Generation, how: Succession, reason: string) => this.succeed(old, how, reason),
       publish: (run: Generation) => this.publish(run, () => this.feeds.drains(run)),
       retire: (run: Generation) => {
         this.retire(run);
       },
-      moved: (run: Generation) => {
+      moved: (run: Generation, kind: LayoutChangeKind) => {
         // As for a new run (see `succeed`): only for the source players get, and one that had video
         // since its last move. Moves that keep coming over a run that shows nothing must not look
         // like a stream that does.
         const shown = run === this.active && run.frames > run.framesAtMove;
         this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
         run.framesAtMove = run.frames;
+        if (run === this.active) {
+          this.changes.changed(run, kind, "same");
+        }
       },
     };
     this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);
@@ -303,7 +310,7 @@ export class Pipeline {
           // yet leaves the last one it carries, if any (see `swap`, and `Generation.takeOver`):
           // a segment alone is no video, it may hold nothing but sound.
           generation.published = true;
-          generation.publishedFrameAt = generation.lastFrameAt ?? generation.publishedFrameAt;
+          this.changes.shown(generation);
         }
       }
     }
@@ -463,6 +470,7 @@ export class Pipeline {
     // The last frame players got of this source, until `next` has one: a run that took over
     // mid-stream carries it, as does one that replaced a stuck run (see `restartIfStuck`).
     next.publishedFrameAt = generation.publishedFrameAt;
+    next.gapSince = generation.gapSince;
     this[generation === this.pending ? "pending" : "active"] = next;
     this.retire(generation);
     void this.run(next, reason).catch((error: unknown) => {
@@ -554,11 +562,12 @@ export class Pipeline {
     const next = this.create({ source, stat, inputTimeoutSeconds, mode: how.mode, midStream: how.midStream });
     next.takeOver(old, how.layout);
     this[slot === 0 ? "active" : "pending"] = next;
-    if (how.change !== undefined && slot === 0 && old.frames > 0) {
+    if (how.change !== undefined && slot === 0) {
+      this.changes.changed(next, how.change, "new");
       // Players get no new video until the new run has some out: the controller allows for that
       // (see `PipelineStatus.layoutChangedAt`), but only after a run that had video of its own.
       // Tables that keep changing over a stream without video must not look like one that has it.
-      this.layoutChangedAt = this.now();
+      this.layoutChangedAt = old.frames > 0 ? this.now() : this.layoutChangedAt;
     }
     try {
       makeRunDirectoryNow(next.directory);
@@ -619,6 +628,9 @@ export class Pipeline {
       },
       onVideoCodec: (codec) => {
         this.onVideoCodec(generation, codec);
+      },
+      onLayoutGap: (ms) => {
+        this.changes.waited(ms);
       },
       onExit: (code, signal) => {
         this.logger.info({ generation: number, code, signal, error: generation.error }, "ffmpeg exited");

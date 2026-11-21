@@ -119,6 +119,12 @@ export class Generation {
   frames = 0;
   /** How many frames it had when the broadcast last moved its streams to other PIDs (see `SourceFeeds.onMove`). */
   framesAtMove = 0;
+  /**
+   * When the broadcast changed the layout of the source players get while this run went on with
+   * it, or the run whose place it took (see `LayoutChanges`), until players get a frame of it that
+   * came after (see `show`).
+   */
+  gapSince: number | undefined;
   lastFrameAt: number | undefined;
   fps: number | undefined;
   videoCodec: string | undefined;
@@ -184,6 +190,22 @@ export class Generation {
     for (const variant of VARIANTS) {
       this.publishFrom[variant] = -1;
     }
+  }
+
+  /**
+   * Its newest frame is one players can get now. When that is the first to come after a layout
+   * change (see `gapSince`), returns how long players had no new frame, in ms: since the last one
+   * they got, which may be one that the run before it wrote out after the change (see
+   * `SourceFeeds.drain`). ffmpeg tells of its frames once a second, so that is about as exact.
+   */
+  show(): number | undefined {
+    const { gapSince, lastFrameAt, publishedFrameAt: before } = this;
+    this.publishedFrameAt = lastFrameAt ?? before;
+    if (gapSince === undefined || lastFrameAt === undefined || lastFrameAt <= gapSince) {
+      return undefined;
+    }
+    this.gapSince = undefined;
+    return before === undefined ? undefined : lastFrameAt - before;
   }
 
   /**

@@ -48,9 +48,10 @@ export interface FeedHost {
   retire: (run: Generation) => void;
   /**
    * The broadcast moved the run's streams to other PIDs mid-stream, and the run reads on (see
-   * `PidMoves`): the stream showed a picture to go on from, so its video is there.
+   * `PidMoves`): the stream showed a picture to go on from, so its video is there. `kind` is how
+   * the layout changed (see `changeKind`).
    */
-  moved: (run: Generation) => void;
+  moved: (run: Generation, kind: LayoutChangeKind) => void;
 }
 
 /**
@@ -207,7 +208,7 @@ export class SourceFeeds {
     const details = { generation: run.number, from: describeLayout(previous), to: describeLayout(layout) };
     if (!inPlace) {
       this.logger.info(details, "the broadcast moved its streams to other PIDs; the same ffmpeg run reads on");
-      this.host.moved(run);
+      this.host.moved(run, changeKind(previous, layout));
       return;
     }
     // Tables can go back and forth for as long as the broadcast lasts: one line a minute tells of it.

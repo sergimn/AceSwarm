@@ -62,7 +62,29 @@
     ]
   },
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "name": "Layout changes",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "purple",
+        "expr": "sum by (stream, name) (increase(aceswarm_pipeline_layout_changes_total[75s]) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}) > 0",
+        "step": "60s",
+        "titleFormat": "Layout change",
+        "textFormat": "{{name}}",
+        "useValueForTime": false,
+        "filter": {
+          "exclude": false,
+          "ids": [
+            7
+          ]
+        }
+      }
+    ]
   },
   "links": [
     {
@@ -888,7 +910,317 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "How each stream's ffmpeg decodes the broadcast (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes, and with LOW_CPU_PREVIEWS while the full stream is copied, it decodes key frames only, which saves CPU. That needs key frames ffmpeg can use: IDR frames, or frames with a recovery point, which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame in time (no key frames ffmpeg can use, or key frames more than about 12 s apart), so the stream decodes every frame from then on, which saves less CPU. It stays so until the stream stops or the transcoder restarts; then it waits again. Every frame (blue): the settings want every frame: PREVIEW_MODE=video, or a re-encoded full stream with LOW_CPU_PREVIEWS. While no ffmpeg runs for a stream, it shows how its last one decoded; no value while the stream has no pipeline."
+      "description": "How each stream's ffmpeg decodes the broadcast (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes or LOW_CPU_PREVIEWS, while the full stream is copied, it decodes key frames only, which saves CPU. That needs key frames ffmpeg can use: IDR frames, or frames with a recovery point, which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame in time (no key frames ffmpeg can use, or key frames more than about 12 s apart), so the stream decodes every frame from then on, which saves less CPU. It stays so until the stream stops or the transcoder restarts; then it waits again. Every frame (blue): the settings want every frame (PREVIEW_MODE=video), or the full stream is re-encoded, which needs every frame. While no ffmpeg runs for a stream, it shows how its last one decoded; no value while the stream has no pipeline."
+    },
+    {
+      "type": "row",
+      "title": "Full screen output and layout changes",
+      "id": 50,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "title": "Full screen output",
+      "id": 51,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "targets": [
+        {
+          "expr": "(aceswarm_stream_up * on (stream) max by (stream) (aceswarm_pipeline_full_mode{mode=\"copy\"} + on (stream) 2 * aceswarm_pipeline_full_mode{mode=\"transcode\"})) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Not working",
+                  "color": "#8f8f8f"
+                },
+                "1": {
+                  "text": "Copy",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "Transcoding",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      },
+      "description": "What each stream's full screen output does with the video of its broadcast (aceswarm_pipeline_full_mode). Copy (green): the video is H.264, which browsers play, and it is passed on as it is. Transcoding (orange): the video is in another codec, such as HEVC, and is re-encoded to H.264, which costs CPU. Not working (grey): the stream doesn't deliver new frames (aceswarm_stream_up is 0), whatever the reason. Only the full screen output counts here: the tile previews and thumbnails are always encoded anew. The mode belongs to each ffmpeg run, so it follows a broadcast that changes its codec mid-stream (see Source video codec)."
+    },
+    {
+      "type": "state-timeline",
+      "title": "Source video codec",
+      "id": 52,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "targets": [
+        {
+          "expr": "max by (stream) (aceswarm_pipeline_video_codec{codec=\"h264\"} or 2 * aceswarm_pipeline_video_codec{codec=\"hevc\"} or 3 * aceswarm_pipeline_video_codec{codec=\"mpeg2video\"} or 9 * aceswarm_pipeline_video_codec{codec!~\"h264|hevc|mpeg2video\"}) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "H.264",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "HEVC",
+                  "color": "purple"
+                },
+                "3": {
+                  "text": "MPEG-2",
+                  "color": "blue"
+                },
+                "9": {
+                  "text": "Other",
+                  "color": "#8f8f8f"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      },
+      "description": "The codec of the video each stream's source carries (aceswarm_pipeline_video_codec): what ffmpeg found, or else what the source's program tables say. H.264 is copied to the full screen output, anything else is re-encoded (see Full screen output). While no ffmpeg runs for a stream, it shows its last run's. No value before a stream's first run, or while neither tells."
+    },
+    {
+      "type": "state-timeline",
+      "title": "Layout changes",
+      "id": 53,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "targets": [
+        {
+          "expr": "max by (stream) ((increase(aceswarm_pipeline_layout_changes_total{kind=\"other\"}[$__rate_interval]) > bool 0) or 2 * (increase(aceswarm_pipeline_layout_changes_total{kind=\"pid\"}[$__rate_interval]) > bool 0) or 3 * (increase(aceswarm_pipeline_layout_changes_total{kind=\"codec\"}[$__rate_interval]) > bool 0)) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "No change",
+                  "color": "transparent"
+                },
+                "1": {
+                  "text": "Other",
+                  "color": "#8f8f8f"
+                },
+                "2": {
+                  "text": "PID move",
+                  "color": "blue"
+                },
+                "3": {
+                  "text": "Codec change",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8
+      },
+      "description": "A mark for each time a stream's broadcast changed its layout mid-stream and ffmpeg followed it (aceswarm_pipeline_layout_changes_total). Codec change (orange): the video changed codec, such as H.264 to HEVC, and a new ffmpeg run took over. PID move (blue): the video moved to another PID. The same ffmpeg run reads on where the streams only moved; a new one takes over where they changed too. Other (grey): something else ffmpeg reads changed, such as the sound, and a new run took over. Tables that change around the streams ffmpeg reads don't count, and neither do the changes of a source that waits to take over. A mark is at least a minute wide; changes closer together share one, which shows the kind that weighs most. Each one is also marked on Delivering new frames.",
+      "interval": "1m"
+    },
+    {
+      "type": "bargauge",
+      "title": "Layout changes in range",
+      "id": 54,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How many times each stream's broadcast changed its layout mid-stream in the dashboard's range, and ffmpeg followed it (aceswarm_pipeline_layout_changes_total), most first. Streams without a change are not listed. See Layout changes for what counts.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 89
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(round(sum by (stream) (increase(aceswarm_pipeline_layout_changes_total[$__range]))) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"} > 0)",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "No layout changes in this range",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Video gap at each layout change",
+      "id": 55,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How long players got no new video frame at each layout change of a stream (aceswarm_pipeline_layout_change_gap_seconds): from the last frame they got before the change to the first one after it. A point shows once the video came back; a change whose video never came back has none. Changes less than a minute apart share a point, their average. ffmpeg reports its frames once a second, so a change without a pause shows about 1 s. A new ffmpeg run takes a few seconds to show video; a move the same run reads on over takes less.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "interval": "1m",
+      "targets": [
+        {
+          "expr": "(sum by (stream) (increase(aceswarm_pipeline_layout_change_gap_seconds_sum[$__rate_interval])) / (sum by (stream) (increase(aceswarm_pipeline_layout_change_gap_seconds_count[$__rate_interval])) > 0)) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 9,
+            "showPoints": "always"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "type": "row",
@@ -899,7 +1231,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 97
       },
       "panels": [
         {
@@ -914,7 +1246,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 65
+            "y": 98
           },
           "targets": [
             {
@@ -956,7 +1288,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 98
       },
       "panels": []
     },
@@ -972,7 +1304,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 99
       },
       "targets": [
         {
@@ -1008,7 +1340,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 99
       },
       "targets": [
         {
@@ -1044,7 +1376,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 107
       },
       "targets": [
         {
@@ -1090,7 +1422,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 107
       },
       "targets": [
         {
@@ -1126,7 +1458,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 115
       },
       "targets": [
         {
@@ -1163,7 +1495,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 82
+        "y": 115
       },
       "targets": [
         {
@@ -1196,7 +1528,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 90
+        "y": 123
       },
       "panels": []
     },
@@ -1213,7 +1545,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 91
+        "y": 124
       },
       "targets": [
         {
@@ -1297,7 +1629,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 91
+        "y": 124
       },
       "targets": [
         {
@@ -1368,7 +1700,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 91
+        "y": 124
       },
       "targets": [
         {
@@ -1427,7 +1759,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 99
+        "y": 132
       },
       "targets": [
         {
@@ -1465,7 +1797,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 99
+        "y": 132
       },
       "targets": [
         {
@@ -1502,7 +1834,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 107
+        "y": 140
       },
       "targets": [
         {
@@ -1587,7 +1919,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 107
+        "y": 140
       },
       "targets": [
         {
@@ -1636,7 +1968,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 115
+        "y": 148
       },
       "targets": [
         {
@@ -1673,7 +2005,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 115
+        "y": 148
       },
       "targets": [
         {
@@ -1807,7 +2139,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 123
+        "y": 156
       },
       "targets": [
         {
@@ -2003,7 +2335,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 131
+        "y": 164
       },
       "panels": []
     },
@@ -2019,7 +2351,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 165
       },
       "targets": [
         {
@@ -2074,7 +2406,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 138
+        "y": 171
       },
       "targets": [
         {
@@ -2109,7 +2441,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 138
+        "y": 171
       },
       "targets": [
         {
@@ -2144,7 +2476,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 138
+        "y": 171
       },
       "targets": [
         {
@@ -2181,7 +2513,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 146
+        "y": 179
       },
       "targets": [
         {
@@ -2222,7 +2554,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 146
+        "y": 179
       },
       "targets": [
         {
@@ -2258,7 +2590,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 154
+        "y": 187
       },
       "panels": []
     },
@@ -2274,7 +2606,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 155
+        "y": 188
       },
       "targets": [
         {
@@ -2308,7 +2640,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 165
+        "y": 198
       },
       "targets": [
         {

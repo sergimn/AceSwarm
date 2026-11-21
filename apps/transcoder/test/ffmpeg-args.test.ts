@@ -140,6 +140,17 @@ describe("buildFfmpegArgs", () => {
     expect(decodesKeyFramesOnly(PLAN)).toBe(false);
   });
 
+  it("decodes every frame in keyframes mode for a full stream that is re-encoded, which key frames alone make a slideshow of", () => {
+    const args = buildFfmpegArgs({ ...PLAN, fullMode: "transcode", previewMode: "keyframes" });
+    expect(args).not.toContain("-skip_frame");
+    expect(args).toContain("libx264");
+    // Every frame is decoded, so the preview thins them out as in video mode.
+    expect(args).toEqual(buildFfmpegArgs({ ...PLAN, fullMode: "transcode", previewMode: "video" }));
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "transcode", previewMode: "keyframes" })).toBe(false);
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "transcode", previewMode: "thumbnails" })).toBe(false);
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "copy", previewMode: "thumbnails" })).toBe(true);
+  });
+
   it("writes the first thumbnail with the first frame and one every interval, from one encoder thread", () => {
     for (const previewMode of ["video", "keyframes", "thumbnails"] as const) {
       const args = buildFfmpegArgs({ ...PLAN, previewMode });

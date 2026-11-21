@@ -1,16 +1,16 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { setImmediate as nextTurn } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService, type Service } from "@aceswarm/shared/service";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager } from "../src/server.ts";
-import { fakeSources } from "./fake-source.ts";
+import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
 
 const logger = createLogger("test", "silent");
 
@@ -33,6 +33,8 @@ describe("the transcoder's metrics", () => {
   let manager: PipelineManager;
   /** Every ffmpeg process, in order. */
   const children: ChildProcess[] = [];
+  /** Every connection to a source, in order. */
+  let opened: FakeSource[] = [];
 
   beforeEach(async () => {
     children.length = 0;
@@ -60,8 +62,10 @@ describe("the transcoder's metrics", () => {
       children.push(child);
       return child;
     };
-    // No source is read: nothing comes of one, as with an engine still looking for peers.
-    manager = new PipelineManager(service, settings, logger, spawner, undefined, { openSource: fakeSources().open });
+    // No source is read: nothing comes of one, as with an engine still looking for peers, until a test says so.
+    const sources = fakeSources();
+    opened = sources.opened;
+    manager = new PipelineManager(service, settings, logger, spawner, undefined, { openSource: sources.open });
   });
 
   afterEach(async () => {
@@ -77,18 +81,22 @@ describe("the transcoder's metrics", () => {
       new RegExp(String.raw`^${metric}\{stream="${stream}"[^}]*\} (\S+)$`, "m").exec(text)?.[1];
   }
 
-  /** Each series of how the first stream's ffmpeg decodes, in one scrape: its `decoding` label and value. */
-  async function decodings(): Promise<Record<string, string>> {
+  /** Each series of a metric of the first stream, in one scrape: the values of its `labels`, and its value. */
+  async function seriesOf(metric: string, ...labels: string[]): Promise<Record<string, string>> {
     const text = await service.registry.metrics();
     const found: Record<string, string> = {};
-    for (const [, labels = "", value = ""] of text.matchAll(/^aceswarm_pipeline_decoding\{([^}]*)\} (\S+)$/gm)) {
-      const decoding = /decoding="([^"]*)"/.exec(labels)?.[1];
-      if (labels.includes('stream="s1"') && decoding !== undefined) {
-        found[decoding] = value;
+    const series = text.matchAll(new RegExp(String.raw`^${metric}\{([^}]*)\} (\S+)$`, "gm"));
+    for (const [, all = "", value = ""] of series) {
+      const values = labels.map((label) => new RegExp(`(?:^|,)${label}="([^"]*)"`).exec(all)?.[1] ?? "");
+      if (all.includes('stream="s1"')) {
+        found[values.join(" ")] = value;
       }
     }
     return found;
   }
+
+  /** Each series of how the first stream's ffmpeg decodes, in one scrape: its `decoding` label and value. */
+  const decodings = (): Promise<Record<string, string>> => seriesOf("aceswarm_pipeline_decoding", "decoding");
 
   async function progress(run: number, block: string): Promise<void> {
     (children[run]?.stdout as PassThrough).write(block);
@@ -156,5 +164,69 @@ describe("the transcoder's metrics", () => {
     expect(await decodings()).toMatchObject({ "all-frames": "1" });
     await manager.stop("s1");
     expect(await decodings()).toEqual({});
+  });
+
+  test("says what each stream's full output does with the video, and the codec its source carries", async () => {
+    expect(await seriesOf("aceswarm_pipeline_full_mode", "mode")).toEqual({});
+    await manager.start("s1", "http://e1/play", false);
+    // Neither the tables nor ffmpeg told of the video yet.
+    expect(await seriesOf("aceswarm_pipeline_full_mode", "mode")).toEqual({ copy: "1", transcode: "0" });
+    expect(await seriesOf("aceswarm_pipeline_video_codec", "codec")).toEqual({});
+    opened[0]?.layout(layoutOf(256));
+    expect(await seriesOf("aceswarm_pipeline_video_codec", "codec")).toEqual({ h264: "1" });
+
+    // The broadcast changes to HEVC: only the codec it carries now has a series.
+    opened[0]?.layout(layoutOf(211, 0x24));
+    expect(await seriesOf("aceswarm_pipeline_full_mode", "mode")).toEqual({ copy: "0", transcode: "1" });
+    expect(await seriesOf("aceswarm_pipeline_video_codec", "codec")).toEqual({ hevc: "1" });
+
+    await manager.stop("s1");
+    expect(await seriesOf("aceswarm_pipeline_full_mode", "mode")).toEqual({});
+    expect(await seriesOf("aceswarm_pipeline_video_codec", "codec")).toEqual({});
+  });
+
+  test("counts the layout changes ffmpeg follows, by kind and by run, from zero", async () => {
+    await manager.start("s1", "http://e1/play", false);
+    opened[0]?.layout(layoutOf(256));
+    // Every series is there from the start, so that Prometheus sees the first change as an increase.
+    const none = {
+      "codec new": "0",
+      "codec same": "0",
+      "pid new": "0",
+      "pid same": "0",
+      "other new": "0",
+      "other same": "0",
+    };
+    expect(await seriesOf("aceswarm_pipeline_layout_changes_total", "kind", "run")).toEqual(none);
+    opened[0]?.layout(layoutOf(211, 0x24));
+    opened[0]?.move(layoutOf(311, 0x24));
+    opened[0]?.layout(layoutOf(411, 0x24));
+    expect(await seriesOf("aceswarm_pipeline_layout_changes_total", "kind", "run")).toEqual({
+      ...none,
+      "codec new": "1",
+      "pid same": "1",
+      "pid new": "1",
+    });
+  });
+
+  test("says how long players waited for video at each layout change, from zero", async () => {
+    await manager.start("s1", "http://e1/play", false);
+    opened[0]?.layout(layoutOf(256));
+    const waits = (): Promise<Record<string, string>> => seriesOf("aceswarm_pipeline_layout_change_gap_seconds_count");
+    expect(await waits()).toEqual({ "": "0" });
+    // The run plays: players got a frame.
+    const directory = join(hlsDir, "s1", "g1", "full");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "index.m3u8"), "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg_000000.ts\n");
+    await progress(0, "frame=50\nfps=25\nprogress=continue\n");
+    await manager.get("s1")?.sync();
+    // The broadcast moves its streams, and the same run reads on: its next frame ends the wait.
+    opened[0]?.move(layoutOf(211));
+    await sleep(20);
+    await progress(0, "frame=60\nfps=25\nprogress=continue\n");
+    expect(await waits()).toEqual({ "": "1" });
+    const waited = Number((await seriesOf("aceswarm_pipeline_layout_change_gap_seconds_sum"))[""]);
+    expect(waited).toBeGreaterThanOrEqual(0.02);
+    expect(waited).toBeLessThan(5);
   });
 });

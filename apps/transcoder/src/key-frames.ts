@@ -29,8 +29,8 @@ export const REOPENS_AFTER_FALLBACK = 5;
  * - `key-frames`: key frames only, and they gave a frame (in this run or an earlier one), so it stays so;
  * - `key-frames-waiting`: key frames only, with no frame of them yet, so it may still fall back;
  * - `all-frames-fallback`: every frame, because key frames only gave no frame for the patience;
- * - `all-frames`: every frame, as the settings want (`PREVIEW_MODE=video`, or a re-encoded full
- *   stream with `LOW_CPU_PREVIEWS`).
+ * - `all-frames`: every frame, as the settings want (`PREVIEW_MODE=video`), or as a re-encoded full
+ *   stream needs.
  */
 export const DECODINGS = ["key-frames", "key-frames-waiting", "all-frames-fallback", "all-frames"] as const;
 export type Decoding = (typeof DECODINGS)[number];

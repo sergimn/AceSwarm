@@ -13,6 +13,8 @@ export interface FfmpegHooks {
   onFrames: (block: ProgressBlock) => void;
   /** ffmpeg's banner named the codec of the source's video. */
   onVideoCodec: (codec: string) => void;
+  /** Players got the run's first frame after a layout change, after a gap of so many ms (see `Generation.show`). */
+  onLayoutGap: (ms: number) => void;
   onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
@@ -83,8 +85,9 @@ export function attachFfmpeg(generation: Generation, child: ChildProcess, hooks:
           // must not look like it runs again.
           generation.state = "running";
         }
-        if (generation.publishing() && generation.published) {
-          generation.publishedFrameAt = generation.lastFrameAt;
+        const gap = generation.publishing() && generation.published ? generation.show() : undefined;
+        if (gap !== undefined) {
+          hooks.onLayoutGap(gap);
         }
       }
       generation.fps = block.fps;
