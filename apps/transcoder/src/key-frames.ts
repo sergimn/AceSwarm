@@ -43,7 +43,7 @@ export type Decoding = (typeof DECODINGS)[number];
 export class KeyFrames {
   /**
    * Decodes every frame from now on, though the previews wanted key frames only. It is the
-   * broadcast's trait, so it stays for every source of the stream.
+   * broadcast's trait, so it stays for every source of the stream, until `back`.
    */
   allFrames = false;
   /** A run got a frame with key frames only decoding: a source that gives none is slow, not the trait. */
@@ -54,6 +54,14 @@ export class KeyFrames {
    * starts late still reaches the patience. The next runs start from it.
    */
   carried = 0;
+
+  /**
+   * The broadcast sent IDR pictures alone for a while, after a stall had the stream re-encoded (see
+   * `SourceFeeds.onCutPoint`): key frames only decoding gives a picture of each, so it comes back.
+   */
+  readonly back = (): void => {
+    this.allFrames = false;
+  };
 
   /**
    * Notes a progress block of a run. The last one ffmpeg prints as it is stopped says nothing: it

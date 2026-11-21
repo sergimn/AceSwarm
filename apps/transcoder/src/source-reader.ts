@@ -1,6 +1,8 @@
 import { setTimeout as wait } from "node:timers/promises";
 import { describeError } from "@aceswarm/shared/http";
+import { CutPointHold, type HeldUnit } from "./cut-point-hold.ts";
 import { FollowBrake } from "./follow-brake.ts";
+import type { CutPoint } from "./h264-cut-points.ts";
 import { PidMoves, type PacketVerdict } from "./pid-moves.ts";
 import { PACKET_BYTES, TsPackets } from "./ts-packets.ts";
 import { streamPids, TsTables, type Layout } from "./ts-tables.ts";
@@ -40,6 +42,21 @@ export interface LayoutMove {
   inPlace: boolean;
 }
 
+/**
+ * Lets a run that re-encodes the stream's H.264 video hand over to one that copies it, right at an
+ * access unit where ffmpeg can cut a copy (see `cutPointOf`).
+ */
+export interface CutPoints {
+  /** Asked at the start of each access unit of the run's video: whether to look whether a copy can be cut at it. */
+  watching: () => boolean;
+  /**
+   * One that can came, with its PES's time stamp, and what kind of picture it is. Returns the sink
+   * of what follows, from that unit on, to start a new ffmpeg run there, or undefined to go on
+   * with the same.
+   */
+  found: (pts: number | undefined, point: Exclude<CutPoint, "none">) => Sink | undefined;
+}
+
 /** Why a reader is done with its source. */
 export interface SourceEnd {
   reason: string;
@@ -64,6 +81,8 @@ export interface SourceRequest {
    * (`inPlace`), and the sink's run reads on as it is (see `PidMoves`): `onLayout` is not asked.
    */
   onMove?: (change: LayoutMove) => void;
+  /** Looks for where a copy of the run's video can begin (see `CutPoints`), while it says so. */
+  cutPoints?: CutPoints;
   /** The reader is done: the engine ended the stream, the connection failed, or nothing came for too long. */
   onEnd: (end: SourceEnd) => void;
 }
@@ -108,6 +127,11 @@ type Piece = { sink: Sink; bytes: Uint8Array } | { sink: Sink; end: true };
  * - A change that only moves the streams to other PIDs needs no new run: their packets are passed
  *   on under the PIDs ffmpeg knows, once the stream has shown that the decoders can go on with
  *   them (see `PidMoves`). The owner is told (`onMove`), not asked.
+ * - While the owner watches for them (see `CutPoints`), the start of each access unit of the
+ *   run's H.264 video is held back until it shows whether ffmpeg can cut a copy of it there (see
+ *   `CutPointHold`). At one it can, the owner may hand over a new sink as at a change of layout:
+ *   the old run's input ends right before that unit, and the new run begins with the tables and
+ *   then the unit.
  * - The first tables come before any of the stream is passed on, so the owner can start the right
  *   kind of ffmpeg run for what the stream carries before it reads a byte.
  * - An engine that is not ready to serve its session answers with a short text instead of video
@@ -141,6 +165,8 @@ class EngineReader implements SourceReader {
   private readonly moves: PidMoves;
   /** The layout of a move that is being looked at (see `PidMoves.consider`): until it is decided, the run reads `fed`. */
   private looking: Layout | undefined;
+  private readonly cuts = new CutPointHold();
+  private readonly watchingCuts = (): boolean => this.request.cutPoints?.watching() === true;
   private delivered = false;
 
   constructor(request: SourceRequest, fetchImpl: Fetch, now: () => number) {
@@ -276,8 +302,11 @@ class EngineReader implements SourceReader {
     }
   }
 
-  /** Passes on what was held back: for a format still unknown, or for tables that didn't come. */
+  /** Passes on what was held back: for a format still unknown, for tables that didn't come, or for a cut point. */
   private async release(): Promise<void> {
+    const out: Piece[] = [];
+    this.letGo(out);
+    await this.send(out);
     const held = [...this.undecided, ...(this.early ?? [])];
     this.undecided = [];
     this.early = undefined;
@@ -332,6 +361,14 @@ class EngineReader implements SourceReader {
         flush();
         return;
       }
+      const held = this.holdForCut(buffer, at, pid);
+      if (held !== "pass") {
+        flush();
+        if (held !== "held") {
+          this.cutPoint(held, out);
+        }
+        return;
+      }
       const verdict = this.moves.packet(buffer, at, pid, this.tables.carriesTables(pid));
       if (verdict !== "pass") {
         flush();
@@ -367,6 +404,8 @@ class EngineReader implements SourceReader {
     if (layout === undefined || layout.key === (this.looking ?? previous)?.key) {
       return;
     }
+    // What was held back for a cut point belongs to the layout the run reads.
+    this.letGo(out);
     // A move that was still being looked at is off: the stream changed again.
     const held = this.moves.giveUp();
     if (this.looking !== undefined) {
@@ -412,6 +451,49 @@ class EngineReader implements SourceReader {
         this.settle(verdict, out);
       }
     }
+  }
+
+  /**
+   * Holds the packet back while the start of an access unit of the run's video shows whether a
+   * copy can be cut at it (see `CutPointHold`); not while the stream's first tables or a move are
+   * awaited.
+   */
+  private holdForCut(data: Uint8Array, at: number, pid: number): ReturnType<CutPointHold["packet"]> {
+    const { fed } = this;
+    const waiting = this.early !== undefined || this.looking !== undefined;
+    return this.request.cutPoints === undefined || fed === undefined || waiting
+      ? "pass"
+      : this.cuts.packet(data, at, pid, fed, this.watchingCuts);
+  }
+
+  /**
+   * An access unit of the run's video that was held back tells whether a copy can be cut at it. At
+   * one that can, the owner may hand over another sink: the old one ends right before the unit, and
+   * the new one begins with the stream's tables and then the unit, as at a change of layout.
+   * Otherwise the unit goes on as it would have.
+   */
+  private cutPoint(unit: HeldUnit, out: Piece[]): void {
+    const { point } = unit;
+    const next = point === "none" ? undefined : this.request.cutPoints?.found(unit.pts, point);
+    const { fed } = this;
+    if (next === undefined || next === this.sink || fed === undefined) {
+      this.again(unit.packets, out);
+      return;
+    }
+    if (this.delivered) {
+      out.push({ sink: this.sink, end: true });
+    }
+    this.sink = next;
+    this.delivered = false;
+    out.push({ sink: next, bytes: this.tables.tablePackets() });
+    // The new run reads the stream as it comes, from this unit on.
+    this.moves.begin(fed, unit.packets);
+    out.push({ sink: next, bytes: Buffer.concat(unit.packets) });
+  }
+
+  /** What was held back for a cut point goes on as it came: the stream changes, or ends. */
+  private letGo(out: Piece[]): void {
+    this.again(this.cuts.release(), out);
   }
 
   /** What became of a packet that isn't passed on as it is: the end of a move, if that was decided. */
