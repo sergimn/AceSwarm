@@ -383,8 +383,8 @@ export class StandbyReaders {
   }
 
   /**
-   * Stops reading a source that ffmpeg reads from now on: the engine allows one reader per
-   * session. Settles once the connection is closed and the engine had a moment to notice, with
+   * Stops reading a source that the stream's pipeline reads from now on, for its ffmpeg: the
+   * engine allows one reader per session. Settles once the connection is closed and the engine had a moment to notice, with
    * true when the source had a reader.
    */
   async release(source: string): Promise<boolean> {

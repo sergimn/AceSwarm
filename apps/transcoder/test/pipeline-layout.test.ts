@@ -1,11 +1,12 @@
-import type { ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { closeSync, constants, openSync, rmSync, writeSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { setImmediate as nextTurn } from "node:timers/promises";
-import { createLogger } from "@aceswarm/shared/logger";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
+import { createLogger, type Logger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
@@ -22,6 +23,16 @@ type FakeChild = ChildProcess & { signalledWhileReading: boolean };
  * from a pipe, and while it waits there for more it acts on no signal: a stop must end the input
  * first, or ffmpeg stays until it is killed three seconds later.
  */
+/** The text of a run's playlist with `count` segments. */
+const playlistOf = (count: number): string =>
+  [
+    "#EXTM3U",
+    "#EXT-X-TARGETDURATION:2",
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    ...Array.from({ length: count }, (_, index) => `#EXTINF:2.000,\nseg_${String(index).padStart(6, "0")}.ts`),
+    "",
+  ].join("\n");
+
 function quietProcess(): FakeChild {
   const child = new EventEmitter() as FakeChild;
   const stdin = new PassThrough();
@@ -58,6 +69,8 @@ describe("Pipeline following what its source carries", () => {
   const handovers: string[] = [];
   /** Every connection to a source, in order: a run that takes over mid-stream opens none. */
   let opened: FakeSource[] = [];
+  /** How to end each read that a test made wait (see `holdPlaylist`). */
+  const heldOpen: (() => void)[] = [];
   const clock = { now: 1_000_000 };
 
   beforeEach(async () => {
@@ -70,14 +83,18 @@ describe("Pipeline following what its source carries", () => {
   });
 
   afterEach(async () => {
-    vi.useRealTimers();
+    // A read that still waits on a pipe (see `holdPlaylist`) ends here, whatever its test did.
+    for (const end of heldOpen.splice(0)) {
+      end();
+    }
     await pipeline?.stop();
+    vi.useRealTimers();
     await rm(hlsDir, { recursive: true, force: true });
     // Whatever a test did, no ffmpeg was left waiting for input with only a signal to end it.
     expect(children.map((child) => child.signalledWhileReading)).toEqual(children.map(() => false));
   });
 
-  function start(): Pipeline {
+  function start(logger = createLogger("test", "silent")): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -105,7 +122,7 @@ describe("Pipeline following what its source carries", () => {
     };
     const sources = fakeSources();
     opened = sources.opened;
-    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
+    pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
         const child = quietProcess();
@@ -139,6 +156,62 @@ describe("Pipeline following what its source carries", () => {
       }
       await writeFile(join(directory, "index.m3u8"), `${lines.join("\n")}\n`);
     }
+  }
+
+  /**
+   * Makes the playlist of the first run's full output a named pipe, so that the pipeline's next read
+   * of it waits: what happens to the run meanwhile is up to the test. `reading` settles once that read
+   * waits, `aside` puts the pipe out of the way of later reads (the one that waits keeps it), and
+   * `end` lets the read end with a playlist of `count` segments. The pipeline's own timer must not
+   * read the pipe too: such a test fakes `setInterval` before it starts its pipeline. A test that
+   * fails on the way leaves nothing waiting: `reading` gives up after four seconds, and the end of
+   * every test ends a read that waits on the pipe, whether the test got to open it or not.
+   */
+  function holdPlaylist(): {
+    reading: () => Promise<void>;
+    aside: () => void;
+    end: (count: number) => void;
+  } {
+    const path = join(hlsDir, "s1", "g1", "full", "index.m3u8");
+    rmSync(path);
+    execFileSync("mkfifo", [path]);
+    let writer: number | undefined;
+    /** Opens the pipe for writing, which fails until a reader has it open (or once it is out of the way). */
+    const open = (): boolean => {
+      try {
+        writer ??= openSync(path, constants.O_WRONLY | constants.O_NONBLOCK);
+      } catch {
+        // No read waits on it.
+      }
+      return writer !== undefined;
+    };
+    const close = (): void => {
+      // A read that waits on the pipe ends when its writer closes it: one that no writer opened yet too.
+      if (!open() || writer === undefined) {
+        return;
+      }
+      closeSync(writer);
+      writer = undefined;
+    };
+    heldOpen.push(close);
+    return {
+      reading: async () => {
+        const giveUpAt = Date.now() + 4000;
+        while (!open()) {
+          if (Date.now() > giveUpAt) {
+            throw new Error("the pipeline did not read the playlist");
+          }
+          await sleep(2);
+        }
+      },
+      aside: () => {
+        rmSync(path);
+      },
+      end: (count) => {
+        writeSync(writer ?? -1, playlistOf(count));
+        close();
+      },
+    };
   }
 
   async function frames(frame: number, run: number): Promise<void> {
@@ -246,6 +319,46 @@ describe("Pipeline following what its source carries", () => {
       expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: "h264" });
       await instance.start("http://e4/play", false);
       expect(modeOf(5)).toBe("copy");
+    });
+
+    it("forgets the playing source's change when another source is started in its place", async () => {
+      const instance = await playing();
+      clock.now += 5000;
+      expect(opened[0]?.layout(layoutOf(211))).toBe(true);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+      // As the controller does for a stream that doesn't play: no handover, the new source takes its place.
+      await instance.start("http://e2/play", false);
+      expect(instance.status()).toMatchObject({ source: "http://e2/play", layoutChangedAt: null });
+    });
+
+    it("publishes nothing of a run that was replaced while its segments were looked up", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const instance = await playing();
+      const held = holdPlaylist();
+      const syncing = instance.sync();
+      await held.reading();
+      // Another source takes the stream while the run's playlist is still being read.
+      await instance.start("http://e2/play", false);
+      held.end(5);
+      await syncing;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+    });
+
+    it("publishes nothing of a run whose time to write out ended while its segments were looked up", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const instance = await playing();
+      expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(true);
+      const held = holdPlaylist();
+      const syncing = instance.sync();
+      await held.reading();
+      // Meanwhile the run's time is up, and another sync (for a player's request) is done with it.
+      held.aside();
+      await wrote(1, 3);
+      clock.now += 3000;
+      await instance.sync();
+      held.end(5);
+      await syncing;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
     });
 
     it("follows ffmpeg's own finding where the tables don't tell, in both directions", async () => {
@@ -617,6 +730,162 @@ describe("Pipeline following what its source carries", () => {
       expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(false);
       expect(runs).toHaveLength(2);
       expect(instance.status()).toMatchObject({ mode: "copy", layoutChangedAt: null });
+    });
+  });
+
+  describe("streams that move to other PIDs mid-stream", () => {
+    it("lets the same run read on, and tells when the stream changed", async () => {
+      const instance = await playing();
+      const lastFrame = clock.now;
+      clock.now += 5000;
+      opened[0]?.move(layoutOf(211));
+      expect(runs).toHaveLength(1);
+      expect(reasons).toEqual(["start"]);
+      expect(inputEnded(0)).toBe(false);
+      expect(killed(0)).toBe(false);
+      // Players wait a moment for the picture the stream goes on from: the controller allows for that.
+      expect(instance.status()).toMatchObject({
+        state: "running",
+        mode: "copy",
+        videoCodec: "h264",
+        layout: "program 1 [211:h264 212:0x0f]",
+        layoutChangedAt: iso(clock.now),
+        lastFrameAt: iso(lastFrame),
+        frames: 100,
+      });
+
+      // The run publishes on as before.
+      await wrote(1, 4);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3"]);
+      // A change the run can't read on over starts a new one from the layout the stream has now.
+      clock.now += 5000;
+      expect(opened[0]?.layout(layoutOf(311, HEVC))).toBe(true);
+      expect(reasons).toEqual(["start", "layout"]);
+      expect(modeOf(1)).toBe("transcode");
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+    });
+
+    it("takes a change of the tables alone for no change of the stream", async () => {
+      const instance = await playing();
+      clock.now += 5000;
+      // The program's table is on another PID; the streams are where they were.
+      opened[0]?.move(layoutOf(256, 0x1b, 4097), true);
+      expect(runs).toHaveLength(1);
+      expect(instance.status()).toMatchObject({ state: "running", layoutChangedAt: null });
+    });
+
+    it("logs tables that keep changing over the same streams once a minute", async () => {
+      const lines: string[] = [];
+      const note =
+        (level: string) =>
+        (_fields: object, text: string): void => {
+          lines.push(`${level}: ${text.split(",", 1)[0] ?? ""}`);
+        };
+      const logger = { info: note("info"), debug: note("debug"), warn: note("warn"), error: note("error") };
+      const instance = start({ ...logger, child: () => logger } as unknown as Logger);
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      lines.length = 0;
+      const inPlace = "the broadcast changed its tables";
+      for (const [wait, pmtPid] of [
+        [5000, 4097],
+        [1000, 4096],
+        [58_999, 4097],
+        [1, 4096],
+      ] as const) {
+        clock.now += wait;
+        opened[0]?.move(layoutOf(256, 0x1b, pmtPid), true);
+      }
+      expect(lines).toEqual([`info: ${inPlace}`, `debug: ${inPlace}`, `debug: ${inPlace}`, `info: ${inPlace}`]);
+      // A move is told every time.
+      opened[0]?.move(layoutOf(211));
+      opened[0]?.move(layoutOf(256));
+      const moved = "info: the broadcast moved its streams to other PIDs; the same ffmpeg run reads on";
+      expect(lines.slice(4)).toEqual([moved, moved]);
+      expect(runs).toHaveLength(1);
+    });
+
+    it("takes a move for a sign of video only on the source players get, after it had video", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      // No frame of the run yet.
+      clock.now += 5000;
+      opened[0]?.move(layoutOf(211));
+      expect(instance.status()).toMatchObject({ state: "starting", layoutChangedAt: null });
+      await wrote(1, 3);
+      await frames(75, 0);
+
+      // A source that waits to take over moves its streams: players don't get that one.
+      await instance.start("http://e2/play", true);
+      opened[1]?.layout(layoutOf(256));
+      await frames(50, 1);
+      clock.now += 5000;
+      opened[1]?.move(layoutOf(211));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ pendingSource: "http://e2/play", layoutChangedAt: null });
+
+      clock.now += 1000;
+      opened[0]?.move(layoutOf(256));
+      const told = iso(clock.now);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: told });
+
+      // Moves that keep coming while the run shows no new frame are no sign of video: a stream
+      // that stalled over them must not look alive for as long as they come.
+      clock.now += 15_000;
+      opened[0]?.move(layoutOf(211));
+      clock.now += 15_000;
+      opened[0]?.move(layoutOf(256));
+      expect(instance.status()).toMatchObject({ layoutChangedAt: told, frames: 75 });
+      await frames(76, 0);
+      clock.now += 1000;
+      opened[0]?.move(layoutOf(211));
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+    });
+
+    it("keeps what ffmpeg found the video to be, on the PIDs it moved to", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      // The tables say H.264; ffmpeg finds HEVC, and a run that re-encodes reads the source again.
+      opened[0]?.layout(layoutOf(256));
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      opened[1]?.layout(layoutOf(256));
+      await banner(1, "hevc");
+      opened[1]?.move(layoutOf(211));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ mode: "transcode", videoCodec: "hevc" });
+
+      // A later source that starts on the new PIDs is not sent back to copying for what its tables say.
+      await instance.start("http://e2/play", false);
+      expect(modeOf(2)).toBe("transcode");
+      expect(opened[2]?.layout(layoutOf(211))).toBe(false);
+      expect(runs).toHaveLength(3);
+      // On PIDs ffmpeg said nothing about, the tables are taken at their word.
+      expect(opened[2]?.layout(layoutOf(311))).toBe(true);
+      expect(modeOf(3)).toBe("copy");
+    });
+
+    it("takes no notice of a source that is no longer the stream's", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      opened[1]?.layout(layoutOf(256));
+      await banner(1, "hevc");
+      await instance.start("http://e2/play", false);
+      expect(opened[1]?.stopped).toBe(true);
+      opened[2]?.layout(layoutOf(256));
+      // What the old source's reader still tells is not the stream's: neither its layout, nor where ffmpeg's finding holds.
+      opened[1]?.move(layoutOf(211));
+      expect(instance.status()).toMatchObject({ layout: "program 1 [256:h264 257:0x0f]", layoutChangedAt: null });
+      expect(opened[2]?.layout(layoutOf(211))).toBe(true);
+      expect(modeOf(3)).toBe("copy");
     });
   });
 

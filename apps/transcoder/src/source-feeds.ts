@@ -1,7 +1,7 @@
 import type { Logger } from "@aceswarm/shared/logger";
 import type { FullMode } from "./ffmpeg-args.ts";
 import { killProcess, type Connection, type Generation } from "./generation.ts";
-import type { LayoutChange, OpenSource, Sink, SourceEnd } from "./source-reader.ts";
+import type { LayoutChange, LayoutMove, OpenSource, Sink, SourceEnd } from "./source-reader.ts";
 import { changeKind, describeLayout, videoCodecOfLayout, type Layout, type LayoutChangeKind } from "./ts-tables.ts";
 
 /** Browsers only decode H.264 reliably, so other codecs are re-encoded for the full output. */
@@ -13,6 +13,8 @@ const COPYABLE_CODECS = new Set(["h264"]);
 const DRAIN_TIMEOUT_MS = 3000;
 /** How long ffmpeg may take to end by itself once its source did. */
 const SOURCE_END_GRACE_MS = 5000;
+/** How often a stream's changes that leave its run's streams in place are logged: tables can change every second. */
+const IN_PLACE_LOG_MS = 60_000;
 /** How many layouts a stream keeps ffmpeg's finding for (see `SourceFeeds.found`): far more than a broadcast goes through. */
 const MAX_CORRECTED_LAYOUTS = 32;
 
@@ -44,6 +46,11 @@ export interface FeedHost {
   /** Adds the run's new segments to the stream's playlists. */
   publish: (run: Generation) => Promise<void>;
   retire: (run: Generation) => void;
+  /**
+   * The broadcast moved the run's streams to other PIDs mid-stream, and the run reads on (see
+   * `PidMoves`): the stream showed a picture to go on from, so its video is there.
+   */
+  moved: (run: Generation) => void;
 }
 
 /**
@@ -62,6 +69,8 @@ export interface FeedHost {
  *   same connection: no engine session is opened, and neither run misses a byte of its layout
  *   (players get the new one from its first key frame, where every ffmpeg run begins). The old
  *   run's input ends there; what it still writes out is published first (see `drain`).
+ * - A change that only moves the same streams to other PIDs needs no new run: the reader passes
+ *   them on under the PIDs the run's ffmpeg knows (see `PidMoves`), and the run reads on.
  */
 export class SourceFeeds {
   /**
@@ -76,6 +85,8 @@ export class SourceFeeds {
   private readonly corrected = new Map<string, string>();
   /** Runs that handed over mid-stream and may still write out their last segments, oldest first. */
   private readonly draining: Generation[] = [];
+  /** When a change that left the run's streams in place was last logged (see `IN_PLACE_LOG_MS`). */
+  private inPlaceLoggedAt = -Infinity;
   private readonly host: FeedHost;
   private readonly openSource: OpenSource;
   private readonly logger: Logger;
@@ -111,12 +122,16 @@ export class SourceFeeds {
     // Its newest finding counts: one that agrees with the tables takes an older one back.
     this.corrected.delete(layout?.key ?? "");
     if (layout !== undefined && videoCodecOfLayout(layout) !== codec) {
-      this.corrected.set(layout.key, codec);
-      if (this.corrected.size > MAX_CORRECTED_LAYOUTS) {
-        this.corrected.delete(this.corrected.keys().next().value ?? "");
-      }
+      this.correct(layout.key, codec);
     }
     return this.carries(codec);
+  }
+
+  private correct(key: string, codec: string): void {
+    this.corrected.set(key, codec);
+    if (this.corrected.size > MAX_CORRECTED_LAYOUTS) {
+      this.corrected.delete(this.corrected.keys().next().value ?? "");
+    }
   }
 
   /** Notes the codec of the video a source carries now. Returns the full output's mode for it. */
@@ -134,6 +149,9 @@ export class SourceFeeds {
       idleTimeoutMs: run.inputTimeoutSeconds * 1000,
       sink: run.sink,
       onLayout: (change) => this.onLayout(connection, change),
+      onMove: (move) => {
+        this.onMove(connection, move);
+      },
       onEnd: (end) => {
         this.onEnd(connection, end);
       },
@@ -159,12 +177,46 @@ export class SourceFeeds {
       return this.host.succeed(run, { layout, mode, midStream: change.delivered, drain: false }, mode)?.sink;
     }
     const kind = changeKind(previous, layout);
+    // `unfit`: why the run could not read on, where the reader looked into that (see `PidMoves`).
+    const { unfit } = change;
     this.logger.info(
-      { generation: run.number, kind, from: describeLayout(previous), to: describeLayout(layout), mode },
+      { generation: run.number, kind, from: describeLayout(previous), to: describeLayout(layout), mode, unfit },
       "the broadcast changed its layout; a new ffmpeg run takes over",
     );
     const how: Succession = { layout, mode, midStream: true, drain: change.delivered, change: kind };
     return this.host.succeed(run, how, "layout")?.sink;
+  }
+
+  /**
+   * The broadcast moved its streams to other PIDs, and the reader passes them on under the ones
+   * the run's ffmpeg knows, or it left the streams ffmpeg reads where they were: the run reads on
+   * as it is. They are the same streams, so the mode stays, and so does what ffmpeg found their
+   * video to be.
+   */
+  private onMove(connection: Connection, move: LayoutMove): void {
+    const run = connection.run;
+    if (run.retired) {
+      return;
+    }
+    const { layout, previous, inPlace } = move;
+    run.layout = layout;
+    const found = this.corrected.get(previous.key);
+    if (found !== undefined) {
+      this.correct(layout.key, found);
+    }
+    const details = { generation: run.number, from: describeLayout(previous), to: describeLayout(layout) };
+    if (!inPlace) {
+      this.logger.info(details, "the broadcast moved its streams to other PIDs; the same ffmpeg run reads on");
+      this.host.moved(run);
+      return;
+    }
+    // Tables can go back and forth for as long as the broadcast lasts: one line a minute tells of it.
+    const quiet = this.now() - this.inPlaceLoggedAt < IN_PLACE_LOG_MS;
+    this.inPlaceLoggedAt = quiet ? this.inPlaceLoggedAt : this.now();
+    this.logger[quiet ? "debug" : "info"](
+      details,
+      "the broadcast changed its tables, and the streams ffmpeg reads are where they were; the same ffmpeg run reads on",
+    );
   }
 
   /** The reader is done with the source: its run's ffmpeg writes out what it has, and ends. */

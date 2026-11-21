@@ -6,7 +6,7 @@ import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
 import { attachFfmpeg } from "./ffmpeg-process.ts";
-import { Generation, modifiedAt, VARIANTS, type GenerationPlan, type Variant } from "./generation.ts";
+import { Generation, modifiedAt, statusWithoutRun, VARIANTS, type GenerationPlan, type Variant } from "./generation.ts";
 import { KeyFrames, REOPENS_AFTER_FALLBACK, type Decoding } from "./key-frames.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
@@ -68,7 +68,7 @@ export class Pipeline {
   private nextNumber = 1;
   /** Reads the sources, and knows what the full output does with their video. */
   private readonly feeds: SourceFeeds;
-  /** When the source players get last changed its layout mid-stream (see `succeed`). */
+  /** When the source players get last changed its layout mid-stream (see `succeed`, and `FeedHost.moved`). */
   private layoutChangedAt: number | undefined;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
@@ -105,6 +105,14 @@ export class Pipeline {
       publish: (run: Generation) => this.publish(run, () => this.feeds.drains(run)),
       retire: (run: Generation) => {
         this.retire(run);
+      },
+      moved: (run: Generation) => {
+        // As for a new run (see `succeed`): only for the source players get, and one that had video
+        // since its last move. Moves that keep coming over a run that shows nothing must not look
+        // like a stream that does.
+        const shown = run === this.active && run.frames > run.framesAtMove;
+        this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
+        run.framesAtMove = run.frames;
       },
     };
     this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);
@@ -153,6 +161,8 @@ export class Pipeline {
     if (previous !== undefined) {
       this.retire(previous);
     }
+    // Players get this source from here on: what the last one's layout did is not about it.
+    this.layoutChangedAt = undefined;
     this.replace("active", launched);
   }
 
@@ -174,24 +184,7 @@ export class Pipeline {
     const layoutChangedAt = this.layoutChangedAt === undefined ? null : new Date(this.layoutChangedAt).toISOString();
     const restartedAt = this.restartedAt === undefined ? null : new Date(this.restartedAt).toISOString();
     if (generation === undefined) {
-      return {
-        id: this.id,
-        state: "exited",
-        source: "",
-        startedAt: new Date(this.now()).toISOString(),
-        lastFrameAt: null,
-        frames: 0,
-        fps: null,
-        videoCodec: null,
-        mode: "copy",
-        layout: null,
-        layoutChangedAt,
-        exitCode: null,
-        error: "not started",
-        pendingSource,
-        liveEdge: null,
-        restartedAt,
-      };
+      return statusWithoutRun(this.id, this.now(), { layoutChangedAt, pendingSource, restartedAt });
     }
     const { layout } = generation;
     const tableCodec = layout === undefined ? undefined : videoCodecOfLayout(layout);

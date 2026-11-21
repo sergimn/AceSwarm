@@ -315,11 +315,14 @@ export interface PipelineStatus {
   layout: string | null;
   /**
    * When the source players get last changed its layout mid-stream (its video moved to another
-   * PID or codec, or the like); null if it never did. A new ffmpeg run takes over right at the
-   * change, so `state` is `starting` and `lastFrameAt` stands still for a few seconds after it.
-   * Only a change after a run that showed video counts here: changes over a stream that has no
-   * video move nothing, so they can't keep it from being taken for stalled. A transcoder older
-   * than this field doesn't send it.
+   * PID or codec, or the like); null if it never did, and for a source that was started in
+   * another one's place. A new ffmpeg run takes over right at the change, so `state` is `starting`
+   * and `lastFrameAt` stands still for a few seconds after it; a run that reads on over a move to
+   * other PIDs waits for a picture to go on from, for less. A change that leaves the streams
+   * ffmpeg reads where they are doesn't count.
+   * Only a change after a run that showed video counts here (for a run that reads on over moves:
+   * video since its last one): changes over a stream that has no video move nothing, so they
+   * can't keep it from being taken for stalled. A transcoder older than this field doesn't send it.
    */
   layoutChangedAt?: string | null;
   exitCode: number | null;

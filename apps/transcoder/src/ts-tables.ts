@@ -30,6 +30,8 @@ export interface StreamEntry {
 export interface Program {
   number: number;
   pmtPid: number;
+  /** The PID whose packets carry the program's clock (PCR): usually its video's. */
+  pcrPid: number;
   streams: StreamEntry[];
 }
 
@@ -337,6 +339,11 @@ export class TsTables {
     return this.current;
   }
 
+  /** Whether the PID carries program tables (the PAT, or a PMT it lists), not a stream's data. */
+  carriesTables(pid: number): boolean {
+    return this.tablePids.has(pid);
+  }
+
   /**
    * Feeds the packet at `at` in `data`. Returns the stream's layout when this packet made it known
    * or changed it, undefined otherwise.
@@ -424,6 +431,7 @@ export class TsTables {
       return false;
     }
     const end = section.length - 4;
+    const pcrPid = (((section[8] ?? 0) & 0x1f) << 8) | (section[9] ?? 0);
     const programInfo = (((section[10] ?? 0) & 0x0f) << 8) | (section[11] ?? 0);
     const streams: StreamEntry[] = [];
     let at = 12 + programInfo;
@@ -448,7 +456,7 @@ export class TsTables {
       // A program without streams gives a reader nothing to go on: what is known stays.
       return false;
     }
-    this.programs.set(header.id, { number: header.id, pmtPid: pid, streams });
+    this.programs.set(header.id, { number: header.id, pmtPid: pid, pcrPid, streams });
     this.pmtSections.set(header.id, section);
     return true;
   }
