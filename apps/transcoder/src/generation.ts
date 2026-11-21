@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import type { PipelineState } from "@aceswarm/shared/api-types";
+import type { PipelineState, PipelineStatus } from "@aceswarm/shared/api-types";
 import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
 import { NO_SINK, type Sink, type SourceReader } from "./source-reader.ts";
@@ -47,6 +47,30 @@ export interface GenerationPlan {
   midStream?: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
+}
+
+/** What a pipeline that has no run reports. */
+export function statusWithoutRun(
+  id: string,
+  now: number,
+  rest: Pick<PipelineStatus, "layoutChangedAt" | "pendingSource" | "restartedAt">,
+): PipelineStatus {
+  return {
+    id,
+    state: "exited",
+    source: "",
+    startedAt: new Date(now).toISOString(),
+    lastFrameAt: null,
+    frames: 0,
+    fps: null,
+    videoCodec: null,
+    mode: "copy",
+    layout: null,
+    exitCode: null,
+    error: "not started",
+    liveEdge: null,
+    ...rest,
+  };
 }
 
 /** One ffmpeg run of a stream's pipeline, on one source, writing to its own directory. */

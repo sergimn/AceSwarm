@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { createLogger } from "@aceswarm/shared/logger";
+import { createLogger, type Logger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
 import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
@@ -77,7 +77,7 @@ describe("Pipeline following what its source carries", () => {
     expect(children.map((child) => child.signalledWhileReading)).toEqual(children.map(() => false));
   });
 
-  function start(): Pipeline {
+  function start(logger = createLogger("test", "silent")): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -105,7 +105,7 @@ describe("Pipeline following what its source carries", () => {
     };
     const sources = fakeSources();
     opened = sources.opened;
-    pipeline = new Pipeline("s1", settings, createLogger("test", "silent"), events, {
+    pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
         const child = quietProcess();
@@ -617,6 +617,149 @@ describe("Pipeline following what its source carries", () => {
       expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(false);
       expect(runs).toHaveLength(2);
       expect(instance.status()).toMatchObject({ mode: "copy", layoutChangedAt: null });
+    });
+  });
+
+  describe("streams that move to other PIDs mid-stream", () => {
+    it("lets the same run read on, and tells when the stream changed", async () => {
+      const instance = await playing();
+      const lastFrame = clock.now;
+      clock.now += 5000;
+      opened[0]?.move(layoutOf(211));
+      expect(runs).toHaveLength(1);
+      expect(reasons).toEqual(["start"]);
+      expect(inputEnded(0)).toBe(false);
+      expect(killed(0)).toBe(false);
+      // Players wait a moment for the picture the stream goes on from: the controller allows for that.
+      expect(instance.status()).toMatchObject({
+        state: "running",
+        mode: "copy",
+        videoCodec: "h264",
+        layout: "program 1 [211:h264 212:0x0f]",
+        layoutChangedAt: iso(clock.now),
+        lastFrameAt: iso(lastFrame),
+        frames: 100,
+      });
+
+      // The run publishes on as before.
+      await wrote(1, 4);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g1:3"]);
+      // A change the run can't read on over starts a new one from the layout the stream has now.
+      clock.now += 5000;
+      expect(opened[0]?.layout(layoutOf(311, HEVC))).toBe(true);
+      expect(reasons).toEqual(["start", "layout"]);
+      expect(modeOf(1)).toBe("transcode");
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+    });
+
+    it("takes a change of the tables alone for no change of the stream", async () => {
+      const instance = await playing();
+      clock.now += 5000;
+      // The program's table is on another PID; the streams are where they were.
+      opened[0]?.move(layoutOf(256, 0x1b, 4097), true);
+      expect(runs).toHaveLength(1);
+      expect(instance.status()).toMatchObject({ state: "running", layoutChangedAt: null });
+    });
+
+    it("logs tables that keep changing over the same streams once a minute", async () => {
+      const lines: string[] = [];
+      const note =
+        (level: string) =>
+        (_fields: object, text: string): void => {
+          lines.push(`${level}: ${text.split(",", 1)[0] ?? ""}`);
+        };
+      const logger = { info: note("info"), debug: note("debug"), warn: note("warn"), error: note("error") };
+      const instance = start({ ...logger, child: () => logger } as unknown as Logger);
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      lines.length = 0;
+      const inPlace = "the broadcast changed its tables";
+      for (const [wait, pmtPid] of [
+        [5000, 4097],
+        [1000, 4096],
+        [58_999, 4097],
+        [1, 4096],
+      ] as const) {
+        clock.now += wait;
+        opened[0]?.move(layoutOf(256, 0x1b, pmtPid), true);
+      }
+      expect(lines).toEqual([`info: ${inPlace}`, `debug: ${inPlace}`, `debug: ${inPlace}`, `info: ${inPlace}`]);
+      // A move is told every time.
+      opened[0]?.move(layoutOf(211));
+      opened[0]?.move(layoutOf(256));
+      const moved = "info: the broadcast moved its streams to other PIDs; the same ffmpeg run reads on";
+      expect(lines.slice(4)).toEqual([moved, moved]);
+      expect(runs).toHaveLength(1);
+    });
+
+    it("takes a move for a sign of video only on the source players get, after it had video", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      // No frame of the run yet.
+      clock.now += 5000;
+      opened[0]?.move(layoutOf(211));
+      expect(instance.status()).toMatchObject({ state: "starting", layoutChangedAt: null });
+      await wrote(1, 3);
+      await frames(75, 0);
+
+      // A source that waits to take over moves its streams: players don't get that one.
+      await instance.start("http://e2/play", true);
+      opened[1]?.layout(layoutOf(256));
+      await frames(50, 1);
+      clock.now += 5000;
+      opened[1]?.move(layoutOf(211));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ pendingSource: "http://e2/play", layoutChangedAt: null });
+
+      clock.now += 1000;
+      opened[0]?.move(layoutOf(256));
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+    });
+
+    it("keeps what ffmpeg found the video to be, on the PIDs it moved to", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      // The tables say H.264; ffmpeg finds HEVC, and a run that re-encodes reads the source again.
+      opened[0]?.layout(layoutOf(256));
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      opened[1]?.layout(layoutOf(256));
+      await banner(1, "hevc");
+      opened[1]?.move(layoutOf(211));
+      expect(runs).toHaveLength(2);
+      expect(instance.status()).toMatchObject({ mode: "transcode", videoCodec: "hevc" });
+
+      // A later source that starts on the new PIDs is not sent back to copying for what its tables say.
+      await instance.start("http://e2/play", false);
+      expect(modeOf(2)).toBe("transcode");
+      expect(opened[2]?.layout(layoutOf(211))).toBe(false);
+      expect(runs).toHaveLength(3);
+      // On PIDs ffmpeg said nothing about, the tables are taken at their word.
+      expect(opened[2]?.layout(layoutOf(311))).toBe(true);
+      expect(modeOf(3)).toBe("copy");
+    });
+
+    it("takes no notice of a source that is no longer the stream's", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      await banner(0, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(2);
+      });
+      opened[1]?.layout(layoutOf(256));
+      await banner(1, "hevc");
+      await instance.start("http://e2/play", false);
+      expect(opened[1]?.stopped).toBe(true);
+      opened[2]?.layout(layoutOf(256));
+      // What the old source's reader still tells is not the stream's: neither its layout, nor where ffmpeg's finding holds.
+      opened[1]?.move(layoutOf(211));
+      expect(instance.status()).toMatchObject({ layout: "program 1 [256:h264 257:0x0f]", layoutChangedAt: null });
+      expect(opened[2]?.layout(layoutOf(211))).toBe(true);
+      expect(modeOf(3)).toBe("copy");
     });
   });
 

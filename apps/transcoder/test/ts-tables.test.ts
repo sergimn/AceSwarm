@@ -86,6 +86,7 @@ describe("TsTables", () => {
       {
         number: 1,
         pmtPid: REAL_PMT_PID,
+        pcrPid: 256,
         streams: [
           { pid: 256, type: 0x1b, descriptors: new Uint8Array(0) },
           { pid: 257, type: 0x0f, descriptors: new Uint8Array(0) },

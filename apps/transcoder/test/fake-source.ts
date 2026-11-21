@@ -14,6 +14,11 @@ export interface FakeSource {
    * changed. Returns whether the owner handed over another sink.
    */
   layout: (layout: Layout, delivered?: boolean) => boolean;
+  /**
+   * Tells the owner that the stream's layout changed and the reader's run reads on (see `PidMoves`):
+   * the streams moved to other PIDs, or the ones it reads stayed where they were (`inPlace`).
+   */
+  move: (layout: Layout, inPlace?: boolean) => void;
   /** Ends the source, as when the engine closes the stream. */
   end: (reason: string) => void;
 }
@@ -41,6 +46,13 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
           source.sink = next;
           return true;
         },
+        move: (layout, inPlace = false) => {
+          const previous = source.told;
+          source.told = layout;
+          if (previous !== undefined) {
+            request.onMove?.({ layout, previous, inPlace });
+          }
+        },
         end: (reason) => {
           request.onEnd({ reason });
         },
@@ -55,12 +67,15 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
   };
 }
 
-/** A layout with one program: its video on `videoPid` with stream type `type`, and AAC audio next to it. */
-export function layoutOf(videoPid: number, type = 0x1b): Layout {
+/**
+ * A layout with one program: its video on `videoPid` with stream type `type`, and AAC audio next
+ * to it. The program's table is on `pmtPid`.
+ */
+export function layoutOf(videoPid: number, type = 0x1b, pmtPid = 4096): Layout {
   const streams = [
     { pid: videoPid, type, descriptors: new Uint8Array(0) },
     { pid: videoPid + 1, type: 0x0f, descriptors: new Uint8Array(0) },
   ];
-  const key = `1@4096[${streams.map((entry) => `${String(entry.pid)}:${String(entry.type)}:`).join(",")}]`;
-  return { programs: [{ number: 1, pmtPid: 4096, streams }], key };
+  const key = `1@${String(pmtPid)}[${streams.map((entry) => `${String(entry.pid)}:${String(entry.type)}:`).join(",")}]`;
+  return { programs: [{ number: 1, pmtPid, pcrPid: videoPid, streams }], key };
 }

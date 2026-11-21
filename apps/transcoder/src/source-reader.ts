@@ -1,6 +1,7 @@
 import { setTimeout as wait } from "node:timers/promises";
 import { describeError } from "@aceswarm/shared/http";
 import { FollowBrake } from "./follow-brake.ts";
+import { PidMoves, type PacketVerdict } from "./pid-moves.ts";
 import { PACKET_BYTES, TsPackets } from "./ts-packets.ts";
 import { streamPids, TsTables, type Layout } from "./ts-tables.ts";
 
@@ -21,6 +22,22 @@ export interface LayoutChange {
   previous: Layout | undefined;
   /** Whether the sink already got some of the stream: if so, the reader ends it when another takes over. */
   delivered: boolean;
+  /**
+   * Why the sink's run can't read on over the change (see `PidMoves`), where it might have: it
+   * had some of the stream, which then changed.
+   */
+  unfit?: string | undefined;
+}
+
+/** A change of layout that the sink's run reads on over (see `PidMoves`). */
+export interface LayoutMove {
+  layout: Layout;
+  previous: Layout;
+  /**
+   * The streams the run's ffmpeg reads are where they were, so nothing changed in what it gets:
+   * the tables changed alone, or streams it doesn't read came or went (see `staysPut`).
+   */
+  inPlace: boolean;
 }
 
 /** Why a reader is done with its source. */
@@ -42,6 +59,11 @@ export interface SourceRequest {
    * new layout, or undefined to go on with the same.
    */
   onLayout: (change: LayoutChange) => Sink | undefined;
+  /**
+   * The broadcast moved its streams to other PIDs, or left the ones the run reads where they were
+   * (`inPlace`), and the sink's run reads on as it is (see `PidMoves`): `onLayout` is not asked.
+   */
+  onMove?: (change: LayoutMove) => void;
   /** The reader is done: the engine ended the stream, the connection failed, or nothing came for too long. */
   onEnd: (end: SourceEnd) => void;
 }
@@ -83,6 +105,9 @@ type Piece = { sink: Sink; bytes: Uint8Array } | { sink: Sink; end: true };
  *   the stream's tables followed by everything after the change. Neither run misses a byte of
  *   its layout, and the engine's session stays as it is. Packets on PIDs that only the old layout
  *   had are left out from then on, as they would only look like more streams to the new run.
+ * - A change that only moves the streams to other PIDs needs no new run: their packets are passed
+ *   on under the PIDs ffmpeg knows, once the stream has shown that the decoders can go on with
+ *   them (see `PidMoves`). The owner is told (`onMove`), not asked.
  * - The first tables come before any of the stream is passed on, so the owner can start the right
  *   kind of ffmpeg run for what the stream carries before it reads a byte.
  * - An engine that is not ready to serve its session answers with a short text instead of video
@@ -113,6 +138,9 @@ class EngineReader implements SourceReader {
   private readonly brake: FollowBrake;
   /** PIDs of a layout the stream left, which the new one doesn't use. */
   private dropped = new Set<number>();
+  private readonly moves: PidMoves;
+  /** The layout of a move that is being looked at (see `PidMoves.consider`): until it is decided, the run reads `fed`. */
+  private looking: Layout | undefined;
   private delivered = false;
 
   constructor(request: SourceRequest, fetchImpl: Fetch, now: () => number) {
@@ -120,6 +148,7 @@ class EngineReader implements SourceReader {
     this.fetch = fetchImpl;
     this.now = now;
     this.brake = new FollowBrake(now);
+    this.moves = new PidMoves(now);
     this.sink = request.sink;
     void this.run();
   }
@@ -279,9 +308,13 @@ class EngineReader implements SourceReader {
       this.early.push(bytes);
       this.earlyBytes += bytes.byteLength;
     };
+    const late = this.moves.expire();
+    if (late !== undefined) {
+      this.settle(late, out);
+    }
     // A change that came too soon after the last one is followed now, with the layout as it is by now.
     if (this.fed !== undefined && this.brake.mayFollow()) {
-      this.follow(this.tables.layout, out);
+      this.follow(this.tables.layout, out, true);
     }
     this.packets.push(chunk, (buffer, at) => {
       data = buffer;
@@ -292,11 +325,17 @@ class EngineReader implements SourceReader {
       }
       if (layout !== undefined && (this.fed === undefined || this.brake.mayFollow())) {
         flush();
-        this.follow(layout, out);
+        this.follow(layout, out, false);
       }
       if (pid === NULL_PID || this.dropped.has(pid)) {
         // Padding carries nothing, and a PID the stream left would look like one more stream.
         flush();
+        return;
+      }
+      const verdict = this.moves.packet(buffer, at, pid, this.tables.carriesTables(pid));
+      if (verdict !== "pass") {
+        flush();
+        this.settle(verdict, out);
         return;
       }
       if (from >= 0 && at === to) {
@@ -317,25 +356,75 @@ class EngineReader implements SourceReader {
   }
 
   /**
-   * The stream's layout is `layout` from here on. Asks the owner for the sink of what follows; with
-   * another one, the old one ends here and the new one begins with the stream's tables.
+   * The stream's layout is `layout` from here on. A run that can read on over the change does (see
+   * `PidMoves`); otherwise a new one starts here (see `startOver`). A change that `waited` for its
+   * turn (see `FollowBrake`) gets a new run unless the run's streams are where they were: the old
+   * one was given the stream as it came meanwhile, new tables and all, so it is not where a move
+   * could take it on from.
    */
-  private follow(layout: Layout | undefined, out: Piece[]): void {
-    if (layout === undefined || layout.key === this.fed?.key) {
+  private follow(layout: Layout | undefined, out: Piece[], waited: boolean): void {
+    const previous = this.fed;
+    if (layout === undefined || layout.key === (this.looking ?? previous)?.key) {
       return;
     }
-    const previous = this.fed;
-    const next = this.request.onLayout({ layout, previous, delivered: this.delivered });
+    if (this.looking !== undefined) {
+      // A move that was still being looked at is off: the stream changed again, and what was held
+      // of it belongs to a layout that is gone.
+      this.moves.giveUp();
+      this.dropped = this.dropped.union(streamPids(this.looking)).difference(streamPids(layout));
+      this.looking = undefined;
+      if (layout.key === previous?.key) {
+        // Back to what the run reads.
+        return;
+      }
+    }
+    const fit = previous === undefined ? undefined : this.moves.consider(layout, waited);
+    if (fit === "carried" && previous !== undefined) {
+      this.fed = layout;
+      this.request.onMove?.({ layout, previous, inPlace: true });
+    } else if (fit === "looking") {
+      this.looking = layout;
+      // PIDs the stream left earlier may be the ones it is on now.
+      this.dropped = this.dropped.difference(streamPids(layout));
+    } else {
+      this.startOver({ layout, previous, unfit: typeof fit === "object" ? fit.no : undefined }, [], out);
+    }
+  }
+
+  /** What became of a packet that isn't passed on as it is: the end of a move, if that was decided. */
+  private settle(verdict: Exclude<PacketVerdict, "pass">, out: Piece[]): void {
+    const { looking, fed } = this;
+    if (verdict === "drop" || verdict === "hold" || looking === undefined || fed === undefined) {
+      return;
+    }
+    this.looking = undefined;
+    if ("carried" in verdict) {
+      this.fed = looking;
+      this.request.onMove?.({ layout: looking, previous: fed, inPlace: false });
+      out.push({ sink: this.sink, bytes: verdict.carried });
+    } else {
+      this.startOver({ layout: looking, previous: fed, unfit: verdict.why }, verdict.failed, out);
+    }
+  }
+
+  /**
+   * Asks the owner for the sink of what follows a change of layout; with another one, the old one
+   * ends here and the new one begins with the stream's tables. `held` is what of the stream was
+   * kept back for a move that is off, as it came.
+   */
+  private startOver(change: Omit<LayoutChange, "delivered">, held: Uint8Array[], out: Piece[]): void {
+    const { layout, previous } = change;
+    const next = this.request.onLayout({ ...change, delivered: this.delivered });
     this.brake.followed(previous !== undefined);
     this.fed = layout;
-    const held = this.early ?? [];
+    const early = this.early ?? [];
     this.early = undefined;
     if (next !== undefined && next !== this.sink) {
       if (this.delivered) {
         out.push({ sink: this.sink, end: true });
       }
-      const kept = streamPids(layout);
-      this.dropped = new Set(previous === undefined ? [] : streamPids(previous).difference(kept));
+      const left = previous === undefined ? this.dropped : this.dropped.union(streamPids(previous));
+      this.dropped = left.difference(streamPids(layout));
       this.sink = next;
       this.delivered = false;
     }
@@ -343,7 +432,12 @@ class EngineReader implements SourceReader {
       // A run that starts here knows the layout from its first bytes, wherever in the stream it is.
       out.push({ sink: this.sink, bytes: this.tables.tablePackets() });
     }
-    out.push(...held.map((bytes) => ({ sink: this.sink, bytes })));
+    // Whichever run reads on from here, it reads this layout as it comes: first what was kept back for it.
+    this.moves.begin(layout, [...early, ...held]);
+    out.push(...early.map((bytes) => ({ sink: this.sink, bytes })));
+    if (held.length > 0) {
+      out.push({ sink: this.sink, bytes: Buffer.concat(held) });
+    }
   }
 
   private async send(pieces: Piece[]): Promise<void> {

@@ -1,9 +1,10 @@
 /**
  * A broadcast that changes its layout mid-stream: its video moves to other PIDs, then to another
  * codec and back, under program tables whose version never changes. ffmpeg stays on the streams
- * it found at its start, so the transcoder follows the tables itself and starts a new ffmpeg run
- * right at the change, on the engine session it has (see docs/architecture.md). The full output
- * is copied while the video is H.264 and re-encoded while it is not, whatever it was before.
+ * it found at its start, so the transcoder follows the tables itself, on the engine session it
+ * has (see docs/architecture.md). Streams that only moved are passed on to the same ffmpeg run
+ * under the PIDs it knows; for another codec a new run starts right at the change. The full
+ * output is copied while the video is H.264 and re-encoded while it is not, whatever it was before.
  */
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { TsTables, videoCodecOfLayout, type Layout } from "../../apps/transcoder/src/ts-tables.ts";
@@ -58,10 +59,11 @@ function videoCodecOf(segment: Buffer): string | undefined {
 
 /**
  * Changes the broadcast's layout while the stream plays, and waits until the transcoder follows:
- * with one new ffmpeg run, on the session and the engine it had, and without a recovery step.
- * Returns the pipeline's status once the stream plays steadily again.
+ * with `newRuns` new ffmpeg runs (none where the same run reads on), on the session and the engine
+ * it had, and without a recovery step. Returns the pipeline's status once the stream plays
+ * steadily again.
  */
-async function follows(request: APIRequestContext, next: BroadcastLayout): Promise<PipelineStatus> {
+async function follows(request: APIRequestContext, next: BroadcastLayout, newRuns: 0 | 1): Promise<PipelineStatus> {
   const { streamId } = run;
   const before = (await streamById(request, streamId))!;
   const pipeline = pipelineStatus(streamId)!;
@@ -80,11 +82,13 @@ async function follows(request: APIRequestContext, next: BroadcastLayout): Promi
   const status = pipelineStatus(streamId)!;
   const followedAt = Date.parse(status.layoutChangedAt ?? "");
 
-  // The transcoder started one ffmpeg run for the change, and read on from the session it had.
-  expect(pipelineStarts(streamId)).toEqual({ ...starts, layout: (starts["layout"] ?? 0) + 1 });
+  // The transcoder started no more ffmpeg runs for the change than it takes, and read on from the session it had.
+  expect(pipelineStarts(streamId)).toEqual(
+    newRuns === 0 ? starts : { ...starts, layout: (starts["layout"] ?? 0) + newRuns },
+  );
   expect(status.source).toBe(pipeline.source);
   expect(followedAt).toBeGreaterThan(changedAt - 5000);
-  // Nothing else moved: the same engine, no recovery step, and video from the new run.
+  // Nothing else moved: the same engine, no recovery step, and video from after the change.
   expect(after.state).toBe("playing");
   expect(after.engine).toEqual(before.engine);
   expect(after.recoveries).toBe(before.recoveries);
@@ -94,7 +98,7 @@ async function follows(request: APIRequestContext, next: BroadcastLayout): Promi
   return status;
 }
 
-test("follows a broadcast whose video moves to other PIDs, on the same engine session", async ({ request }) => {
+test("reads on with the same ffmpeg run when a broadcast's video moves to other PIDs", async ({ request }) => {
   const stream = await addStream(request, run.broadcast!.infohash, "Layout");
   run.streamId = stream.id;
   await waitForSteadyPlaying(request, stream.id, STEADY_MS);
@@ -105,7 +109,8 @@ test("follows a broadcast whose video moves to other PIDs, on the same engine se
     videoCodec: "h264",
   });
 
-  const status = await follows(request, "moved");
+  // The same encoder settings on other PIDs: the run that reads the stream goes on with it.
+  const status = await follows(request, "moved", 0);
   expect(status).toMatchObject({ state: "running", mode: "copy", videoCodec: "h264" });
   expect(videoCodecOf(await newestSegment(request, stream.hls.full))).toBe("h264");
 });
@@ -115,13 +120,14 @@ test("re-encodes the full output while the broadcast is HEVC, and copies it agai
 }) => {
   const playlist = (await streamById(request, run.streamId))!.hls.full;
 
-  const hevc = await follows(request, "hevc");
+  // Another codec is another stream: a new run takes over.
+  const hevc = await follows(request, "hevc", 1);
   expect(hevc).toMatchObject({ state: "running", mode: "transcode", videoCodec: "hevc" });
   // Browsers get H.264 all the same.
   expect(videoCodecOf(await newestSegment(request, playlist))).toBe("h264");
 
   // The mode belongs to what the source carries now, not to what the stream once carried.
-  const back = await follows(request, "default");
+  const back = await follows(request, "default", 1);
   expect(back).toMatchObject({ state: "running", mode: "copy", videoCodec: "h264" });
   expect(videoCodecOf(await newestSegment(request, playlist))).toBe("h264");
 });
