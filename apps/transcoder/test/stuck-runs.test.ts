@@ -90,7 +90,8 @@ describe("StuckRuns", () => {
 
   /**
    * The first run plays, then its full output stalls for the stall time: it is started again. Its
-   * preview writes every `every` seconds, which has to divide the stall time.
+   * preview writes every `every` seconds, which has to divide the stall time and be no more than the
+   * pause limit (15 s): a longer gap counts as a pause of the source, and the stall time starts again.
    */
   async function firstStalls(watch: StuckRuns, stallSeconds = 30, every = 2): Promise<void> {
     await fullSegment();
@@ -397,8 +398,8 @@ describe("StuckRuns", () => {
     const nextPreview = (): Promise<void> => previewSegment(nextDirectory);
 
     /**
-     * The new run makes previews from 5 s on, every `every` seconds, but its copy gets no frame: no
-     * key frame comes.
+     * The new run makes previews from 5 s on, every `every` seconds (as for `firstStalls`), but its
+     * copy gets no frame: no key frame comes.
      */
     async function nextStalls(watch: StuckRuns, stallSeconds = 30, every = 2): Promise<Stuck | undefined> {
       after(5);
