@@ -66,7 +66,7 @@ export interface FeedHost {
 export class SourceFeeds {
   /**
    * A run that copied the stream's video got no segment of it into the full output, right after
-   * another that stalled (see `StuckRuns.copyFails`): ffmpeg finds no key frame in that video to
+   * another that stalled (see `Stuck.reencode`): ffmpeg finds no key frame in that video to
    * start one at. Every later run of the stream re-encodes it, whatever the source says it carries.
    */
   copyFails = false;

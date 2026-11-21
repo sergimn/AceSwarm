@@ -34,7 +34,11 @@ function quietProcess(): FakeChild {
     killed: false,
     signalledWhileReading: false,
     kill: () => {
-      Object.assign(child, { killed: true, signalledWhileReading: !stdin.writableEnded });
+      // Once is enough: a later signal after its input ended does not take the first one back.
+      Object.assign(child, {
+        killed: true,
+        signalledWhileReading: child.signalledWhileReading || !stdin.writableEnded,
+      });
       return true;
     },
   });
@@ -531,6 +535,8 @@ describe("Pipeline following what its source carries", () => {
       await instance.start("http://e2/play", true);
       expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
       opened[1]?.layout(layoutOf(256));
+      // It has video of its own by the time it changes.
+      await frames(50, 1);
       clock.now += 30_000;
       expect(opened[1]?.layout(layoutOf(211, HEVC))).toBe(true);
       expect(runs).toHaveLength(3);
@@ -551,6 +557,41 @@ describe("Pipeline following what its source carries", () => {
       expect(handovers).toEqual(["promoted"]);
       expect(instance.status()).toMatchObject({ source: "http://e2/play", pendingSource: null, mode: "transcode" });
       expect(opened[0]?.stopped).toBe(true);
+    });
+
+    it("publishes a source that took over after the playing one got a new run meanwhile", async () => {
+      const instance = await playing();
+      await instance.start("http://e2/play", true);
+      // The waiting source has the new layout from its start; then the playing one reaches the change.
+      opened[1]?.layout(layoutOf(211));
+      clock.now += 3000;
+      expect(opened[0]?.layout(layoutOf(211))).toBe(true);
+      expect(reasons).toEqual(["start", "handover", "layout"]);
+      expect(instance.status()).toMatchObject({ source: "http://e1/play", layoutChangedAt: iso(clock.now) });
+      // The playing source's new run has the highest number, and publishes first.
+      exit(0);
+      await wrote(3, 1);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g3:0"]);
+
+      // The source that waited takes over: its segments come next, whatever its run's number.
+      clock.now += 2000;
+      await frames(50, 1);
+      const shown = clock.now;
+      await wrote(2, 2);
+      await instance.sync();
+      expect(handovers).toEqual(["promoted"]);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g3:0", "g2:0", "g2:1"]);
+      // Players get a source that never changed its layout: the other one's change is not about it.
+      expect(instance.status()).toMatchObject({
+        state: "running",
+        source: "http://e2/play",
+        lastFrameAt: iso(shown),
+        layoutChangedAt: null,
+      });
+      // The run it took over from wrote more meanwhile: that is not the stream's any more.
+      await wrote(3, 2);
+      await wrote(2, 3);
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2", "g3:0", "g2:0", "g2:1", "g2:2"]);
     });
 
     it("gives the handover its whole time, counted from its start, whatever its source's layout does", async () => {
@@ -621,6 +662,19 @@ describe("Pipeline following what its source carries", () => {
       await instance.stop();
       expect(opened.map((source) => source.stopped)).toEqual([true, true, true]);
       expect(children.map((child) => child.killed)).toEqual([false, true, true, true]);
+    });
+
+    it("ends the input of a run it replaces before it signals its ffmpeg", async () => {
+      const instance = await playing();
+      // Another source takes the stream at once: the first run is no longer needed.
+      await instance.start("http://e2/play", false);
+      expect(opened[0]?.stopped).toBe(true);
+      expect(killed(0)).toBe(true);
+      expect(inputEnded(0)).toBe(true);
+      expect(children[0]?.signalledWhileReading).toBe(false);
+      // The run that took its place reads on.
+      expect(inputEnded(1)).toBe(false);
+      expect(killed(1)).toBe(false);
     });
 
     it("ends the input of every ffmpeg it stops, which acts on no signal while it waits for input", async () => {

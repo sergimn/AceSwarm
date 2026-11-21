@@ -40,6 +40,9 @@ export function segmentIndex(uri: string): number {
   return match?.[1] === undefined ? -1 : Number.parseInt(match[1], 10);
 }
 
+/** How many generations a playlist remembers it went on from: far more than could still write segments. */
+const MAX_LEFT_GENERATIONS = 64;
+
 /**
  * A live playlist that survives source changes. Each ffmpeg run ("generation") writes its own
  * playlist; this one stitches them together with `#EXT-X-DISCONTINUITY` markers and keeps the
@@ -53,6 +56,8 @@ export class VirtualPlaylist {
   private discontinuitySequence = 0;
   private lastGeneration: number | undefined;
   private lastIndex = -1;
+  /** The generations whose segments were followed by another one's, oldest first. */
+  private readonly left = new Set<number>();
 
   constructor(windowSize: number) {
     this.windowSize = windowSize;
@@ -63,20 +68,26 @@ export class VirtualPlaylist {
   }
 
   /**
-   * Adds the segments a generation currently lists. Segments already added are skipped, and
-   * an older generation can never append after a newer one. Returns how many it added.
+   * Adds the segments a generation currently lists. Segments already added are skipped, and a
+   * generation the playlist went on from can never add more: a playlist only goes forward. Which
+   * generation comes next is the caller's to say, not their numbers': a source that waited to take
+   * over has a lower number than a run the one before it started meanwhile. Returns how many it added.
    */
   append(generation: number, segments: PlaylistSegment[], uriPrefix: string, now = Date.now()): number {
-    if (this.lastGeneration !== undefined && generation < this.lastGeneration) {
+    if (this.left.has(generation)) {
       return 0;
     }
     let added = 0;
     for (const segment of segments) {
       const index = segmentIndex(segment.uri);
-      if (generation === this.lastGeneration && index <= this.lastIndex) {
+      const previous = this.lastGeneration;
+      if (generation === previous && index <= this.lastIndex) {
         continue;
       }
-      const discontinuity = this.lastGeneration !== undefined && generation !== this.lastGeneration;
+      const discontinuity = previous !== undefined && generation !== previous;
+      if (discontinuity) {
+        this.leave(previous);
+      }
       this.segments.push({
         uri: `${uriPrefix}${segment.uri}`,
         duration: segment.duration,
@@ -91,6 +102,13 @@ export class VirtualPlaylist {
       this.dropHead();
     }
     return added;
+  }
+
+  private leave(generation: number): void {
+    this.left.add(generation);
+    if (this.left.size > MAX_LEFT_GENERATIONS) {
+      this.left.delete(this.left.values().next().value ?? generation);
+    }
   }
 
   /**

@@ -499,6 +499,8 @@ export class Pipeline {
     const previous = this.active;
     this.active = pending;
     this.pending = undefined;
+    // Players get another source from here on: what the old one's layout did is not about it.
+    this.layoutChangedAt = undefined;
     if (previous !== undefined) {
       this.retire(previous);
     }

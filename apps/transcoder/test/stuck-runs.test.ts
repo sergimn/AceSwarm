@@ -398,10 +398,9 @@ describe("StuckRuns", () => {
       return play(watch, stallSeconds / 2, 2, nextPreview, next);
     }
 
-    it("re-encodes the full stream when its copy never wrote a segment, and so do the stream's later runs", async () => {
+    it("re-encodes the full stream when its copy never wrote a segment", async () => {
       const watch = runs();
       await firstStalls(watch);
-      expect(watch.copyFails).toBe(false);
       expect(await nextStalls(watch)).toEqual({
         reason: "full-output-stalled",
         reencode: true,
@@ -409,7 +408,6 @@ describe("StuckRuns", () => {
           "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
         details: { seconds: 30, frames: 0 },
       });
-      expect(watch.copyFails).toBe(true);
     });
 
     it("re-encodes with a long stall time too: the new run has that long, and 5 minutes more", async () => {
@@ -427,7 +425,6 @@ describe("StuckRuns", () => {
       await fullSegment(nextDirectory);
       expect(watch.check(next)).toBeUndefined();
       expect((await play(watch, 15, 2, nextPreview, next))?.reencode).toBe(false);
-      expect(watch.copyFails).toBe(false);
     });
 
     it("starts a copy again once a later run wrote a full segment, whatever stalls after", async () => {
@@ -445,7 +442,6 @@ describe("StuckRuns", () => {
       await previewSegment();
       expect(watch.check(third)).toBeUndefined();
       expect((await play(watch, 15, 2, previewSegment, third))?.reencode).toBe(false);
-      expect(watch.copyFails).toBe(false);
     });
 
     it("starts a copy again when the new run stalls long after", async () => {
@@ -483,7 +479,6 @@ describe("StuckRuns", () => {
       await nextPreview();
       expect(watch.check(transcoding)).toBeUndefined();
       expect((await play(watch, 15, 2, nextPreview, transcoding))?.reencode).toBe(false);
-      expect(watch.copyFails).toBe(false);
     });
   });
 });

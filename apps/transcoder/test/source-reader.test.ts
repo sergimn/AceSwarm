@@ -411,6 +411,39 @@ describe("readSource", () => {
     expect(engine.requests[0]?.aborted()).toBe(true);
   });
 
+  it("does not take the time ffmpeg needs for the data for the engine's silence", async () => {
+    // An ffmpeg that takes three times the idle timeout over what it is given first.
+    const slow = recordingSink();
+    const taken = Promise.withResolvers<undefined>();
+    let waits = true;
+    const sink: Sink = {
+      write: async (bytes) => {
+        await slow.write(bytes);
+        const first = waits;
+        waits = false;
+        await (first ? taken.promise : undefined);
+      },
+      end: slow.end,
+    };
+    const { ends, engine } = open({ idleTimeoutMs: 40, sink });
+    await vi.waitFor(() => {
+      expect(engine.bodies).toHaveLength(1);
+    });
+    engine.bodies[0]?.enqueue(concatBytes(tablePackets(H264), tsPackets(3, 256)));
+    await sleep(120);
+    expect(ends).toEqual([]);
+    expect(engine.requests[0]?.aborted()).toBe(false);
+    expect(slow.pids().length).toBeGreaterThan(0);
+
+    // Once ffmpeg took it, the engine's silence counts again, from then.
+    taken.resolve(undefined);
+    await sleep(20);
+    expect(ends).toEqual([]);
+    await vi.waitFor(() => {
+      expect(ends).toEqual([{ reason: "no data from the engine for 0s" }]);
+    });
+  });
+
   it("tells when the engine ends the stream, with what it held back passed on first", async () => {
     const { sink, ends, engine, feed } = open();
     await feed(tsPackets(8, 256));

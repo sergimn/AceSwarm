@@ -48,7 +48,7 @@ export interface Stuck {
   /**
    * The full output stalled again right after a restart, with a copied video that never gave it a
    * segment: the broadcast has no key frames to cut it at, so a copy would only stall again. The
-   * full stream is to be re-encoded, which makes key frames of its own (see `StuckRuns.copyFails`).
+   * full stream is to be re-encoded, which makes key frames of its own (see `SourceFeeds.copyFails`).
    */
   reencode: boolean;
   message: string;
@@ -146,11 +146,6 @@ export const processMemory: MemoryReader = (pid) => {
  * system's clock (a machine without a clock battery sets it once it is online) is no stall.
  */
 export class StuckRuns {
-  /**
-   * A copy of the stream's video got no segment into the full output, again right after a restart
-   * (see `Stuck.reencode`): the stream's later runs re-encode it, whatever its codec.
-   */
-  copyFails = false;
   private readonly limits: StuckLimits;
   private readonly pausedAfterMs: number;
   private readonly memoryOf: MemoryReader;
@@ -250,7 +245,6 @@ export class StuckRuns {
       this.lastStallAt !== undefined &&
       now - this.lastStallAt <= this.limits.fullOutputStallMs + STALLED_AGAIN_WITHIN_MS;
     this.lastStallAt = now;
-    this.copyFails ||= reencode;
     return {
       reason: "full-output-stalled",
       reencode,
