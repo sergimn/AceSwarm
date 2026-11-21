@@ -488,12 +488,15 @@ class EngineReader implements SourceReader {
    * An access unit of the run's video that was held back tells whether a copy can be cut at it. At
    * one that can, the owner may hand over another sink: the old one ends right before the unit, and
    * the new one begins with the stream's tables and then the unit, as at a change of layout.
-   * Otherwise the unit goes on as it would have.
+   * Otherwise the unit goes on as it would have. The owner isn't asked while the tables name
+   * another layout than the run reads (a change that waits its turn, see `FollowBrake`): a new run
+   * would begin with those tables while the stream still comes as the run reads it.
    */
   private cutPoint(unit: HeldUnit, out: Piece[]): void {
     const { point } = unit;
-    const next = point === "none" ? undefined : this.request.cutPoints?.found(unit.pts, point);
     const { fed } = this;
+    const asRead = fed !== undefined && this.tables.layout?.key === fed.key;
+    const next = point === "none" || !asRead ? undefined : this.request.cutPoints?.found(unit.pts, point);
     if (next === undefined || next === this.sink || fed === undefined) {
       this.again(unit.packets, out);
       return;

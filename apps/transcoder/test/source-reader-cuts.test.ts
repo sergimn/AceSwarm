@@ -291,5 +291,64 @@ describe("readSource watching for where a copy of the video can be cut", () => {
     const tables = readPackets(next.bytes().subarray(0, 2 * 188));
     // The PMT it begins with names the PIDs the streams are on now.
     expect(Buffer.from(tables[1]?.payload ?? []).includes(Buffer.from([0x1b, 0xe0, 211]))).toBe(true);
+    // What the old encoder still sends on the PIDs the streams left is no one's, in the new run too.
+    const stale = new Encoder({ video: 256, audio: 257, start: START + 10 * FRAME });
+    await feed(stale.picture("p"), there.picture("p"), stale.picture("idr"));
+    expect(new Set(next.pids())).toEqual(new Set([0, 0x10_00, 211, 221]));
+  });
+
+  it("asks for no hand-over while the tables name a change that waits its turn, and hands over once they name what the run reads", async () => {
+    const { sink, feed, found, handTo, layouts, clock, encoder } = watched();
+    await feed(tablePackets(H264), encoder.picture("idr"), encoder.picture("p"));
+    clock.now += 500;
+    // Too soon after the start: the change waits its turn, and the stream stays where the run reads it.
+    await feed(tablePackets(MOVED, 0x10_00, 1), encoder.picture("p"));
+    clock.now += 500;
+    const next = recordingSink();
+    handTo.sink = next;
+    await feed(encoder.picture("idr"), encoder.picture("p"));
+    expect(found).toEqual([START]);
+    expect(sink.ended).toBe(false);
+    clock.now += 500;
+    // The tables are back on what the run reads before the change's turn came.
+    const back = concatBytes(tablePackets(H264, 0x10_00, 2), encoder.picture("p"));
+    const after = encoder.picture("idr");
+    await feed(back, after);
+
+    expect(found).toEqual([START, START + 6 * FRAME]);
+    expect(sink.ended).toBe(true);
+    // It begins with the tables of what it reads.
+    expect(same(afterTables(next), after)).toBe(true);
+    const pmt = Buffer.from(readPackets(next.bytes().subarray(0, 2 * 188))[1]?.payload ?? []);
+    expect(pmt.includes(Buffer.from([0x1b, 0xe1, 0x00]))).toBe(true);
+    clock.now += 2500;
+    await feed(encoder.picture("p"));
+    // The stream's first tables, and no change after them.
+    expect(layouts).toHaveLength(1);
+  });
+
+  it("hands over at no cut point of the old encoder while a move waits its turn, and after the move with its tables", async () => {
+    const { sink, feed, found, handTo, moves, layouts, clock, encoder } = watched();
+    await feed(tablePackets(H264), encoder.picture("idr"), encoder.picture("p"));
+    clock.now += 500;
+    await feed(tablePackets(MOVED, 0x10_00, 1), encoder.picture("p"));
+    clock.now += 500;
+    const next = recordingSink();
+    handTo.sink = next;
+    // The old encoder's last pictures, a cut point among them.
+    await feed(encoder.picture("idr"), encoder.picture("p"));
+    expect(found).toEqual([START]);
+    clock.now += 2100;
+    // The change's turn came; the new encoder starts on the move's PIDs, which carried nothing meanwhile.
+    const there = new Encoder({ video: 211, audio: 221, start: 5_000_000 });
+    await feed(there.picture("idr"), there.picture("p"), there.picture("idr"), there.picture("p"));
+
+    expect(layouts).toHaveLength(1);
+    expect(moves).toHaveLength(1);
+    expect(found).toEqual([START, 5_000_000 + 2 * FRAME]);
+    expect(sink.ended).toBe(true);
+    const tables = readPackets(next.bytes().subarray(0, 2 * 188));
+    expect(Buffer.from(tables[1]?.payload ?? []).includes(Buffer.from([0x1b, 0xe0, 211]))).toBe(true);
+    expect(new Set(next.pids())).toEqual(new Set([0, 0x10_00, 211, 221]));
   });
 });
