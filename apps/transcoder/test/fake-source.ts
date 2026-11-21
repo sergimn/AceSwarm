@@ -1,4 +1,5 @@
 import type { Layout } from "../src/ts-tables.ts";
+import type { CutPoint } from "../src/h264-cut-points.ts";
 import type { OpenSource, Sink, SourceRequest } from "../src/source-reader.ts";
 
 /** A source a test drives by hand: nothing comes of it, as with an engine still looking for peers. */
@@ -19,6 +20,12 @@ export interface FakeSource {
    * the streams moved to other PIDs, or the ones it reads stayed where they were (`inPlace`).
    */
   move: (layout: Layout, inPlace?: boolean) => void;
+  /**
+   * An access unit of the video at which ffmpeg can cut a copy begins (an IDR picture unless told
+   * otherwise), with its time stamp, as the reader tells it while the owner watches for those (see
+   * `CutPoints`). Returns whether the owner handed over another sink there.
+   */
+  cutPoint: (pts: number | undefined, point?: Exclude<CutPoint, "none">) => boolean;
   /** Ends the source, as when the engine closes the stream. */
   end: (reason: string) => void;
 }
@@ -52,6 +59,15 @@ export function fakeSources(): { open: OpenSource; opened: FakeSource[] } {
           if (previous !== undefined) {
             request.onMove?.({ layout, previous, inPlace });
           }
+        },
+        cutPoint: (pts, point = "idr") => {
+          const next = request.cutPoints?.watching() === true ? request.cutPoints.found(pts, point) : undefined;
+          if (next === undefined || next === source.sink) {
+            return false;
+          }
+          source.sink.end();
+          source.sink = next;
+          return true;
         },
         end: (reason) => {
           request.onEnd({ reason });

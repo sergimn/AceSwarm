@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cutsAt } from "../src/h264-cut-points.ts";
+import { cutPointOf } from "../src/h264-cut-points.ts";
 
 const START = [0, 0, 0, 1];
 const SHORT_START = [0, 0, 1];
@@ -86,28 +86,30 @@ const POINT_SEI = sei({ type: RECOVERY_POINT, payload: recoveryPoint(0) });
 const LATEST_POINT_SEI = sei({ type: RECOVERY_POINT, payload: recoveryPoint(65_535) });
 const TOO_LATE_POINT_SEI = sei({ type: RECOVERY_POINT, payload: recoveryPoint(65_536) });
 
-describe("cutsAt", () => {
+describe("cutPointOf", () => {
   it("cuts at an IDR slice, with or without parameter sets before it", () => {
-    expect(cutsAt(unit(AUD, SPS, PPS, IDR))).toBe(true);
-    expect(cutsAt(unit(IDR))).toBe(true);
-    expect(cutsAt(Uint8Array.from([...SHORT_START, ...AUD, ...SHORT_START, ...IDR]))).toBe(true);
+    expect(cutPointOf(unit(AUD, SPS, PPS, IDR))).toBe("idr");
+    expect(cutPointOf(unit(IDR))).toBe("idr");
+    // With a recovery point too, it is an IDR picture all the same.
+    expect(cutPointOf(unit(AUD, POINT_SEI, IDR))).toBe("idr");
+    expect(cutPointOf(Uint8Array.from([...SHORT_START, ...AUD, ...SHORT_START, ...IDR]))).toBe("idr");
   });
 
   it("does not cut at a slice that no recovery point comes before, I slice or not", () => {
-    expect(cutsAt(unit(AUD, SLICE))).toBe(false);
+    expect(cutPointOf(unit(AUD, SLICE))).toBe("none");
     // An I slice in a stream with several reference frames: ffmpeg's parser flags none of it.
-    expect(cutsAt(unit(AUD, SPS, PPS, [0x61, 0x88, 0x80]))).toBe(false);
+    expect(cutPointOf(unit(AUD, SPS, PPS, [0x61, 0x88, 0x80]))).toBe("none");
   });
 
   it("cuts at a slice after a recovery point, also after other messages and in a data partition", () => {
-    expect(cutsAt(unit(AUD, POINT_SEI, SLICE))).toBe(true);
+    expect(cutPointOf(unit(AUD, POINT_SEI, SLICE))).toBe("recovery-point");
     const timing = { type: PIC_TIMING, payload: [0x00, 0x00, 0x08, 0x10] };
     const userData = { type: UNREGISTERED, payload: USER_DATA };
     const point = { type: RECOVERY_POINT, payload: recoveryPoint(3) };
     const together = sei(timing, userData, point);
-    expect(cutsAt(unit(AUD, together, SLICE))).toBe(true);
+    expect(cutPointOf(unit(AUD, together, SLICE))).toBe("recovery-point");
     const apart = [sei(timing), sei(point)];
-    expect(cutsAt(unit(AUD, ...apart, PARTITION_A))).toBe(true);
+    expect(cutPointOf(unit(AUD, ...apart, PARTITION_A))).toBe("recovery-point");
   });
 
   it("reads the messages without the bytes that prevent start codes in them", () => {
@@ -117,28 +119,28 @@ describe("cutsAt", () => {
     const nal = sei(userData, { type: RECOVERY_POINT, payload: recoveryPoint(0) });
     // Four added, and one of the user data's own.
     expect(nal.filter((byte) => byte === 3)).toHaveLength(5);
-    expect(cutsAt(unit(AUD, nal, SLICE))).toBe(true);
+    expect(cutPointOf(unit(AUD, nal, SLICE))).toBe("recovery-point");
   });
 
   it("takes a recovery point only as ffmpeg does: within the frame numbers it allows, and in a whole message", () => {
-    expect(cutsAt(unit(LATEST_POINT_SEI, SLICE))).toBe(true);
-    expect(cutsAt(unit(TOO_LATE_POINT_SEI, SLICE))).toBe(false);
+    expect(cutPointOf(unit(LATEST_POINT_SEI, SLICE))).toBe("recovery-point");
+    expect(cutPointOf(unit(TOO_LATE_POINT_SEI, SLICE))).toBe("none");
     // A message that says it is longer than what the unit has left: ffmpeg stops reading there.
     const cut = [...POINT_SEI];
     cut[2] = 9;
-    expect(cutsAt(unit(cut, SLICE))).toBe(false);
+    expect(cutPointOf(unit(cut, SLICE))).toBe("none");
   });
 
   it("tells nothing until the first slice: a unit cut off before it is undecided", () => {
-    expect(cutsAt(unit(AUD, SPS, PPS))).toBeUndefined();
-    expect(cutsAt(unit(AUD, POINT_SEI))).toBeUndefined();
-    expect(cutsAt(Uint8Array.from([0, 0]))).toBeUndefined();
-    expect(cutsAt(new Uint8Array(0))).toBeUndefined();
+    expect(cutPointOf(unit(AUD, SPS, PPS))).toBeUndefined();
+    expect(cutPointOf(unit(AUD, POINT_SEI))).toBeUndefined();
+    expect(cutPointOf(Uint8Array.from([0, 0]))).toBeUndefined();
+    expect(cutPointOf(new Uint8Array(0))).toBeUndefined();
   });
 
   it("forgets nothing between units: a recovery point counts only for the slice of its own unit", () => {
     // Each call is one access unit, as ffmpeg's parser starts afresh with every frame.
-    expect(cutsAt(unit(POINT_SEI, SLICE))).toBe(true);
-    expect(cutsAt(unit(SLICE))).toBe(false);
+    expect(cutPointOf(unit(POINT_SEI, SLICE))).toBe("recovery-point");
+    expect(cutPointOf(unit(SLICE))).toBe("none");
   });
 });

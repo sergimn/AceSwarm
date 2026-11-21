@@ -18,7 +18,7 @@ function msBetween(from: number, to: number): number {
 /**
  * Decides when a stream whose full output is re-encoded because a copy of its video couldn't be cut
  * (see `SourceFeeds.copyFails`) can copy it again: once its broadcast sends access units ffmpeg
- * can cut a copy at (see `cutsAt`) often enough, and has done so for a while.
+ * can cut a copy at (see `cutPointOf`) often enough, and has done so for a while.
  *
  * It goes by the time stamps of those units, not by when they arrive: an engine sends what it has
  * buffered faster than real time when a session starts, which would make cut points look closer

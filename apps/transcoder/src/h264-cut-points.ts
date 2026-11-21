@@ -9,27 +9,31 @@ const SEI_RECOVERY_POINT = 6;
 const MAX_RECOVERY_FRAMES = 1 << 16;
 
 /**
+ * What an access unit of a copied H.264 video is to ffmpeg's HLS muxer (see `cutPointOf`): a
+ * picture it can begin a segment at, an IDR one or one after a recovery point, or neither.
+ */
+export type CutPoint = "idr" | "recovery-point" | "none";
+
+/**
  * Whether ffmpeg can begin a segment of a copied H.264 video at this access unit: whether its H.264
  * parser (`libavcodec/h264_parser.c`, ffmpeg 9) flags the unit's packet as a key frame, which is
  * where the HLS muxer cuts. It does for an IDR slice, and for a slice that a recovery point SEI
  * comes before in the same unit. Its third rule, an I slice of a stream with a single reference
- * frame, is left out: it needs the stream's parameter sets, and the decoder doesn't take those
- * frames for key frames either (`-skip_frame nokey` keeps IDR and recovery points only), so
- * without the rule a copy is never believed to be cuttable where key frames only decoding would
- * see nothing.
+ * frame, is left out, as it needs the stream's parameter sets. So every unit taken for a cut point
+ * is one ffmpeg cuts at, and only some it cuts at may be missed.
  *
  * `head` is the start of the access unit as its PES carries it (start codes, then NAL units), up
  * to its first slice. Returns undefined when it ends before that slice: it tells nothing yet.
  */
-export function cutsAt(head: Uint8Array): boolean | undefined {
+export function cutPointOf(head: Uint8Array): CutPoint | undefined {
   let recoveryPoint = false;
   for (const nal of nalUnits(head)) {
     const type = (nal[0] ?? 0) & 0x1f;
     if (type === NAL_IDR_SLICE) {
-      return true;
+      return "idr";
     }
     if (type === NAL_SLICE || type === NAL_PARTITION_A) {
-      return recoveryPoint;
+      return recoveryPoint ? "recovery-point" : "none";
     }
     if (type === NAL_SEI) {
       recoveryPoint ||= hasRecoveryPoint(withoutEmulationPrevention(nal.subarray(1)));

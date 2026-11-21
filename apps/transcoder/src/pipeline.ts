@@ -114,9 +114,14 @@ export class Pipeline {
         this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
         run.framesAtMove = run.frames;
       },
+      keyFramesBack: () => {
+        this.keyFrames.allFrames = false;
+      },
     };
-    this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);
-    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
+    const stuck = settings.stuck ?? DEFAULT_STUCK_LIMITS;
+    const openSource = options.openSource ?? readSource;
+    this.feeds = new SourceFeeds(host, openSource, this.logger, this.now, stuck.fullOutputStallMs);
+    this.stuck = new StuckRuns(stuck, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
