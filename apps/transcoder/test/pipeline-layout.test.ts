@@ -1,10 +1,11 @@
-import type { ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { closeSync, constants, openSync, rmSync, writeSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { setImmediate as nextTurn } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import { createLogger, type Logger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
@@ -22,6 +23,16 @@ type FakeChild = ChildProcess & { signalledWhileReading: boolean };
  * from a pipe, and while it waits there for more it acts on no signal: a stop must end the input
  * first, or ffmpeg stays until it is killed three seconds later.
  */
+/** The text of a run's playlist with `count` segments. */
+const playlistOf = (count: number): string =>
+  [
+    "#EXTM3U",
+    "#EXT-X-TARGETDURATION:2",
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    ...Array.from({ length: count }, (_, index) => `#EXTINF:2.000,\nseg_${String(index).padStart(6, "0")}.ts`),
+    "",
+  ].join("\n");
+
 function quietProcess(): FakeChild {
   const child = new EventEmitter() as FakeChild;
   const stdin = new PassThrough();
@@ -58,6 +69,8 @@ describe("Pipeline following what its source carries", () => {
   const handovers: string[] = [];
   /** Every connection to a source, in order: a run that takes over mid-stream opens none. */
   let opened: FakeSource[] = [];
+  /** How to end each read that a test made wait (see `holdPlaylist`). */
+  const heldOpen: (() => void)[] = [];
   const clock = { now: 1_000_000 };
 
   beforeEach(async () => {
@@ -70,8 +83,12 @@ describe("Pipeline following what its source carries", () => {
   });
 
   afterEach(async () => {
-    vi.useRealTimers();
+    // A read that still waits on a pipe (see `holdPlaylist`) ends here, whatever its test did.
+    for (const end of heldOpen.splice(0)) {
+      end();
+    }
     await pipeline?.stop();
+    vi.useRealTimers();
     await rm(hlsDir, { recursive: true, force: true });
     // Whatever a test did, no ffmpeg was left waiting for input with only a signal to end it.
     expect(children.map((child) => child.signalledWhileReading)).toEqual(children.map(() => false));
@@ -139,6 +156,51 @@ describe("Pipeline following what its source carries", () => {
       }
       await writeFile(join(directory, "index.m3u8"), `${lines.join("\n")}\n`);
     }
+  }
+
+  /**
+   * Makes the playlist of the first run's full output a named pipe, so that the pipeline's next read
+   * of it waits: what happens to the run meanwhile is up to the test. `reading` settles once that read
+   * waits, `aside` puts the pipe out of the way of later reads (the one that waits keeps it), and
+   * `end` lets the read end with a playlist of `count` segments. The pipeline's own timer must not
+   * read the pipe too: such a test fakes `setInterval` before it starts its pipeline.
+   */
+  function holdPlaylist(): {
+    reading: () => Promise<void>;
+    aside: () => void;
+    end: (count: number) => void;
+  } {
+    const path = join(hlsDir, "s1", "g1", "full", "index.m3u8");
+    rmSync(path);
+    execFileSync("mkfifo", [path]);
+    let writer: number | undefined;
+    const close = (): void => {
+      if (writer === undefined) {
+        return;
+      }
+      closeSync(writer);
+      writer = undefined;
+    };
+    heldOpen.push(close);
+    return {
+      reading: async () => {
+        while (writer === undefined) {
+          try {
+            // Fails until a reader has the pipe open.
+            writer = openSync(path, constants.O_WRONLY | constants.O_NONBLOCK);
+          } catch {
+            await sleep(2);
+          }
+        }
+      },
+      aside: () => {
+        rmSync(path);
+      },
+      end: (count) => {
+        writeSync(writer ?? -1, playlistOf(count));
+        close();
+      },
+    };
   }
 
   async function frames(frame: number, run: number): Promise<void> {
@@ -246,6 +308,46 @@ describe("Pipeline following what its source carries", () => {
       expect(instance.status()).toMatchObject({ mode: "copy", videoCodec: "h264" });
       await instance.start("http://e4/play", false);
       expect(modeOf(5)).toBe("copy");
+    });
+
+    it("forgets the playing source's change when another source is started in its place", async () => {
+      const instance = await playing();
+      clock.now += 5000;
+      expect(opened[0]?.layout(layoutOf(211))).toBe(true);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
+      // As the controller does for a stream that doesn't play: no handover, the new source takes its place.
+      await instance.start("http://e2/play", false);
+      expect(instance.status()).toMatchObject({ source: "http://e2/play", layoutChangedAt: null });
+    });
+
+    it("publishes nothing of a run that was replaced while its segments were looked up", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const instance = await playing();
+      const held = holdPlaylist();
+      const syncing = instance.sync();
+      await held.reading();
+      // Another source takes the stream while the run's playlist is still being read.
+      await instance.start("http://e2/play", false);
+      held.end(5);
+      await syncing;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
+    });
+
+    it("publishes nothing of a run whose time to write out ended while its segments were looked up", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      const instance = await playing();
+      expect(opened[0]?.layout(layoutOf(211, HEVC))).toBe(true);
+      const held = holdPlaylist();
+      const syncing = instance.sync();
+      await held.reading();
+      // Meanwhile the run's time is up, and another sync (for a player's request) is done with it.
+      held.aside();
+      await wrote(1, 3);
+      clock.now += 3000;
+      await instance.sync();
+      held.end(5);
+      await syncing;
+      expect(await playlist(instance)).toEqual(["g1:0", "g1:1", "g1:2"]);
     });
 
     it("follows ffmpeg's own finding where the tables don't tell, in both directions", async () => {

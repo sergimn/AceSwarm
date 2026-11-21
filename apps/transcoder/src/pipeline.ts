@@ -157,6 +157,8 @@ export class Pipeline {
     if (previous !== undefined) {
       this.retire(previous);
     }
+    // Players get this source from here on: what the last one's layout did is not about it.
+    this.layoutChangedAt = undefined;
     this.replace("active", launched);
   }
 
