@@ -623,6 +623,29 @@ describe("PidMoves", () => {
     expect(run.moves.expire()).toBeUndefined();
   });
 
+  it("counts the patience of a move that keeps coming back from its first look, until a new run begins", () => {
+    const { run, encoder } = playing();
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.feed(moved().picture("p"));
+    // The tables go back after a second, with data held for the move: it comes back a second later.
+    run.clock.now = 1000;
+    expect(run.moves.giveUp()).not.toHaveLength(0);
+    run.clock.now = 2000;
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.clock.now = 2499;
+    expect(run.moves.expire()).toBeUndefined();
+    run.clock.now = 2500;
+    expect(run.moves.expire()?.why).toBe("no picture to go on from in 2.5s");
+
+    // A run that begins looks at the same move with its patience whole.
+    run.moves.begin(BASE, [encoder.picture("idr")]);
+    expect(run.moves.consider(NEXT)).toBe("looking");
+    run.clock.now = 4999;
+    expect(run.moves.expire()).toBeUndefined();
+    run.clock.now = 5000;
+    expect(run.moves.expire()).toBeDefined();
+  });
+
   it("gives up after 4 MB without a picture to go on from", () => {
     const { run } = playing();
     run.moves.consider(NEXT);

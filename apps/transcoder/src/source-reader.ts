@@ -423,6 +423,8 @@ class EngineReader implements SourceReader {
     this.looking = undefined;
     if ("carried" in verdict) {
       this.fed = looking;
+      // As for a new run (see `startOver`): what still comes on the PIDs the stream left is no one's.
+      this.dropped = this.dropped.union(streamPids(fed)).difference(streamPids(looking));
       this.request.onMove?.({ layout: looking, previous: fed, inPlace: false });
       out.push({ sink: this.sink, bytes: verdict.carried });
     } else {

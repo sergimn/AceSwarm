@@ -285,6 +285,12 @@ export class PidMoves {
   private lead: { pid: number; watched: Watched } | undefined;
   private moved: Moved | undefined;
   private search: Search | undefined;
+  /**
+   * The last move that was given up because the stream changed again while data came on its PIDs:
+   * its layout, since when it was looked at, and when it was given up. Tables that keep switching
+   * between the run's layout and that move must not start its patience over each time (see `consider`).
+   */
+  private lastLook: { key: string; since: number; at: number } | undefined;
 
   constructor(now: () => number) {
     this.now = now;
@@ -301,6 +307,7 @@ export class PidMoves {
     this.lead = undefined;
     this.moved = undefined;
     this.search = undefined;
+    this.lastLook = undefined;
     let checkable = true;
     for (const program of layout.programs) {
       for (const entry of program.streams) {
@@ -378,7 +385,7 @@ export class PidMoves {
       leadPid,
       held: [],
       bytes: 0,
-      since: this.now(),
+      since: this.lookedSince(next),
       reader: new SettingsReader(lead.watched.kind),
       candidate: undefined,
       start: undefined,
@@ -387,6 +394,19 @@ export class PidMoves {
     // While it is looked at, the run's PIDs go on as they do, and nothing else is let in.
     this.moved ??= this.inPlace();
     return "looking";
+  }
+
+  /**
+   * Since when the move to `next` is looked at: now, or since the same move was first looked at, if
+   * it was given up a moment ago with data on its PIDs. Tables that keep switching between the run's
+   * layout and a move while the data is on the move's PIDs would otherwise keep the run waiting for
+   * as long as they switch, each look shorter than the patience, and no new run would take over.
+   * Tables that switch while the data stays where the run reads it hold nothing and cost nothing.
+   */
+  private lookedSince(next: Layout): number {
+    const { lastLook } = this;
+    const now = this.now();
+    return lastLook?.key === next.key && now - lastLook.at < PATIENCE_MS ? lastLook.since : now;
   }
 
   /** Gives up on a move that took too long to show a picture to go on from. */
@@ -402,8 +422,14 @@ export class PidMoves {
   giveUp(): Uint8Array[] {
     const { search } = this;
     this.search = undefined;
-    this.moved = search === undefined ? this.moved : search.before;
-    return search?.held.map((packet) => packet.bytes) ?? [];
+    if (search === undefined) {
+      return [];
+    }
+    this.moved = search.before;
+    if (search.held.length > 0) {
+      this.lastLook = { key: search.layout.key, since: search.since, at: this.now() };
+    }
+    return search.held.map((packet) => packet.bytes);
   }
 
   /**
