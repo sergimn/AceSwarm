@@ -61,7 +61,7 @@
           "refId": "streams"
         },
         "definition": "query_result((aceswarm_stream_info and on (stream) last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range])) or (last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range]) unless on (stream) aceswarm_stream_info))",
-        "regex": "/name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
         "description": "The streams that were enabled at some time in the dashboard's range, by name. A deleted stream stays while the range covers its life.",
         "includeAll": true,
         "multi": true,
@@ -692,8 +692,7 @@
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
-          },
-          "interval": "5m"
+          }
         }
       ],
       "fieldConfig": {
@@ -722,7 +721,8 @@
         "tooltip": {
           "mode": "multi"
         }
-      }
+      },
+      "interval": "5m"
     }
   ]
 }
