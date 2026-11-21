@@ -1025,6 +1025,14 @@ describe("PidMoves", () => {
     });
   });
 
+  it("starts a new run for a move that had to wait when packets came on its clock's own PID meanwhile", () => {
+    const { run } = playing(BASE_CLOCKED);
+    expect(run.moves.consider(NEXT_CLOCKED, new Set([256, 257, 300, 400]))).toEqual({
+      no: "the change had to wait its turn, and the run got the stream as it came meanwhile",
+    });
+    expect(run.moves.consider(NEXT_CLOCKED, new Set([256, 257, 300]))).toBe("looking");
+  });
+
   it("starts a new run for a change that had to wait and is no move, whatever came meanwhile", () => {
     const { run } = playing();
     const hevc = layoutOf([
