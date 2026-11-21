@@ -102,7 +102,7 @@ export class StreamFailover {
         !this.host.sourceStale() &&
         this.lastVideoAt !== undefined &&
         this.host.now() - this.lastVideoAt < STANDBY_ACTIVE_MS,
-      sparePath: this.engines.sparePath,
+      sparePath: this.engines.kept?.path,
       transcoderSources: [pipeline?.source, pipeline?.pendingSource].filter(
         (source): source is string => typeof source === "string" && source !== "",
       ),

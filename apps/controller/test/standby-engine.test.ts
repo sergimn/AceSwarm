@@ -22,9 +22,9 @@ test("a standby being removed still owns its engine until the container is gone"
   const removal = Promise.withResolvers<undefined>();
   const removed: string[] = [];
   const engines = {
-    remove: async (handle: Pick<EngineHandle, "containerId">) => {
+    remove: async (handle: Pick<EngineHandle, "containerId">, reason: string, why: string) => {
       await removal.promise;
-      removed.push(handle.containerId);
+      removed.push(`${handle.containerId} ${reason}: ${why}`);
     },
   } as unknown as EngineManager;
   const netgw = { assign: () => Promise.resolve(), unassign: () => Promise.resolve() } as unknown as NetgwClient;
@@ -48,6 +48,7 @@ test("a standby being removed still owns its engine until the container is gone"
 
   removal.resolve(undefined);
   await disposed;
-  expect(removed).toEqual([engine.containerId]);
+  // Its engine's run ends as a standby's, with what the standby went for.
+  expect(removed).toEqual([`${engine.containerId} standby-removed: hot standby is off`]);
   expect(standby.owns(engine)).toBe(false);
 });

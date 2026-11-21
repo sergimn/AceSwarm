@@ -5,6 +5,8 @@ import { NetgwClient, TranscoderClient } from "./clients.ts";
 import { loadConfig } from "./config.ts";
 import { DockerClient } from "./docker.ts";
 import { EngineResourceMonitor } from "./engine-resources.ts";
+import { EnginePlaces } from "./engine-places.ts";
+import { EngineRuns } from "./engine-runs.ts";
 import { EngineManager } from "./engines.ts";
 import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
@@ -29,6 +31,15 @@ const docker = new DockerClient(config.DOCKER_HOST);
 const ace = new AcestreamClient();
 const transcoder = new TranscoderClient(config.TRANSCODER_URL);
 const netgw = new NetgwClient(config.NETGW_URL);
+// How long each engine ran and why it was restarted or removed: a histogram, and a log line with
+// the stream, the engine's role and its path. The metrics and the places exist by the time one ends.
+const engineRuns = new EngineRuns({
+  observe: (kind, reason, seconds) => {
+    metrics.engineLifetime.observe({ kind, reason }, seconds);
+  },
+  placeOf: (engine) => enginePlaces.placeOf(engine),
+  logger,
+});
 const engines = new EngineManager(
   docker,
   ace,
@@ -47,6 +58,7 @@ const engines = new EngineManager(
     readyTimeoutMs: config.ENGINE_READY_TIMEOUT_SECONDS * 1000,
   },
   logger,
+  engineRuns,
 );
 
 const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
@@ -56,9 +68,14 @@ const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
     onOomKill: (stream) => {
       metrics.engineOomKills.inc({ stream });
     },
+    runs: engineRuns,
   },
   logger,
 );
+
+// What each engine container is for, which the engine gauges carry as labels and the log says of
+// an engine that is restarted or removed.
+const enginePlaces = new EnginePlaces(() => orchestrator.keptEngines());
 
 // The metrics read the orchestrator lazily at scrape time, after it exists.
 const metrics: ControllerMetrics = new ControllerMetrics(
@@ -70,6 +87,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
     sharedEngines: () => sharedEngines.view(),
     engines: () => engineResources.running(),
     runningSince: (stream) => orchestrator.runningSince(stream),
+    enginePlaces: (engines, streams) => enginePlaces.resolve(engines, streams),
   },
 );
 const sharedEngines = new SharedEngines({
@@ -146,6 +164,10 @@ const sampleEngines = (): void => {
   engineSampling.busy = true;
   void engineResources
     .sample()
+    .then(() => {
+      // Not only at a scrape: the log tells an engine's place also when nothing collects metrics.
+      enginePlaces.resolve(engineResources.latest(), orchestrator.snapshot().streams);
+    })
     .catch((error: unknown) => {
       logger.debug({ err: error }, "could not sample engine resources");
     })

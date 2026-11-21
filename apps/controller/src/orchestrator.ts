@@ -11,6 +11,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import { isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
 import type { AcestreamClient } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
+import type { KeptEngine } from "./engine-places.ts";
 import type { EngineManager } from "./engines.ts";
 import { Mutex } from "./json-file.ts";
 import type { ControllerMetrics } from "./metrics.ts";
@@ -238,6 +239,14 @@ export class Orchestrator {
     return this.deps.viewers.list();
   }
 
+  /** The engines that streams kept after a failed move to try it again, with the path each is on. */
+  keptEngines(): KeptEngine[] {
+    return this.supervisors
+      .values()
+      .flatMap(({ engines }) => (engines.kept === undefined ? [] : [engines.kept]))
+      .toArray();
+  }
+
   networkPolicy(): NetworkPolicy {
     return this.deps.policy.get();
   }
@@ -334,7 +343,7 @@ export class Orchestrator {
     } else if (removed) {
       // Behind a teardown still going, which removes the same engines.
       const previous = this.teardowns.get(id) ?? Promise.resolve();
-      void previous.then(async () => this.deps.engines.removeAllFor(id)).catch(() => undefined);
+      void previous.then(async () => this.deps.engines.removeAllFor(id, "stopped")).catch(() => undefined);
     }
     if (removed) {
       this.logger.info({ stream: id }, "stream removed");

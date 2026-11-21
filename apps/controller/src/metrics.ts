@@ -1,6 +1,8 @@
 import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
-import { Counter, Gauge, type Registry } from "@prometheus-io/client";
+import { Counter, Gauge, Histogram, type Registry } from "@prometheus-io/client";
 import type { EngineCount, EngineMemory } from "./engine-resources.ts";
+import type { EnginePlace } from "./engine-places.ts";
+import { ENGINE_END_REASONS } from "./engine-runs.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
@@ -11,6 +13,11 @@ export interface MetricSources {
   engines?: () => EngineCount | undefined;
   /** When a stream was last started (see `Orchestrator.runningSince`); undefined while it is disabled. */
   runningSince?: (stream: string) => number | undefined;
+  /**
+   * The place of each of these engines, in their order (see `EnginePlaces.resolve`): what each is
+   * for, and its network path. Without it, the engines' role and path labels are empty.
+   */
+  enginePlaces?: (engines: readonly EngineMemory[], streams: readonly StreamView[]) => EnginePlace[];
 }
 
 /** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
@@ -80,11 +87,25 @@ function setLiveEdgeGauges(
   }
 }
 
-type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<"stream" | "engine">>;
+/**
+ * The labels of the engine gauges. `engine` is the container's name, which every new engine
+ * changes; `role` and `path` say what the engine is for (see `EngineRole`) and stay the same from
+ * one engine to the next, so a dashboard that leaves `engine` out draws one line for each place.
+ */
+const ENGINE_LABELS = ["stream", "engine", "role", "path"] as const;
 
-function setEngineGauges(gauges: EngineGauges, engines: EngineMemory[]): void {
-  for (const engine of engines) {
-    const labels = { stream: engine.stream, engine: engine.engine };
+type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<(typeof ENGINE_LABELS)[number]>>;
+
+function setEngineGauges(
+  gauges: EngineGauges,
+  engines: readonly EngineMemory[],
+  streams: readonly StreamView[],
+  placesOf: MetricSources["enginePlaces"],
+): void {
+  const places = placesOf?.(engines, streams) ?? [];
+  for (const [index, engine] of engines.entries()) {
+    const place = places[index];
+    const labels = { stream: engine.stream, engine: engine.engine, role: place?.role ?? "", path: place?.path ?? "" };
     gauges.memory.set(labels, engine.usedBytes);
     gauges.memoryLimit.set(labels, engine.limitBytes);
     gauges.cache.set(labels, engine.cacheBytes);
@@ -105,6 +126,8 @@ export class ControllerMetrics {
   readonly engineStarts: Counter<"stream">;
   readonly engineOomKills: Counter<"stream">;
   readonly sharedEngineRestarts: Counter<"path" | "reason">;
+  /** How long each run of an engine lasted, by kind of engine and why it ended (see `EngineRuns`). */
+  readonly engineLifetime: Histogram<"kind" | "reason">;
 
   constructor(
     registry: Registry,
@@ -152,6 +175,22 @@ export class ControllerMetrics {
       labelNames: ["path", "reason"],
       registers,
     });
+    this.engineLifetime = new Histogram({
+      name: "aceswarm_engine_lifetime_seconds",
+      help:
+        "How long engines ran until they were restarted or removed, per kind of engine (own, shared) " +
+        "and reason; an engine that is restarted in its container counts once per run",
+      labelNames: ["kind", "reason"],
+      // Half a minute to a month: an engine that fails lasts minutes, a healthy one days or weeks.
+      buckets: [30, 60, 120, 300, 900, 3600, 21_600, 86_400, 604_800, 2_592_000],
+      registers,
+    });
+    // From zero, so that the first run that ends for a reason shows as an increase.
+    for (const [kind, reasons] of Object.entries(ENGINE_END_REASONS)) {
+      for (const reason of reasons) {
+        this.engineLifetime.zero({ kind, reason });
+      }
+    }
 
     // prom-client calls collect() on every scrape; one gauge refreshes all of them. It is
     // registered before the gauges it fills, because a scrape reads each metric in turn: the ones
@@ -219,7 +258,12 @@ export class ControllerMetrics {
           );
           sharedStandbys.set({ path: engine.path, engine: engine.engine }, engine.standbys);
         }
-        setEngineGauges({ memory, memoryLimit, cache, cacheLimit }, engineMemory());
+        setEngineGauges(
+          { memory, memoryLimit, cache, cacheLimit },
+          engineMemory(),
+          current.streams,
+          sources.enginePlaces,
+        );
         total.set(current.streams.length);
       },
     });
@@ -307,26 +351,26 @@ export class ControllerMetrics {
 
     const memory = new Gauge({
       name: "aceswarm_engine_memory_bytes",
-      help: "Memory used by each engine container, without reclaimable page cache",
-      labelNames: ["stream", "engine"],
+      help: "Memory used by each engine container, without reclaimable page cache. role and path: what the engine is for",
+      labelNames: ENGINE_LABELS,
       registers,
     });
     const memoryLimit = new Gauge({
       name: "aceswarm_engine_memory_limit_bytes",
       help: "Memory limit of each engine container",
-      labelNames: ["stream", "engine"],
+      labelNames: ENGINE_LABELS,
       registers,
     });
     const cache = new Gauge({
       name: "aceswarm_engine_memory_cache_bytes",
       help: "Estimated stream data in each engine's memory cache: its memory above an idle engine's, at most the cap; 0 with the cache on disk",
-      labelNames: ["stream", "engine"],
+      labelNames: ENGINE_LABELS,
       registers,
     });
     const cacheLimit = new Gauge({
       name: "aceswarm_engine_memory_cache_limit_bytes",
       help: "Memory cache cap of each engine (ENGINE_MEMORY_CACHE_MB when it started); missing when it has none, or keeps its cache on disk",
-      labelNames: ["stream", "engine"],
+      labelNames: ENGINE_LABELS,
       registers,
     });
 

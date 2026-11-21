@@ -1,0 +1,930 @@
+{
+  "uid": "aceswarm-streams",
+  "title": "Ace Swarm streams",
+  "description": "One row for each stream of an Ace Swarm stack: whether it delivers, its network paths, peers, engines and what the controller did to it.",
+  "tags": [
+    "aceswarm"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "Ace Swarm dashboards",
+      "type": "dashboards",
+      "tags": [
+        "aceswarm"
+      ],
+      "asDropdown": false,
+      "icon": "dashboard",
+      "keepTime": true,
+      "includeVars": true,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Metrics",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "logs",
+        "label": "Logs",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "stream",
+        "label": "Stream",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "query_result((aceswarm_stream_info and on (stream) last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range])) or (last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range]) unless on (stream) aceswarm_stream_info))",
+          "refId": "streams"
+        },
+        "definition": "query_result((aceswarm_stream_info and on (stream) last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range])) or (last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range]) unless on (stream) aceswarm_stream_info))",
+        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[^\"=,]+=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "description": "The streams that were enabled at some time in the dashboard's range, by name. A deleted stream stays while the range covers its life.",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "${stream:text}",
+      "id": 1,
+      "collapsed": false,
+      "repeat": "stream",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Now",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The stream at the end of the dashboard's range, in the words of the timeline on the right. Gone: it has no data then, because it was deleted or the controller did not run.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "(aceswarm_stream_up{stream=\"$stream\"} + on (stream) 2 * aceswarm_stream_state{stream=\"$stream\",state=\"stale-source\"}) or on (stream) max by (stream) (4 * (aceswarm_stream_info{stream=\"$stream\",enabled=\"false\"} == 1))",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Not delivering",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Delivering",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "Waiting for source",
+                  "color": "dark-red"
+                },
+                "4": {
+                  "text": "Disabled",
+                  "color": "#8f8f8f"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          },
+          "noValue": "Gone"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Path",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The network path the stream's engine uses at the end of the dashboard's range (aceswarm_stream_path), or the one it used last while it has no engine. None while it is disabled.",
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "expr": "max by (path) (aceswarm_stream_path{stream=\"$stream\"})",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "noValue": "None"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^path$/",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Delivering frames, and its network paths",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The first line, named after the stream: Delivering (green) while the stream plays and produces new video frames (aceswarm_stream_up), Waiting for source (dark red) while its broadcast sends nothing new, Disabled (grey) while it is turned off, and Not delivering (red) in every other state. Below it, one line for each network path the stream used: Playing from here (blue, aceswarm_stream_path), Hot standby (green: an engine on that path receives the broadcast too, so a failover takes seconds), Standby warming up (yellow) and Standby failed (red, which also counts a path that waits for a new standby), from aceswarm_stream_standby. A path has no line while the stream neither plays from it nor has a standby on it.",
+      "gridPos": {
+        "h": 7,
+        "w": 9,
+        "x": 3,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "((aceswarm_stream_up{stream=\"$stream\"} + on (stream) 2 * aceswarm_stream_state{stream=\"$stream\",state=\"stale-source\"}) or on (stream) max by (stream) (4 * (aceswarm_stream_info{stream=\"$stream\",enabled=\"false\"} == 1))) * on (stream) group_left (name) aceswarm_stream_info{stream=\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "3 * max by (path) (aceswarm_stream_path{stream=\"$stream\"}) or 2 * max by (path) (aceswarm_stream_standby{stream=\"$stream\",state=\"hot\"}) or 1 * max by (path) (aceswarm_stream_standby{stream=\"$stream\",state=~\"starting|warming\"}) or 0 * max by (path) (aceswarm_stream_standby{stream=\"$stream\",state=\"failed\"})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{path}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Not delivering",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Delivering",
+                  "color": "green"
+                },
+                "2": {
+                  "text": "Waiting for source",
+                  "color": "dark-red"
+                },
+                "4": {
+                  "text": "Disabled",
+                  "color": "#8f8f8f"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Standby failed",
+                        "color": "red"
+                      },
+                      "1": {
+                        "text": "Standby warming up",
+                        "color": "yellow"
+                      },
+                      "2": {
+                        "text": "Hot standby",
+                        "color": "green"
+                      },
+                      "3": {
+                        "text": "Playing from here",
+                        "color": "blue"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Last new frame, and the broadcast",
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Since the last new frame: how long ago players could last get a new video frame of the stream (aceswarm_stream_last_frame_age_seconds). It stays near 0 while the stream plays. Broadcast quiet for: how long the broadcast itself has sent nothing new (aceswarm_stream_source_quiet_seconds). When both rise together, the broadcast stopped and nothing local can bring it back; when only the first rises, the stream stalled here.",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_last_frame_age_seconds{stream=\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Since the last new frame",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_stream_source_quiet_seconds{stream=\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Broadcast quiet for",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisSoftMax": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Since the last new frame"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Broadcast quiet for"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "dark-red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Peers",
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Peers of the stream (aceswarm_stream_peers). Connected: what the engine reports for the stream's session. Sending data and Getting data from us: counted by the gateway for the stream's engine, so every stream on a shared engine shows the same ones.",
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_peers{stream=\"$stream\",kind=\"active\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Sending data",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_stream_peers{stream=\"$stream\",kind=\"connected\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Connected",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_stream_peers{stream=\"$stream\",kind=\"uploading\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Getting data from us",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "P2P speed",
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "What the stream's engine downloads from its peers and uploads to them, as the engine reports it (aceswarm_stream_speed_kbytes).",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "aceswarm_stream_speed_kbytes{stream=\"$stream\",direction=\"down\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Download",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "aceswarm_stream_speed_kbytes{stream=\"$stream\",direction=\"up\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Upload",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "KiBs",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine memory",
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Memory of the stream's engines (aceswarm_engine_memory_bytes), one line for each place an engine has and not for each container, so an engine that replaces another continues its line. playing: the engine the stream plays from. standby: a hot standby on another path. kept: the engine of a failed move, kept to try the move again. starting: a new engine that has no place yet. shared: the engine of the stream's path that every stream on it plays from, shown for a stream that had no engine of its own in the last 2 minutes. other: an engine that had no place for more than 5 minutes. The path follows each name. An engine that reaches the limit (dashed) is killed and restarted.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "max by (role, path) (aceswarm_engine_memory_bytes{stream=\"$stream\"})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{role}} {{path}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "max by (path) (aceswarm_engine_memory_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () last_over_time(aceswarm_engine_memory_bytes{stream=\"$stream\"}[2m])",
+          "range": true,
+          "instant": false,
+          "legendFormat": "shared {{path}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "max(aceswarm_engine_memory_limit_bytes{stream=\"$stream\"}) or max(max by (path) (aceswarm_engine_memory_limit_bytes{role=\"shared\"}) * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"}) unless on () last_over_time(aceswarm_engine_memory_bytes{stream=\"$stream\"}[2m]))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Limit",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Limit"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Recovery steps",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The steps the controller took to bring the stream's video back, whether or not they did (aceswarm_stream_recoveries_total), counted in stretches of at least 5 minutes: a bar shows once its stretch is over. restart-pipeline: it opened the stream again on the same engine. restart-engine: it restarted the engine's container. switch-path: it moved the stream to a new engine on another network path. failover: it switched to the hot standby on another path.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (increase(aceswarm_stream_recoveries_total{stream=\"$stream\"}[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "barAlignment": -1,
+            "barWidthFactor": 1,
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal"
+            },
+            "axisSoftMax": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "interval": "5m"
+    },
+    {
+      "type": "table",
+      "title": "Engines restarted or removed",
+      "id": 10,
+      "datasource": {
+        "type": "loki",
+        "uid": "${logs}"
+      },
+      "description": "Every time an engine of the stream's own was removed, restarted or exited in the dashboard's range, newest first. A stream that plays from its path's shared engine has none: the overview lists the shared engines too. From the controller's log, so it needs the logs data source. What: Removed, Restarted in its container by the controller, or Exited: the engine's process ended, and the container runtime starts it again. Why: moved (the stream plays from another engine now), move-failed (the new engine of a move that failed, at once or after it was kept to try again), standby-removed (a hot standby that failed or is no longer needed), sharing (the stream plays from its path's shared engine now), stopped (the stream was stopped, disabled or deleted), leftover (an engine nothing used, such as one an earlier run of the controller left behind), restart (a recovery step, a restart by hand, or a standby that brought no data), oom-killed (it exceeded its memory limit, ENGINE_MEMORY_MB) and exited (it ended by itself, or was stopped or restarted from outside). A shared engine goes for other reasons: replaced (a new engine took its place), idle (no stream used it any more) and unresponsive (it stopped answering). More: what the controller adds to the reason. Was: what the engine was for when it went (playing, standby, kept, starting, shared or other), on the network path in Path; both are empty for an engine that went within seconds of its start. Ran for: from the engine's start, or its last restart, until then.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "{service=\"controller\"} |~ `\"msg\":\"engine (removed|restarted|exited)\"` | json | stream=\"$stream\"",
+          "queryType": "range",
+          "maxLines": 500,
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${logs}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Line",
+            "format": "json",
+            "replace": true,
+            "keepTime": true
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Time": true,
+              "msg": true,
+              "reason": true,
+              "detail": true,
+              "role": true,
+              "path": true,
+              "lifetimeSeconds": true,
+              "engine": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "msg": 1,
+              "reason": 2,
+              "detail": 3,
+              "role": 4,
+              "path": 5,
+              "lifetimeSeconds": 6,
+              "engine": 7
+            },
+            "renameByName": {
+              "Time": "When",
+              "msg": "What",
+              "reason": "Why",
+              "detail": "More",
+              "role": "Was",
+              "path": "Path",
+              "lifetimeSeconds": "Ran for",
+              "engine": "Engine"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "When"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "What"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "engine removed": {
+                        "text": "Removed",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "engine restarted": {
+                        "text": "Restarted",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "engine exited": {
+                        "text": "Exited",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Why"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Was"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Path"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ran for"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "When",
+            "desc": true
+          }
+        ]
+      }
+    }
+  ]
+}

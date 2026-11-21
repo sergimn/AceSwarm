@@ -1,5 +1,6 @@
 import type { Logger } from "@aceswarm/shared/logger";
 import type { ContainerDetails, ContainerSummary, DockerClient } from "./docker.ts";
+import type { EngineRuns } from "./engine-runs.ts";
 
 /**
  * Memory an idle engine uses before it holds any stream data: about 145 MiB with the x86 engine in
@@ -19,6 +20,8 @@ export interface EngineMemory {
   stream: string;
   /** Container name; a stream briefly has two engines while it moves to another network path. */
   engine: string;
+  /** The network path of a shared engine, from its container's label; null for a stream's own engine. */
+  sharedPath: string | null;
   usedBytes: number;
   limitBytes: number;
   /** The engine's memory cache cap (`--memory-cache-limit`); null when it has none. */
@@ -89,14 +92,17 @@ export interface EngineResourceOptions {
   stack: string;
   /** Called once for every out-of-memory kill seen. */
   onOomKill: (stream: string) => void;
+  /** Told about every run of an engine that ended because its process exited. */
+  runs?: Pick<EngineRuns, "end" | "keep">;
   now?: () => number;
 }
 
 /**
- * Samples the memory of every engine of the stack and notices out-of-memory kills, so the
- * dashboards show how close engines run to their limit (ENGINE_MEMORY_MB) and how full their memory
- * cache is. The container runtime restarts an engine killed this way, which only shows in its
- * inspect data: the last exit time changes and OOMKilled is set.
+ * Samples the memory of every engine of the stack and notices the engines whose process exited, so
+ * the dashboards show how close engines run to their limit (ENGINE_MEMORY_MB), how full their
+ * memory cache is, and how long engines last. The container runtime restarts an engine that exits,
+ * such as one the kernel killed for running out of memory, which only shows in its inspect data:
+ * the last exit time changes, and OOMKilled is set after such a kill.
  */
 export class EngineResourceMonitor {
   private readonly docker: DockerClient;
@@ -105,8 +111,8 @@ export class EngineResourceMonitor {
   /** Undefined before the first sample, or when the last one could not list the engines. */
   private count: EngineCount | undefined;
   private memory: EngineMemory[] = [];
-  /** Last exit time seen per container id. */
-  private readonly lastExit = new Map<string, string>();
+  /** The last exit time seen per container id, and when the run it was in at that look started. */
+  private readonly lastExit = new Map<string, { startedAt: string; finishedAt: string }>();
   /** Lowest memory reading per container id once it finished loading, since its last start. */
   private readonly lowest = new Map<string, { startedAt: string; bytes: number }>();
 
@@ -144,9 +150,10 @@ export class EngineResourceMonitor {
       seen.add(container.Id);
       const stream = container.Labels["aceswarm.stream"] ?? "";
       const engine = (container.Names[0] ?? container.Id).replace(/^\//, "");
+      const sharedPath = container.Labels["aceswarm.shared-path"] ?? null;
       const details = await this.docker.inspectContainer(container.Id);
       if (details !== undefined) {
-        this.checkExit(details, stream, engine);
+        this.checkExit(details, { stream, engine, sharedPath });
       }
       if (container.State !== "running") {
         continue;
@@ -158,7 +165,7 @@ export class EngineResourceMonitor {
       if (engineCacheOnDisk(details?.Config.Env)) {
         // Nothing to estimate: the stream data is in a file, and what the engine uses above its
         // idle memory is not a cache.
-        memory.push({ stream, engine, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
+        memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
         continue;
       }
       const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
@@ -167,7 +174,7 @@ export class EngineResourceMonitor {
         this.lowestBytes(details, usage.usedBytes),
         cacheLimitBytes,
       );
-      memory.push({ stream, engine, ...usage, cacheLimitBytes, cacheBytes });
+      memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes, cacheBytes });
     }
     for (const id of this.lastExit.keys()) {
       if (!seen.has(id)) {
@@ -179,6 +186,7 @@ export class EngineResourceMonitor {
         this.lowest.delete(id);
       }
     }
+    this.options.runs?.keep(seen);
     this.memory = memory;
   }
 
@@ -201,12 +209,42 @@ export class EngineResourceMonitor {
     return bytes;
   }
 
-  private checkExit(details: ContainerDetails, stream: string, engine: string): void {
-    const finishedAt = details.State.FinishedAt;
+  /**
+   * Notices that the engine's process exited since the last sample, and tells the runs that ended.
+   * That is also how a restart or a removal by the controller looks, which the engine manager tells
+   * with its reason (see `EngineRuns`): only a run nobody told yet counts here.
+   */
+  private checkExit(details: ContainerDetails, owner: Pick<EngineMemory, "stream" | "engine" | "sharedPath">): void {
+    const { stream, engine } = owner;
+    const { StartedAt: startedAt, FinishedAt: finishedAt, OOMKilled: oomKilled } = details.State;
     const previous = this.lastExit.get(details.Id);
-    this.lastExit.set(details.Id, finishedAt);
+    this.lastExit.set(details.Id, { startedAt, finishedAt });
     // The first sample of a container only records its last exit, which may predate this process.
-    if (previous === undefined || previous === finishedAt || !details.State.OOMKilled) {
+    if (previous === undefined || previous.finishedAt === finishedAt) {
+      return;
+    }
+    const exit = oomKilled ? "oom-killed" : "exited";
+    const endedAt = Date.parse(finishedAt);
+    const started = Date.parse(startedAt);
+    const told = (ranFrom: string, until: number, reason: "oom-killed" | "exited"): void => {
+      // A container that never started says year 1, which is no run.
+      if (Date.parse(ranFrom) > 0 && Date.parse(ranFrom) <= until) {
+        this.options.runs?.end({ containerId: details.Id, ...owner, startedAt: ranFrom, endedAt: until }, reason);
+      }
+    };
+    if (started > endedAt) {
+      // It runs again: the run the last sample saw ended. An engine that started and exited more
+      // than once since then counts as one run.
+      told(previous.startedAt, endedAt, exit);
+    } else {
+      // It has not started again: the run it is in ended. So did the one the last sample saw, if
+      // that was another: when and how is not known, but it was over when this one started.
+      if (previous.startedAt !== startedAt) {
+        told(previous.startedAt, started, "exited");
+      }
+      told(startedAt, endedAt, exit);
+    }
+    if (!oomKilled) {
       return;
     }
     this.logger.warn(

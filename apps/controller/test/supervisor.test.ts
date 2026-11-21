@@ -190,6 +190,11 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
   const assignedWhenReady: PathAssignment[][] = [];
   const removed: string[] = [];
   const restarted: string[] = [];
+  // Why each engine's run ended: "<container> <reason>", with ": <why>" when the caller said more.
+  const ended: string[] = [];
+  const told = (engine: string, reason: string, why?: string): void => {
+    ended.push(why === undefined ? `${engine} ${reason}` : `${engine} ${reason}: ${why}`);
+  };
   const revived: string[] = [];
   let creates = 0;
   const engines = {
@@ -206,14 +211,19 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
       await onAddress?.(revivedAs);
       return revivedAs;
     },
-    removeAllFor: () => Promise.resolve(),
-    restart: async (handle: EngineHandle, onAddress?: OnEngineAddress) => {
+    removeAllFor: (_streamId: string, reason: string) => {
+      told("all", reason);
+      return Promise.resolve();
+    },
+    restart: async (handle: EngineHandle, onAddress?: OnEngineAddress, why?: string) => {
       restarted.push(handle.containerId);
+      told(handle.containerId, "restart", why);
       await onAddress?.(handle);
       return handle;
     },
-    remove: (handle: EngineHandle) => {
+    remove: (handle: EngineHandle, reason = "leftover", why?: string) => {
       removed.push(handle.containerId);
+      told(handle.containerId, reason, why);
       return fakes.failRemove === true ? Promise.reject(new Error("docker said no")) : Promise.resolve();
     },
     create: async (_streamId: string, _generation: number, onAddress?: OnEngineAddress) => {
@@ -450,6 +460,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     unassigned,
     removed,
     restarted,
+    ended,
     revived,
     clock,
     stopped,
@@ -682,6 +693,8 @@ describe("a manual restart of a stream that has no session", () => {
     fake.instance.requestRestart();
     await fake.instance.tick();
     expect(fake.restarted).toEqual([engine.containerId]);
+    // The engine's run ends with the reason the stream gives for the step.
+    expect(fake.ended).toEqual([`${engine.containerId} restart: manual restart`]);
     expect(fake.instance.view()).toMatchObject({ message: "manual restart; restart engine", recoveries: 1 });
   });
 });
@@ -709,6 +722,8 @@ describe("recoveries that brought video back", () => {
     // The pipeline twice, then the engine.
     const fake = await stalled(3);
     expect(fake.instance.view()).toMatchObject({ state: "recovering", message: "no video after 61s; restart engine" });
+    // The restarted engine's run ends with what the stream recovers from.
+    expect(fake.ended).toEqual([`${engine.containerId} restart: no video after 61s`]);
     expect(await succeeded(fake)).toEqual({});
 
     fake.video.on = true;
@@ -1145,6 +1160,8 @@ describe("starting behind the stream's previous run", () => {
       expect(fake.transcoderStarts).toHaveLength(1);
     });
     await fake.instance.stop(true);
+    // Its engines go because the stream stopped.
+    expect(fake.ended).toEqual(["all stopped"]);
   });
 
   test("stopped meanwhile, it starts nothing and is torn down once that run is gone", async () => {
@@ -1211,6 +1228,8 @@ describe("moving a stream to another path", () => {
     ]);
     expect(instance.path).toBe("direct");
     expect(handovers).toEqual([`${replacement.baseUrl}/play`]);
+    // The metrics label it as kept, on the path it is on.
+    expect(instance.engines.kept).toEqual({ engine: replacement.name, path: "wg:a" });
 
     await untilMoves(fake, 2);
     // No new engine: the same one, and the session it opened there, which the engine still knows.
@@ -1229,6 +1248,8 @@ describe("moving a stream to another path", () => {
     expect(fake.instance.path).toBe("wg:a");
     expect(fake.instance.view().engine?.name).toBe(replacement.name);
     expect(fake.removed).toEqual([engine.containerId]);
+    // The engine it left goes because the stream moved.
+    expect(fake.ended).toEqual([`${engine.containerId} moved`]);
     expect(fake.instance.assignments()).toEqual([{ ip: replacement.ip, path: "wg:a" }]);
     expect(fake.updates).toContainEqual({ ownEngine: replacement.name });
     expect(fake.assignedWhenReady).toHaveLength(2);
@@ -1243,6 +1264,7 @@ describe("moving a stream to another path", () => {
     });
     await untilMoves(fake, 3);
     expect(fake.removed).toEqual([replacement.containerId]);
+    expect(fake.ended).toEqual([`${replacement.containerId} move-failed`]);
     expect(fake.unassigned).toEqual([replacement.ip]);
     expect(fake.instance.assignments()).toEqual([{ ip: engine.ip, path: "direct" }]);
 
@@ -1287,6 +1309,28 @@ describe("moving a stream to another path", () => {
     expect(fake.instance.assignments()).toContainEqual({ ip: replacement.ip, path: "wg:a" });
   });
 
+  test("a new start of the stream removes the kept engine as the engine of a failed move", async () => {
+    const hold: Hold = {};
+    const found: EngineHandle[] = [];
+    const fake = await moveOffDirect({ handover: "stops", video: { on: false }, hold, found });
+    expect(fake.instance.engines.kept?.engine).toBe(replacement.name);
+    found.push(engine, replacement);
+
+    // The next step stops the stream's session and cannot open another: the stream starts over.
+    const refused = Promise.reject(new Error("engine said no"));
+    refused.catch(() => undefined);
+    hold.session = refused;
+    fake.paths[0] = direct;
+    for (let tick = 0; tick < 100 && fake.removed.length === 0; tick += 1) {
+      fake.clock.now += 10_000;
+      await fake.instance.tick();
+    }
+
+    // The start takes over the engine the stream had, and the other one goes.
+    expect(fake.ended).toEqual([`${replacement.containerId} move-failed: the stream took over another of its engines`]);
+    expect(fake.instance.engines.kept).toBeUndefined();
+  });
+
   test("removes the engine it started, as before, while every slot for kept engines is taken", async () => {
     const fake = await moveOffDirect({ handover: "stops", video: { on: false }, spareSlots: new MoveSlots(0) });
     expect(fake.removed).toEqual([replacement.containerId]);
@@ -1305,6 +1349,7 @@ describe("moving a stream to another path", () => {
     video.on = true;
     await fake.instance.tick();
     expect(fake.removed).toEqual([replacement.containerId]);
+    expect(fake.ended).toEqual([`${replacement.containerId} move-failed: the stream plays again without it`]);
     expect(spareSlots.tryTake()).toBe(true);
   });
 
@@ -2188,6 +2233,8 @@ describe("sharing one engine per path", () => {
     const fake = supervisor([direct], { shared: pool.shared, sharing: { on: true } });
     await fake.instance.tick();
     expect(pool.acquired).toEqual(["direct"]);
+    // Engines of its own from before sharing was on go for that.
+    expect(fake.ended).toEqual(["all sharing"]);
     expect(fake.assignedWhenReady).toEqual([]);
     expect(fake.instance.assignments()).toEqual([]);
     expect(fake.instance.path).toBe("direct");
@@ -2375,6 +2422,8 @@ describe("sharing one engine per path", () => {
     sharing.on = true;
     await fake.instance.tick();
     expect(fake.removed).toEqual([engine.containerId]);
+    // Its own engine goes because the stream shares now, not as after a move between its own engines.
+    expect(fake.ended.at(-1)).toBe(`${engine.containerId} sharing`);
     expect(fake.unassigned).toEqual([engine.ip]);
     expect(fake.instance.view().engine).toEqual({ name: sharedEngine.name, shared: true });
   });

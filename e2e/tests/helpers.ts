@@ -532,6 +532,82 @@ export async function recoveriesSucceeded(
 }
 
 /**
+ * What the controller's engine gauges say an engine container is for and which network path it is
+ * on, as "role path" (the labels of aceswarm_engine_memory_bytes, which the dashboards draw engines
+ * by); undefined while the engine has no memory sample.
+ */
+export async function enginePlace(request: APIRequestContext, engine: string): Promise<string | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const labels = `[^}]*engine="${engine}",role="([^"]*)",path="([^"]*)"[^}]*`;
+  const match = new RegExp(String.raw`^aceswarm_engine_memory_bytes\{${labels}\} \S+$`, "m").exec(
+    await response.text(),
+  );
+  return match === null ? undefined : `${match[1]!} ${match[2]!}`;
+}
+
+/** A line the controller logs when a run of an engine ends (see `EngineRuns` in the controller). */
+export interface EngineRunEnded {
+  /** "engine removed", "engine restarted" or "engine exited". */
+  msg: string;
+  engine: string;
+  stream: string;
+  role: string;
+  path: string;
+  reason: string;
+  detail?: string;
+  lifetimeSeconds: number;
+}
+
+/**
+ * The runs of the stream's engines that ended, oldest first, from the controller's log: the lines
+ * both dashboards list as "Engines restarted or removed".
+ */
+export function engineRunsEnded(streamId: string): EngineRunEnded[] {
+  const ended: EngineRunEnded[] = [];
+  // The whole log of a long run is more than the megabyte a command's output may have by default.
+  const log = execFileSync("docker", ["compose", "-p", PROJECT, "logs", "--no-color", "controller"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  for (const line of log.split("\n")) {
+    // After the prefix compose puts before each line.
+    const json = line.slice(Math.max(0, line.indexOf("{")));
+    if (!/"msg":"engine (?:removed|restarted|exited)"/.test(json)) {
+      continue;
+    }
+    const entry = JSON.parse(json) as EngineRunEnded;
+    if (entry.stream === streamId) {
+      ended.push(entry);
+    }
+  }
+  return ended;
+}
+
+/**
+ * How many runs of engines of this kind ("own" or "shared") the controller counted as ended for
+ * this reason (aceswarm_engine_lifetime_seconds_count, which the overview's engine panels add up),
+ * and how long they lasted together, in seconds. Every reason has a count from the start, 0 at first.
+ */
+export async function engineRunsCounted(
+  request: APIRequestContext,
+  kind: string,
+  reason: string,
+): Promise<{ count: number; seconds: number }> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const text = await response.text();
+  // A histogram's series have the registry's service label before their own.
+  const labels = `[^}]*kind="${kind}",reason="${reason}"`;
+  const count = metricValue(text, "aceswarm_engine_lifetime_seconds_count", labels);
+  const seconds = metricValue(text, "aceswarm_engine_lifetime_seconds_sum", labels);
+  expect(count, `no count of ${kind} engines that ended for ${reason}`).toBeDefined();
+  expect(seconds).toBeDefined();
+  return { count: count!, seconds: seconds! };
+}
+
+/**
  * The running engines the controller reports by kind (aceswarm_engines, which the dashboard's
  * "Engines running" adds up); undefined before its first sample, or when it could not list them.
  */
