@@ -1,6 +1,8 @@
 import type { Logger } from "@aceswarm/shared/logger";
+import { CutPointWatch, type CutPointTimes } from "./cut-point-watch.ts";
 import type { FullMode } from "./ffmpeg-args.ts";
 import { killProcess, type Connection, type Generation } from "./generation.ts";
+import type { CutPoint } from "./h264-cut-points.ts";
 import type { LayoutChange, LayoutMove, OpenSource, Sink, SourceEnd } from "./source-reader.ts";
 import { changeKind, describeLayout, videoCodecOfLayout, type Layout, type LayoutChangeKind } from "./ts-tables.ts";
 
@@ -52,6 +54,11 @@ export interface FeedHost {
    * always takes the video to another PID: one where the video stays takes a new run.
    */
   moved: (run: Generation) => void;
+  /**
+   * The broadcast's video has key frames ffmpeg can use again (see `SourceFeeds.onCutPoint`): the
+   * stream's runs from now on may decode key frames only.
+   */
+  keyFramesBack: () => void;
 }
 
 /**
@@ -66,6 +73,8 @@ export interface FeedHost {
  *   are. Where the tables don't tell (no MPEG-TS, or a kind of stream they don't name), ffmpeg's
  *   own finding decides, and where the two disagree, ffmpeg's finding wins for that layout from
  *   then on (see `found`): the mode never goes back and forth between what each of them says.
+ *   A stream re-encoded because a copy couldn't be cut copies again once its broadcast sends key
+ *   frames for a while (see `onCutPoint`).
  * - When the broadcast changes its layout mid-stream, a new run takes over at the change, on the
  *   same connection: no engine session is opened, and neither run misses a byte of its layout
  *   (players get the new one from its first key frame, where every ffmpeg run begins). The old
@@ -77,9 +86,34 @@ export class SourceFeeds {
   /**
    * A run that copied the stream's video got no segment of it into the full output, right after
    * another that stalled (see `Stuck.reencode`): ffmpeg finds no key frame in that video to
-   * start one at. Every later run of the stream re-encodes it, whatever the source says it carries.
+   * start one at. The stream's runs re-encode it from then on, whatever the source says it
+   * carries, until the broadcast sends key frames again (see `onCutPoint`).
    */
-  copyFails = false;
+  get copyFails(): boolean {
+    return this.reencoding;
+  }
+
+  set copyFails(fails: boolean) {
+    if (fails && !this.reencoding) {
+      // Key frames are counted from here on; after a copy that came back and failed again, for longer.
+      this.counting = undefined;
+      if (this.cameBackAt !== undefined) {
+        this.cutPoints.failedAgain(this.now() - this.cameBackAt);
+      }
+    }
+    this.reencoding = fails;
+  }
+
+  private reencoding = false;
+  /** Tells when a copy can come back (see `onCutPoint`). */
+  private readonly cutPoints: CutPointWatch;
+  /**
+   * The run whose cut points it counts: another source's time stamps go by another clock, and
+   * after a change of layout or a move to other PIDs, the video may come from another encoder.
+   */
+  private counting: Generation | undefined;
+  /** When a copy came back last, if one did (see `CutPointWatch.failedAgain`). */
+  private cameBackAt: number | undefined;
   /** The codec of the video the stream's sources carried last, as far as known. */
   private codec: string | undefined;
   /** What ffmpeg found the video of a layout to be, where its tables say otherwise, or nothing. */
@@ -93,7 +127,9 @@ export class SourceFeeds {
   private readonly logger: Logger;
   private readonly now: () => number;
 
-  constructor(host: FeedHost, openSource: OpenSource, logger: Logger, now: () => number) {
+  /** `cutTimes`: what decides how far apart the cut points of a copy that comes back may be (see `CutPointWatch`). */
+  constructor(host: FeedHost, openSource: OpenSource, logger: Logger, now: () => number, cutTimes: CutPointTimes) {
+    this.cutPoints = new CutPointWatch(cutTimes);
     this.host = host;
     this.openSource = openSource;
     this.logger = logger;
@@ -153,6 +189,10 @@ export class SourceFeeds {
       onMove: (move) => {
         this.onMove(connection, move);
       },
+      cutPoints: {
+        watching: () => this.watchesCuts(connection.run),
+        found: (pts, point) => this.onCutPoint(connection, pts, point),
+      },
       onEnd: (end) => {
         this.onEnd(connection, end);
       },
@@ -207,6 +247,9 @@ export class SourceFeeds {
     }
     const details = { generation: run.number, from: describeLayout(previous), to: describeLayout(layout) };
     if (!inPlace) {
+      if (this.counting === run) {
+        this.counting = undefined;
+      }
       this.logger.info(details, "the broadcast moved its streams to other PIDs; the same ffmpeg run reads on");
       this.host.moved(run);
       return;
@@ -218,6 +261,61 @@ export class SourceFeeds {
       details,
       "the broadcast changed its tables, and the streams ffmpeg reads are where they were; the same ffmpeg run reads on",
     );
+  }
+
+  /**
+   * Whether the run re-encodes video that a copy of could come back for: H.264, as far as known.
+   * Only a copy that couldn't be cut has a run re-encode H.264 for long (see `copyFails`: a run in
+   * the wrong mode for its video is replaced as soon as that is known), and such a run is watched
+   * even once the stream copies again: one of a source that was waiting to take over when another
+   * source's run came back to copy, say, which would re-encode for as long as it lives. A run that
+   * began to copy before a copy failed (one that is to take over, say) copies already.
+   */
+  private watchesCuts(run: Generation): boolean {
+    const { layout } = run;
+    const codec = layout === undefined ? undefined : (this.corrected.get(layout.key) ?? videoCodecOfLayout(layout));
+    return !run.retired && run.mode === "transcode" && fullModeFor(codec ?? "") === "copy";
+  }
+
+  /**
+   * An access unit came that ffmpeg can cut a copy of the video at, while the run re-encodes it
+   * because a copy couldn't be cut (see `copyFails`). Once they came often enough for a while (see
+   * `CutPointWatch`), the broadcast has key frames again: a run that copies the video takes over
+   * right at this unit, on the same connection, as at a change of layout, and the stream's later
+   * runs copy it too. One that then can't be cut again is found out as before (see `StuckRuns`).
+   * Key frames only decoding comes back where every cut point that counted was an IDR picture: of
+   * recovery points, ffmpeg 9's decoder shows next to nothing that way (an intra refresh never
+   * ends, and an open GOP with B-frames gets stuck in the decoder's reordering).
+   */
+  private onCutPoint(
+    connection: Connection,
+    pts: number | undefined,
+    point: Exclude<CutPoint, "none">,
+  ): Sink | undefined {
+    const run = connection.run;
+    const { layout } = run;
+    if (!this.watchesCuts(run) || layout === undefined) {
+      return undefined;
+    }
+    if (this.counting !== run) {
+      this.counting = run;
+      this.cutPoints.reset();
+    }
+    if (!this.cutPoints.cutPoint(pts, point)) {
+      return undefined;
+    }
+    const { onlyIdrs } = this.cutPoints;
+    this.logger.info(
+      { generation: run.number, seconds: this.cutPoints.waitMs / 1000, at: point, onlyIdrs },
+      "the broadcast's video has key frames again; copying the full stream again",
+    );
+    this.reencoding = false;
+    this.cameBackAt = this.now();
+    this.cutPoints.reset();
+    if (onlyIdrs) {
+      this.host.keyFramesBack();
+    }
+    return this.host.succeed(run, { layout, mode: "copy", midStream: true, drain: true }, "key-frames")?.sink;
   }
 
   /** The reader is done with the source: its run's ffmpeg writes out what it has, and ends. */

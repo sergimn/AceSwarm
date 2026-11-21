@@ -121,9 +121,13 @@ export class Pipeline {
           this.changes.changed(run, "pid", "same");
         }
       },
+      keyFramesBack: this.keyFrames.back,
     };
-    this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);
-    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
+    const stuck = settings.stuck ?? DEFAULT_STUCK_LIMITS;
+    const openSource = options.openSource ?? readSource;
+    const cutTimes = { stallMs: stuck.fullOutputStallMs, segmentMs: settings.plan.segmentSeconds * 1000 };
+    this.feeds = new SourceFeeds(host, openSource, this.logger, this.now, cutTimes);
+    this.stuck = new StuckRuns(stuck, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),

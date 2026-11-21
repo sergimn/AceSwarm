@@ -31,6 +31,8 @@ const PACKET = 188;
 /** The sample's stream seconds with key frames, then without. */
 const WITH_KEY_FRAMES = 12;
 const WITHOUT_KEY_FRAMES = 120;
+/** A broadcast whose key frames come back after that, for this many stream seconds. */
+const KEY_FRAMES_BACK = 100;
 /** How many times faster than its own pace the sample is fed: a live engine sends it at 1. */
 const PACE = 4;
 /** A broadcast with key frames far apart: this many stream seconds between two, and this many of them. */
@@ -88,6 +90,8 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
   let sample: Buffer;
   /** Key frames every `KEY_FRAMES_APART` s, and I frames between them that are none to ffmpeg. */
   let farApart: Buffer;
+  /** The sample, then key frames every 2 s again (see `KEY_FRAMES_BACK`). */
+  let comeBack: Buffer;
 
   beforeAll(() => {
     directory = mkdtempSync(join(tmpdir(), "aceswarm-full-stall-"));
@@ -125,6 +129,24 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       return readFileSync(path);
     });
     farApart = Buffer.concat(gops);
+    const back = join(directory, "back.ts");
+    const offset = String(WITH_KEY_FRAMES + WITHOUT_KEY_FRAMES);
+    const encoded = `${back}.encoded.ts`;
+    ffmpeg([
+      ...lavfi(KEY_FRAMES_BACK),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-g",
+      "50",
+      ...audio,
+      "-output_ts_offset",
+      offset,
+      encoded,
+    ]);
+    ffmpeg(["-copyts", "-i", encoded, "-map", "0", "-c", "copy", "-muxdelay", "0", "-f", "mpegts", back]);
+    comeBack = Buffer.concat([sample, readFileSync(back)]);
   }, 120_000);
 
   afterAll(() => {
@@ -280,6 +302,51 @@ describe.skipIf(FFMPEG === undefined)("ffmpeg with a broadcast that stops sendin
       },
       90_000,
     );
+
+    // The broadcast sends key frames again once the stream is re-encoded: the full output copies its
+    // video again from one of them, once they came for a minute of the stream.
+    it("copies the full stream again once the key frames are back, and it plays", async () => {
+      const started: { reason: string; at: number }[] = [];
+      const id = "come-back";
+      plays(comeBack, WITH_KEY_FRAMES + WITHOUT_KEY_FRAMES + KEY_FRAMES_BACK);
+      const pipeline = new Pipeline(id, settings("keyframes", 8000), createLogger("test", "silent"), {
+        generationStarted: (_id, reason) => {
+          started.push({ reason, at: (Date.now() - liveSince) / 1000 });
+        },
+        handover: () => undefined,
+        layoutChanged: () => undefined,
+        layoutGap: () => undefined,
+      });
+      try {
+        await pipeline.start(url, false);
+        const back = (WITH_KEY_FRAMES + WITHOUT_KEY_FRAMES) / PACE;
+        for (let waited = 0; waited < 60 && started.length < 4; waited += 0.5) {
+          await sleep(500);
+        }
+        expect(started.map((start) => start.reason)).toEqual([
+          "start",
+          "full-output-stalled",
+          "full-output-stalled",
+          "key-frames",
+        ]);
+        // A minute of the stream after they came back, read as the engine sends it.
+        expect(started[3]?.at).toBeGreaterThan(back + 60 / PACE - 1);
+        expect(started[3]?.at).toBeLessThan(back + 60 / PACE + 4);
+        expect(pipeline.status().mode).toBe("copy");
+        expect(pipeline.decoding()).toBe("key-frames");
+        const copy = join(directory, "hls", id, "g4", "full", "index.m3u8");
+        for (let waited = 0; waited < 10 && playlistEnd(copy) < 4; waited += 0.5) {
+          await sleep(500);
+        }
+        expect(playlistEnd(copy)).toBeGreaterThanOrEqual(4);
+        // Players get the copy after the re-encode's last segments.
+        const published = (await pipeline.playlist("full")) ?? "";
+        expect(published).toContain("g4/full/");
+        expect(published.indexOf("g3/full/")).toBeLessThan(published.indexOf("g4/full/"));
+      } finally {
+        await pipeline.stop();
+      }
+    }, 120_000);
 
     // A copy starts at a key frame, and its first segment ends at the next one: the stall time
     // counts from its first frame, not from the decoder's first picture, which an I frame between
