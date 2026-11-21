@@ -137,7 +137,7 @@ export class Generation {
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
-  /** The run that took over from this one mid-stream, if one did (see `takeOver`). */
+  /** The run that took over from this one mid-stream, or its place (see `takeOver`, `replaces`), if one did. */
   successor: Generation | undefined;
   /** The timer that removes its directory (see `removeLater`). */
   private removal: NodeJS.Timeout | undefined;
@@ -190,6 +190,21 @@ export class Generation {
     for (const variant of VARIANTS) {
       this.publishFrom[variant] = -1;
     }
+  }
+
+  /**
+   * Takes the place of `old`, a run on the same source that stops (see `Pipeline.swap`): the
+   * handover `old` was part of goes on with this one, and so do the last frame players got (until
+   * this one has its own: a run that took over mid-stream carries it, as does one that replaced a
+   * stuck run) and the wait at a layout change (see `gapSince`): `old` is retired, and its last
+   * frames end no wait. Frames that the run before `old` still writes out count for this one (see
+   * `SourceFeeds.drain`).
+   */
+  replaces(old: Generation): void {
+    this.handoverSince = old.handoverSince;
+    this.publishedFrameAt = old.publishedFrameAt;
+    this.gapSince = old.gapSince;
+    old.successor = this;
   }
 
   /**

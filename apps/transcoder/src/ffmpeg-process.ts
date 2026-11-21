@@ -85,7 +85,9 @@ export function attachFfmpeg(generation: Generation, child: ChildProcess, hooks:
           // must not look like it runs again.
           generation.state = "running";
         }
-        const gap = generation.publishing() && generation.published ? generation.show() : undefined;
+        // A retired run's frames reach no player; one that drains is retired only once it is done.
+        const shows = generation.publishing() && generation.published && !generation.retired;
+        const gap = shows ? generation.show() : undefined;
         if (gap !== undefined) {
           hooks.onLayoutGap(gap);
         }

@@ -15,7 +15,8 @@ interface Panel {
 
 interface Dashboard {
   panels: Panel[];
-  annotations: { list: { expr?: string; filter?: { ids: number[] } }[] };
+  /** `step` is a query's least step, which also stands in for the scrape interval in `$__rate_interval`. */
+  annotations: { list: { expr?: string; step?: string; filter?: { ids: number[] } }[] };
 }
 
 const overview = JSON.parse(
@@ -72,4 +73,15 @@ test("the overview marks each layout change on the timeline of the streams that 
   );
   expect(marks).toHaveLength(1);
   expect(marks[0]?.filter?.ids).toEqual([delivering?.id]);
+});
+
+test("the overview's marks count increases over one step of the graph, whatever its range", () => {
+  // Grafana takes a longer step for a longer range or a narrower window: a fixed window would only
+  // see what happened in its own stretch before each step, and miss the rest.
+  const counting = overview.annotations.list.filter(({ expr = "" }) => expr.includes("increase("));
+  expect(counting.length).toBeGreaterThan(0);
+  for (const mark of counting) {
+    expect(mark.expr?.match(/\[[^\]]+\]/g)).toEqual(["[$__rate_interval]"]);
+    expect(mark.step).toBeUndefined();
+  }
 });

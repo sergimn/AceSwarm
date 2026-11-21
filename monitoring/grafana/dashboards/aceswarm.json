@@ -72,8 +72,7 @@
         "enable": true,
         "hide": false,
         "iconColor": "purple",
-        "expr": "sum by (stream, name) (increase(aceswarm_pipeline_layout_changes_total[75s]) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}) > 0",
-        "step": "60s",
+        "expr": "sum by (stream, name) (increase(aceswarm_pipeline_layout_changes_total[$__rate_interval]) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}) > 0",
         "titleFormat": "Layout change",
         "textFormat": "{{name}}",
         "useValueForTime": false,
@@ -1114,7 +1113,7 @@
         "mergeValues": true,
         "rowHeight": 0.8
       },
-      "description": "A mark for each time a stream's broadcast changed its layout mid-stream and ffmpeg followed it (aceswarm_pipeline_layout_changes_total). Codec change (orange): the video changed codec, such as H.264 to HEVC, and a new ffmpeg run took over. PID move (blue): the video moved to another PID. The same ffmpeg run reads on where the streams only moved; a new one takes over where they changed too. Other (grey): something else ffmpeg reads changed, such as the sound, and a new run took over. Tables that change around the streams ffmpeg reads don't count, and neither do the changes of a source that waits to take over. A mark is at least a minute wide; changes closer together share one, which shows the kind that weighs most. Each one is also marked on Delivering new frames.",
+      "description": "A mark for each time a stream's broadcast changed its layout mid-stream and ffmpeg followed it (aceswarm_pipeline_layout_changes_total). Codec change (orange): the video changed codec, such as H.264 to HEVC, and a new ffmpeg run took over. PID move (blue): the video moved to another PID. The same ffmpeg run reads on where the streams only moved; a new one takes over where they changed too. Other (grey): something else ffmpeg reads changed, such as the sound, and a new run took over. Tables that change around the streams ffmpeg reads don't count, and neither do the changes of a source that waits to take over. A mark is one step of the graph wide: a minute, more at longer ranges. Changes within one step share a mark, which shows the kind that weighs most; Layout changes in range counts them all. Each one is also marked on Delivering new frames.",
       "interval": "1m"
     },
     {
@@ -1178,7 +1177,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "How long players got no new video frame at each layout change of a stream (aceswarm_pipeline_layout_change_gap_seconds): from the last frame they got before the change to the first one after it. A point shows once the video came back; a change whose video never came back has none. Changes less than a minute apart share a point, their average. ffmpeg reports its frames once a second, so a change without a pause shows about 1 s. A new ffmpeg run takes a few seconds to show video; a move the same run reads on over takes less.",
+      "description": "How long players got no new video frame at each layout change of a stream (aceswarm_pipeline_layout_change_gap_seconds): from the last frame they got before the change to the first one after it. A point shows once the video came back; a change whose video never came back has none. Changes within one step of the graph (a minute, more at longer ranges) share a point, their average. ffmpeg reports its frames once a second, so a change without a pause shows about 1 s. A new ffmpeg run takes a few seconds to show video; a move the same run reads on over takes less.",
       "gridPos": {
         "h": 8,
         "w": 12,

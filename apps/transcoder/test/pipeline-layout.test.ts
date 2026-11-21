@@ -992,6 +992,90 @@ describe("Pipeline following what its source carries", () => {
       expect(gaps).toEqual([clock.now - (changedAt - 2000)]);
       expect(changes).toEqual(["pid new"]);
     });
+
+    it("counts the frames the old run drains after the new run was replaced for its mode as the last before the wait", async () => {
+      const instance = await playing();
+      clock.now += 2000;
+      // The tables say H.264; ffmpeg finds HEVC, and a run that re-encodes takes the new run's place.
+      opened[0]?.layout(layoutOf(211));
+      await banner(1, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(3);
+      });
+      // Only now does the old run report the frames it still had, and its last segment is published.
+      clock.now += 300;
+      await frames(112, 0);
+      const lastOld = clock.now;
+      await wrote(1, 4);
+      exit(0);
+      await pipeline?.sync();
+      expect(await playlist(instance)).toContain("g1:3");
+      expect(instance.status().lastFrameAt).toBe(new Date(lastOld).toISOString());
+      opened[1]?.layout(layoutOf(211));
+      clock.now += 4000;
+      await frames(20, 2);
+      await wrote(3, 1);
+      await pipeline?.sync();
+      expect(gaps).toEqual([clock.now - lastOld]);
+    });
+
+    it("measures no wait with the frames of a run that was stopped, which players don't get", async () => {
+      const instance = await playing();
+      clock.now += 3000;
+      opened[0]?.move(layoutOf(211));
+      // The stream is started again on another source, without a handover: the run stops.
+      await instance.start("http://e2/play", false);
+      // Its ffmpeg prints its last progress as it ends.
+      clock.now += 800;
+      await frames(120, 0);
+      expect(gaps).toEqual([]);
+    });
+
+    it("measures one wait for one change, when the run that took over is replaced after it published", async () => {
+      await playing();
+      clock.now += 2000;
+      opened[0]?.layout(layoutOf(211));
+      exit(0);
+      await pipeline?.sync();
+      // The new run publishes a segment before ffmpeg tells of any frame: it may hold sound only.
+      clock.now += 2000;
+      await wrote(2, 1);
+      await pipeline?.sync();
+      expect(gaps).toEqual([]);
+      // It is replaced for its mode, and prints a last progress block as it stops.
+      await banner(1, "hevc");
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(3);
+      });
+      clock.now += 500;
+      await frames(10, 1);
+      expect(gaps).toEqual([]);
+      // The run in its place shows video.
+      opened[1]?.layout(layoutOf(211));
+      clock.now += 3000;
+      await frames(20, 2);
+      await wrote(3, 1);
+      await pipeline?.sync();
+      expect(changes).toEqual(["pid new"]);
+      expect(gaps).toHaveLength(1);
+    });
+
+    it("measures no wait at a change of a stream that had no video yet", async () => {
+      const instance = start();
+      await instance.start("http://e1/play", false);
+      opened[0]?.layout(layoutOf(256));
+      clock.now += 5000;
+      opened[0]?.layout(layoutOf(211));
+      exit(0);
+      await pipeline?.sync();
+      clock.now += 3000;
+      await frames(20, 1);
+      await wrote(2, 1);
+      await pipeline?.sync();
+      expect(instance.status().lastFrameAt).toBe(new Date(clock.now).toISOString());
+      expect(changes).toEqual(["pid new"]);
+      expect(gaps).toEqual([]);
+    });
   });
 
   describe("the end of a source", () => {

@@ -24,7 +24,7 @@ import { makeRunDirectory, makeRunDirectoryNow, removeStreamFiles } from "./run-
 import { SourceFeeds, type Succession } from "./source-feeds.ts";
 import { readSource } from "./source-reader.ts";
 import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
-import { describeLayout, videoCodecOfLayout, type LayoutChangeKind } from "./ts-tables.ts";
+import { describeLayout, videoCodecOfLayout } from "./ts-tables.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, Spawner } from "./pipeline-settings.ts";
@@ -110,7 +110,7 @@ export class Pipeline {
       retire: (run: Generation) => {
         this.retire(run);
       },
-      moved: (run: Generation, kind: LayoutChangeKind) => {
+      moved: (run: Generation) => {
         // As for a new run (see `succeed`): only for the source players get, and one that had video
         // since its last move. Moves that keep coming over a run that shows nothing must not look
         // like a stream that does.
@@ -118,7 +118,7 @@ export class Pipeline {
         this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
         run.framesAtMove = run.frames;
         if (run === this.active) {
-          this.changes.changed(run, kind, "same");
+          this.changes.changed(run, "pid", "same");
         }
       },
     };
@@ -466,11 +466,7 @@ export class Pipeline {
    * it was part of goes on with `next`. Nothing waits, so no other sync starts a second one.
    */
   private swap(generation: Generation, next: Generation, reason: string): void {
-    next.handoverSince = generation.handoverSince;
-    // The last frame players got of this source, until `next` has one: a run that took over
-    // mid-stream carries it, as does one that replaced a stuck run (see `restartIfStuck`).
-    next.publishedFrameAt = generation.publishedFrameAt;
-    next.gapSince = generation.gapSince;
+    next.replaces(generation);
     this[generation === this.pending ? "pending" : "active"] = next;
     this.retire(generation);
     void this.run(next, reason).catch((error: unknown) => {
