@@ -4,6 +4,9 @@ import {
   compose,
   docker,
   engineContainers,
+  enginePlace,
+  engineRunsCounted,
+  engineRunsEnded,
   metricValue,
   openApp,
   resetStack,
@@ -548,6 +551,11 @@ test("removes a stream from the manage dialog, and its engine", async ({ page, r
   const target = (await snapshot(request)).streams.find((stream) => stream.aceId === bc[2]!.infohash);
   expect(target).toBeDefined();
   expect(engineContainers(target!.id).length).toBeGreaterThan(0);
+  // It plays from an engine the controller has a place for, so the log can say what the engine was.
+  const playing = await waitForPlaying(request, target!.id);
+  const engine = playing.engine!.name;
+  await expect.poll(async () => enginePlace(request, engine), { timeout: 60_000 }).toBe("playing direct");
+  const stopped = await engineRunsCounted(request, "own", "stopped");
 
   await openApp(page);
   await page.getByRole("button", { name: "Streams", exact: true }).click();
@@ -559,4 +567,19 @@ test("removes a stream from the manage dialog, and its engine", async ({ page, r
   await expect(row).toBeHidden();
   await expect.poll(async () => streamById(request, target!.id)).toBeUndefined();
   await expect.poll(() => engineContainers(target!.id), { timeout: 30_000 }).toEqual([]);
+
+  // The engine's run ended because its stream stopped: the controller logged it with what the
+  // engine was for and how long it ran (the dashboards' "Engines restarted or removed"), from the
+  // start time the container runtime reports, and counted it. It does so once the runtime answered
+  // that the container is removed, which can be a moment after the container left the list.
+  await expect
+    .poll(() => engineRunsEnded(target!.id).filter((run) => run.reason === "stopped"), { timeout: 30_000 })
+    .toHaveLength(1);
+  const ended = engineRunsEnded(target!.id).find((run) => run.reason === "stopped");
+  expect(ended).toMatchObject({ msg: "engine removed", engine, role: "playing", path: "direct" });
+  expect(ended!.lifetimeSeconds).toBeGreaterThan(5);
+  expect(ended!.lifetimeSeconds).toBeLessThan(3600);
+  const counted = await engineRunsCounted(request, "own", "stopped");
+  expect(counted.count).toBeGreaterThan(stopped.count);
+  expect(counted.seconds - stopped.seconds).toBeGreaterThanOrEqual(ended!.lifetimeSeconds);
 });

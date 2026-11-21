@@ -34,6 +34,8 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
   let nextId = 10;
   const created: EngineHandle[] = [];
   const removed: string[] = [];
+  // Why each removed engine's run ended: "<reason>: <why>", or the reason alone.
+  const ended: string[] = [];
   const revived: string[] = [];
   const assigned: PathAssignment[] = [];
   const unassigned: string[] = [];
@@ -73,8 +75,9 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
       await onAddress?.(engine);
       return engine;
     },
-    remove: (engine: EngineHandle) => {
+    remove: (engine: EngineHandle, reason = "leftover", why?: string) => {
       removed.push(engine.containerId);
+      ended.push(why === undefined ? reason : `${reason}: ${why}`);
       containers = containers.filter((candidate) => candidate.containerId !== engine.containerId);
       return Promise.resolve();
     },
@@ -98,7 +101,7 @@ function pool(options: { existing?: EngineHandle[]; failCreate?: boolean; holdRe
     settings,
     now: () => clock.now,
   });
-  return { shared, created, removed, revived, assigned, unassigned, clock, registry, gate, dead, docker };
+  return { shared, created, removed, ended, revived, assigned, unassigned, clock, registry, gate, dead, docker };
 }
 
 /** Lets replacements started in the background finish. */
@@ -131,7 +134,7 @@ test("streams on the same path share one engine, which gets the path at the gate
 });
 
 test("removes a path's engine once no stream used it for the idle timeout", async () => {
-  const { shared, removed, unassigned, clock } = pool();
+  const { shared, removed, ended, unassigned, clock } = pool();
   const engine = await shared.acquire("direct", "s1");
   await shared.acquire("direct", "s2");
   await shared.release(engine, "s1", true);
@@ -146,6 +149,7 @@ test("removes a path's engine once no stream used it for the idle timeout", asyn
   clock.now += settings.idleTimeoutMs / 2;
   await shared.sweepIdle(true);
   expect(removed).toEqual([engine.containerId]);
+  expect(ended).toEqual(["idle: no stream uses it"]);
   expect(unassigned).toEqual([engine.ip]);
   expect(shared.assignments()).toEqual([]);
 
@@ -181,17 +185,19 @@ test("checks that an engine nobody uses still answers before a stream takes it",
   const next = await fake.shared.acquire("direct", "s1");
   expect(next.containerId).not.toBe(engine.containerId);
   expect(fake.removed).toEqual([engine.containerId]);
+  expect(fake.ended).toEqual(["unresponsive: it stopped answering"]);
   expect(fake.shared.isCurrent(next)).toBe(true);
 });
 
 test("takes over the engine a previous run left, and removes older ones", async () => {
   const left = handle(1, "direct", 3);
   const older = handle(2, "direct", 2);
-  const { shared, created, revived, removed } = pool({ existing: [left, older] });
+  const { shared, created, revived, removed, ended } = pool({ existing: [left, older] });
   const engine = await shared.acquire("direct", "s1");
   expect(engine).toBe(left);
   expect(revived).toEqual([left.containerId]);
   expect(removed).toEqual([older.containerId]);
+  expect(ended).toEqual(["leftover: the path has a newer engine"]);
   expect(created).toEqual([]);
 });
 
@@ -423,7 +429,7 @@ describe("starting again on the same engine", () => {
 
 describe("sweeping", () => {
   test("removes a replacement no stream moved to, after the idle timeout", async () => {
-    const { shared, created, removed, clock } = pool();
+    const { shared, created, removed, ended, clock } = pool();
     const engine = await shared.acquire("direct", "s1");
     shared.restart(engine);
     await settle();
@@ -435,6 +441,8 @@ describe("sweeping", () => {
     clock.now += settings.idleTimeoutMs;
     await shared.sweepIdle(true);
     expect(removed).toEqual([engine.containerId, replacement.containerId]);
+    // The replaced engine went as that, and its replacement for having no streams.
+    expect(ended).toEqual(["replaced: no streams left on it", "idle: no stream uses it"]);
   });
 
   test("keeps a replacement while streams still move to it", async () => {
@@ -454,10 +462,11 @@ describe("sweeping", () => {
 
   test("removes engines of a previous run that no stream took", async () => {
     const left = handle(1, "wg:gone", 1);
-    const { shared, removed } = pool({ existing: [left] });
+    const { shared, removed, ended } = pool({ existing: [left] });
     await shared.acquire("direct", "s1");
     await shared.sweepOrphans();
     expect(removed).toEqual([left.containerId]);
+    expect(ended).toEqual(["leftover: no stream took it over"]);
   });
 
   test("removes an engine nobody uses right away while sharing is off", async () => {

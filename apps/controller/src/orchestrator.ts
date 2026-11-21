@@ -343,7 +343,7 @@ export class Orchestrator {
     } else if (removed) {
       // Behind a teardown still going, which removes the same engines.
       const previous = this.teardowns.get(id) ?? Promise.resolve();
-      void previous.then(async () => this.deps.engines.removeAllFor(id)).catch(() => undefined);
+      void previous.then(async () => this.deps.engines.removeAllFor(id, "stopped")).catch(() => undefined);
     }
     if (removed) {
       this.logger.info({ stream: id }, "stream removed");

@@ -394,3 +394,39 @@ test("exports how long the broadcast is quiet from the stream's quiet time, not 
   current = { ...waiting, enabled: false, state: "stopped", path: null, liveEdge: null };
   expect(await quiet()).toBeUndefined();
 });
+
+test("counts how long engines ran by kind and reason, with every reason there from the start", async () => {
+  const registry = new Registry();
+  const metrics = new ControllerMetrics(registry, () => ({ streams: [], paths: [] }));
+
+  const before = await registry.metrics();
+  // At zero before the first engine goes, so that one shows as an increase.
+  for (const series of [
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="restart"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="oom-killed"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="shared",reason="replaced"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="shared",reason="exited"} 0',
+    'aceswarm_engine_lifetime_seconds_bucket{le="30",kind="own",reason="move-failed"} 0',
+  ]) {
+    expect(before).toContain(series);
+  }
+  // Only a stream's own engine restarts in its container.
+  expect(before).not.toContain('kind="shared",reason="restart"');
+  expect(before.match(/^aceswarm_engine_lifetime_seconds_count/gm)).toHaveLength(15);
+
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 45);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 7200);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 2 * 7 * 86_400);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 60 * 86_400);
+
+  const after = await registry.metrics();
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="30",kind="own",reason="moved"} 0');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="60",kind="own",reason="moved"} 1');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="21600",kind="own",reason="moved"} 2');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="604800",kind="own",reason="moved"} 2');
+  // Two weeks is within the last step, a month.
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="2592000",kind="own",reason="moved"} 3');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="+Inf",kind="own",reason="moved"} 4');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 4');
+});

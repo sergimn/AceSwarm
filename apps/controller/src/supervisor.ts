@@ -425,7 +425,7 @@ export class StreamSupervisor {
       now: this.now,
       logger: this.logger,
       setState: this.setState,
-      switchPath: async () => this.switchPath(engine),
+      switchPath: async () => this.switchPath(engine, "the stream may not use its path"),
     });
   }
 
@@ -527,21 +527,21 @@ export class StreamSupervisor {
     this.logger.warn({ action, reason, failures: this.recovery.failures }, "recovering stream");
     this.setState(this.sourceWait.state("recovering"), `${reason}; ${action.replace("-", " ")}`);
     try {
-      await this.steps.take(action, async () => this.runStep(action, engine), credit);
+      await this.steps.take(action, async () => this.runStep(action, engine, reason), credit);
     } catch (error) {
       this.setState(this.sourceWait.state("stalled"), `${action.replace("-", " ")} failed: ${describeError(error)}`);
       this.logger.warn({ err: error, action }, "recovery action failed");
     }
   }
 
-  private async runStep(action: RecoveryAction, engine: EngineHandle): Promise<void> {
+  private async runStep(action: RecoveryAction, engine: EngineHandle, reason: string): Promise<void> {
     if (action === "restart-pipeline") {
       await this.stopSessionQuietly();
       await this.startPlayback(engine);
     } else if (action === "restart-engine") {
-      await this.runRestartInPlace(engine);
+      await this.runRestartInPlace(engine, reason);
     } else {
-      await this.switchPath(engine);
+      await this.switchPath(engine, reason);
     }
   }
 
@@ -550,7 +550,7 @@ export class StreamSupervisor {
    * new path (or the path's shared engine is used) and the transcoder only cuts over once it
    * delivers video, then the old engine goes.
    */
-  private async switchPath(engine: EngineHandle): Promise<void> {
+  private async switchPath(engine: EngineHandle, reason: string): Promise<void> {
     const from = this.stream.path ?? "none";
     const target = this.paths.switchTarget(from);
     // A standby already pulls the stream there: a hot one anywhere, or else the one on the target.
@@ -565,7 +565,7 @@ export class StreamSupervisor {
     }
     if (target === undefined) {
       this.logger.info({ path: from }, "no better path; restarting engine instead");
-      await this.runRestartInPlace(engine);
+      await this.runRestartInPlace(engine, reason);
       return;
     }
     this.setState(this.sourceWait.state("switching"), `moving from ${from} to ${target}`);
@@ -599,7 +599,7 @@ export class StreamSupervisor {
     });
   }
 
-  private async runRestartInPlace(engine: EngineHandle): Promise<void> {
+  private async runRestartInPlace(engine: EngineHandle, reason: string): Promise<void> {
     await this.stopSessionQuietly();
     if (engine.sharedPath !== null) {
       // Other streams play from it: only this stream's session restarts. The shared engines
@@ -613,7 +613,7 @@ export class StreamSupervisor {
       this.stream.path === null || this.paths.allowed(this.stream.path)
         ? this.stream.path
         : (this.paths.forStart(this.stream.path, 0) ?? null);
-    const restarted = await this.engines.restartOwn(engine, async (starting) => {
+    const restarted = await this.engines.restartOwn(engine, reason, async (starting) => {
       await this.record.applyPath(starting, path);
     });
     this.engine = restarted;
