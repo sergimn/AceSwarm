@@ -53,7 +53,7 @@ export class StreamSupervisor {
   private readonly steps: RecoverySteps;
   private forceRestart = false;
   /** Its own engines (with their gateway paths) or its place on a shared engine, and its standbys. */
-  private readonly engines: StreamEngines;
+  readonly engines: StreamEngines;
   private bootstrapped = false;
   /** Its hot standbys on the other paths, and failing over to them. */
   private readonly failover: StreamFailover;

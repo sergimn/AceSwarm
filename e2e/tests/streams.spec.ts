@@ -121,7 +121,9 @@ test("says when it hears nothing from the controller, and recovers when it does 
   await expect(age).toHaveText("Now");
 });
 
-test("exports the engine's memory cache cap and estimated use, and the peers it uploads to", async ({ request }) => {
+test("exports the engine's place, its memory cache cap and estimated use, and the peers it uploads to", async ({
+  request,
+}) => {
   const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
   expect(stream).toBeDefined();
   const value = async (series: string): Promise<number | undefined> => {
@@ -135,6 +137,9 @@ test("exports the engine's memory cache cap and estimated use, and the peers it 
   await expect
     .poll(() => value(`aceswarm_engine_memory_cache_limit_bytes${engine}`), { timeout: 60_000 })
     .toBe(128 * 1024 * 1024);
+  // The engine the stream plays from says so, with its network path, whatever its container is called.
+  const playing = String.raw`\{stream="${stream!.id}",engine="[^"]+",role="playing",path="[^"]+"[^}]*\}`;
+  await expect.poll(() => value(`aceswarm_engine_memory_bytes${playing}`), { timeout: 60_000 }).toBeGreaterThan(0);
   const cache = await value(`aceswarm_engine_memory_cache_bytes${engine}`);
   expect(cache).toBeGreaterThanOrEqual(0);
   expect(cache).toBeLessThanOrEqual(128 * 1024 * 1024);

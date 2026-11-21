@@ -43,10 +43,12 @@
           "uid": "${datasource}"
         },
         "query": {
-          "query": "label_values(aceswarm_stream_info, stream)",
+          "query": "query_result(aceswarm_stream_info or (last_over_time(aceswarm_stream_info[$__range]) unless on (stream) aceswarm_stream_info))",
           "refId": "streams"
         },
-        "definition": "label_values(aceswarm_stream_info, stream)",
+        "definition": "query_result(aceswarm_stream_info or (last_over_time(aceswarm_stream_info[$__range]) unless on (stream) aceswarm_stream_info))",
+        "regex": "/name=\"(?<text>.*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "description": "Every stream by name. A deleted stream stays while the dashboard's range covers its life.",
         "includeAll": true,
         "multi": true,
         "allValue": ".*",
@@ -62,6 +64,20 @@
   "annotations": {
     "list": []
   },
+  "links": [
+    {
+      "title": "Ace Swarm dashboards",
+      "type": "dashboards",
+      "tags": [
+        "aceswarm"
+      ],
+      "asDropdown": false,
+      "icon": "dashboard",
+      "keepTime": true,
+      "includeVars": true,
+      "targetBlank": false
+    }
+  ],
   "panels": [
     {
       "type": "row",
@@ -1192,7 +1208,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Memory used by each engine: a stream's own engine, or a shared engine (named after its path) that every stream on the path plays from. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB, or lower ENGINE_MEMORY_CACHE_MB (set it if it is 0) if it gets close.",
+      "description": "Memory used by each engine: a stream's own engines, or a path's shared engine that every stream on the path plays from. One line for each place an engine has, not for each container, so an engine that replaces another continues its line: the stream's name, then what the engine is for (playing, standby, kept after a failed move, or starting) and its network path. The Ace Swarm streams dashboard (linked at the top) shows one stream's engines on their own. An engine that reaches the limit (dashed) is killed and restarted; raise ENGINE_MEMORY_MB, or lower ENGINE_MEMORY_CACHE_MB (set it if it is 0) if it gets close.",
       "gridPos": {
         "h": 8,
         "w": 10,
@@ -1201,10 +1217,10 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_engine_memory_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "max by (stream, role, path) (aceswarm_engine_memory_bytes) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
-          "legendFormat": "{{name}}",
+          "legendFormat": "{{name}}: {{role}} {{path}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1212,10 +1228,10 @@
           }
         },
         {
-          "expr": "aceswarm_engine_memory_bytes{stream=\"\"}",
+          "expr": "max by (path) (aceswarm_engine_memory_bytes{stream=\"\"})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{engine}}",
+          "legendFormat": "shared {{path}}",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -1285,10 +1301,10 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "max by (stream, role, path) (aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
-          "legendFormat": "{{name}}",
+          "legendFormat": "{{name}}: {{role}} {{path}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1296,10 +1312,10 @@
           }
         },
         {
-          "expr": "aceswarm_engine_memory_bytes{stream=\"\"} / aceswarm_engine_memory_limit_bytes{stream=\"\"}",
+          "expr": "max by (path) (aceswarm_engine_memory_bytes{stream=\"\"} / aceswarm_engine_memory_limit_bytes{stream=\"\"})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{engine}}",
+          "legendFormat": "shared {{path}}",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
@@ -1337,7 +1353,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Each engine's memory as a share of its limit (aceswarm_engine_memory_bytes over aceswarm_engine_memory_limit_bytes), with the lines of the panel on the left: one for each place an engine has, and one for each path's shared engine. An engine that reaches 100% is killed and restarted."
     },
     {
       "type": "stat",
@@ -1480,7 +1497,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above its lowest reading (at most 145 MiB, an idle engine), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat. Where an idle engine uses less than 145 MiB, a full cache can read a few MiB under the cap. An engine that keeps its cache on disk (ENGINE_CACHE_DIR) shows 0.",
+      "description": "Stream data each engine keeps in its memory cache. Engines don't report it, so this is the engine's memory above its lowest reading (at most 145 MiB, an idle engine), at most the cap (dashed, ENGINE_MEMORY_CACHE_MB). A full cache is normal: the engine then drops its oldest data, and its memory stays flat. Where an idle engine uses less than 145 MiB, a full cache can read a few MiB under the cap. An engine that keeps its cache on disk (ENGINE_CACHE_DIR) shows 0. One line for each place an engine has, as in Engine memory above.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1489,10 +1506,10 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_engine_memory_cache_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "max by (stream, role, path) (aceswarm_engine_memory_cache_bytes) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
-          "legendFormat": "{{name}}",
+          "legendFormat": "{{name}}: {{role}} {{path}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1500,10 +1517,10 @@
           }
         },
         {
-          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"}",
+          "expr": "max by (path) (aceswarm_engine_memory_cache_bytes{stream=\"\"})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{engine}}",
+          "legendFormat": "shared {{path}}",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -1574,10 +1591,10 @@
       },
       "targets": [
         {
-          "expr": "aceswarm_engine_memory_cache_bytes / aceswarm_engine_memory_cache_limit_bytes * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "expr": "max by (stream, role, path) (aceswarm_engine_memory_cache_bytes / aceswarm_engine_memory_cache_limit_bytes) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
           "range": true,
           "instant": false,
-          "legendFormat": "{{name}}",
+          "legendFormat": "{{name}}: {{role}} {{path}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1585,10 +1602,10 @@
           }
         },
         {
-          "expr": "aceswarm_engine_memory_cache_bytes{stream=\"\"} / aceswarm_engine_memory_cache_limit_bytes{stream=\"\"}",
+          "expr": "max by (path) (aceswarm_engine_memory_cache_bytes{stream=\"\"} / aceswarm_engine_memory_cache_limit_bytes{stream=\"\"})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{engine}}",
+          "legendFormat": "shared {{path}}",
           "refId": "B",
           "datasource": {
             "type": "prometheus",

@@ -45,7 +45,8 @@ groups:
         annotations:
           summary: "No network path is up: every stream is offline"
       - alert: AceSwarmEngineMemoryHigh
-        expr: aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes > 0.85
+        # Without the engine's role and path: they change at a failover, which would start the 5 minutes over.
+        expr: max without (role, path) (aceswarm_engine_memory_bytes / aceswarm_engine_memory_limit_bytes) > 0.85
         for: 5m
         labels:
           severity: warning

@@ -178,12 +178,19 @@ The stream's tile and the player's overlay show its standbys and whether they ar
 | --------- | ------------------------------------------- | ---- |
 | `metrics` | Prometheus, with recording rules and alerts | 9090 |
 | `logs`    | Alloy collecting container logs into Loki   | 3100 |
-| `grafana` | Grafana with the Ace Swarm dashboard        | 3000 |
+| `grafana` | Grafana with the Ace Swarm dashboards       | 3000 |
+
+Grafana has two dashboards, each with a link to the other at the top:
+
+- **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory and the recovery steps taken. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+
+Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
 
 To use an existing Grafana instead:
 
-1. Import [`monitoring/grafana/dashboards/aceswarm.json`](monitoring/grafana/dashboards/aceswarm.json).
-2. Choose your Prometheus and Loki data sources in its variables.
+1. Import both files in [`monitoring/grafana/dashboards`](monitoring/grafana/dashboards).
+2. Choose your Prometheus and Loki data sources in their variables.
 
 ## How it works
 
