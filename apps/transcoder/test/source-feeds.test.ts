@@ -48,7 +48,7 @@ function feeds(): {
     sources.open,
     createLogger("test", "silent"),
     () => clock.now,
-    30_000,
+    { stallMs: 30_000, segmentMs: 2000 },
   );
   const run = (mode: FullMode): Generation => {
     const opened = generation(mode);

@@ -4,6 +4,9 @@ import { CutPointWatch, MAX_STEADY_MS, STEADY_MS } from "../src/cut-point-watch.
 const TICKS_PER_SECOND = 90_000;
 const WRAP = 2 ** 33;
 
+/** A watch for a stall time of 30 s and segments of 2 s, unless told otherwise. */
+const watchOf = (stallMs = 30_000, segmentMs = 2000): CutPointWatch => new CutPointWatch({ stallMs, segmentMs });
+
 /** The time stamp of a second of the stream. */
 const ptsOf = (seconds: number): number => Math.round((seconds * TICKS_PER_SECOND) % WRAP);
 
@@ -26,46 +29,72 @@ function feed(
   return undefined;
 }
 
+/** Feeds IDR pictures with these gaps (seconds), over and over, for 200 s; returns when the watch first said yes, in seconds. */
+function feedGaps(watch: CutPointWatch, gaps: readonly number[]): number | undefined {
+  let at = 0;
+  for (let index = 0; at <= 200; index += 1) {
+    if (watch.cutPoint(ptsOf(at), "idr")) {
+      return at;
+    }
+    at += gaps[index % gaps.length] ?? 1;
+  }
+  return undefined;
+}
+
 describe("CutPointWatch", () => {
   it("lets the copy come back once cut points came often enough for a minute", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     expect(feed(watch, 1000, 120, 2)).toBe(STEADY_MS / 1000);
   });
 
   it("allows gaps of up to 5 s, or half the stall time when that is shorter", () => {
-    expect(feed(new CutPointWatch(30_000), 0, 200, 5)).toBe(60);
-    expect(feed(new CutPointWatch(30_000), 0, 200, 5.5)).toBeUndefined();
-    expect(feed(new CutPointWatch(8000), 0, 200, 4)).toBe(60);
-    expect(feed(new CutPointWatch(8000), 0, 200, 4.5)).toBeUndefined();
+    expect(feed(watchOf(), 0, 200, 5)).toBe(60);
+    expect(feed(watchOf(), 0, 200, 5.5)).toBeUndefined();
+    expect(feed(watchOf(8000), 0, 200, 4)).toBe(60);
+    expect(feed(watchOf(8000), 0, 200, 4.5)).toBeUndefined();
+  });
+
+  it("allows no cut points so uneven that the first segment of a copy begun at one would be longer than 5 s", () => {
+    // 1.8 s, then 5 s: a copy begun before the short gap ends its first segment 6.8 s on.
+    expect(feedGaps(watchOf(), [1.8, 5])).toBeUndefined();
+    // 1.5 s, then 3.4 s: 4.9 s.
+    expect(feedGaps(watchOf(), [1.5, 3.4])).toBeGreaterThanOrEqual(60);
+  });
+
+  it("allows a first segment as long as a segment, where segments are longer than that", () => {
+    expect(feed(watchOf(30_000, 6000), 0, 200, 2)).toBe(60);
+    expect(feed(watchOf(30_000, 6000), 0, 200, 3)).toBe(60);
+    // Every 4 s: the first segment ends 8 s on.
+    expect(feed(watchOf(30_000, 6000), 0, 200, 4)).toBeUndefined();
   });
 
   it("starts over after a gap, a step back in the time stamps, or a unit without one", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     expect(feed(watch, 0, 40, 2)).toBeUndefined();
     // A pause of 20 s: the minute counts from the first cut point after it.
     expect(feed(watch, 60, 58, 2)).toBeUndefined();
     expect(feed(watch, 120, 10, 2)).toBe(0);
 
-    const back = new CutPointWatch(30_000);
+    const back = watchOf();
     expect(feed(back, 1000, 40, 2)).toBeUndefined();
     expect(feed(back, 900, 58, 2)).toBeUndefined();
     expect(feed(back, 960, 2, 2)).toBe(0);
 
-    const without = new CutPointWatch(30_000);
+    const without = watchOf();
     expect(feed(without, 0, 40, 2)).toBeUndefined();
     expect(without.cutPoint(undefined, "idr")).toBe(false);
     expect(feed(without, 42, 58, 2)).toBeUndefined();
     expect(feed(without, 102, 2, 2)).toBe(0);
 
     // The same time stamp again: the clock stands still.
-    const still = new CutPointWatch(30_000);
+    const still = watchOf();
     expect(feed(still, 0, 40, 2)).toBeUndefined();
     expect(feed(still, 40, 58, 2)).toBeUndefined();
     expect(feed(still, 100, 2, 2)).toBe(0);
   });
 
   it("tells whether every cut point that counted was an IDR picture", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     expect(feed(watch, 0, 60, 2)).toBe(60);
     expect(watch.onlyIdrs).toBe(true);
     watch.reset();
@@ -81,13 +110,13 @@ describe("CutPointWatch", () => {
   });
 
   it("goes on across the wrap of the time stamps", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     const nearWrap = WRAP / TICKS_PER_SECOND - 30;
     expect(feed(watch, nearWrap, 120, 2)).toBe(60);
   });
 
   it("waits twice as long after each return that ended in a re-encode again, up to half an hour", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     expect(watch.waitMs).toBe(STEADY_MS);
     watch.failedAgain(STEADY_MS);
     expect(watch.waitMs).toBe(2 * STEADY_MS);
@@ -99,7 +128,7 @@ describe("CutPointWatch", () => {
   });
 
   it("waits a minute again after a copy that came back and played for half an hour", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     watch.failedAgain(STEADY_MS);
     watch.failedAgain(STEADY_MS);
     expect(watch.waitMs).toBe(4 * STEADY_MS);
@@ -108,7 +137,7 @@ describe("CutPointWatch", () => {
   });
 
   it("counts afresh after a reset, as once the copy came back", () => {
-    const watch = new CutPointWatch(30_000);
+    const watch = watchOf();
     expect(feed(watch, 0, 60, 2)).toBe(60);
     watch.reset();
     expect(feed(watch, 62, 50, 2)).toBeUndefined();

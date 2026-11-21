@@ -142,8 +142,9 @@ describe("cutPointOf", () => {
     expect(after(PIC_TIMING, bytes(41))).toBe("none");
     expect(after(PIC_TIMING, bytes(40))).toBe("recovery-point");
     // A buffering period for an SPS number that can't be.
-    expect(after(BUFFERING_PERIOD, bufferingPeriod(32))).toBe("none");
-    expect(after(BUFFERING_PERIOD, bufferingPeriod(31))).toBe("recovery-point");
+    expect(after(BUFFERING_PERIOD, bufferingPeriod(35))).toBe("none");
+    // Read as 31, which may be an SPS the stream doesn't have: ffmpeg reads on all the same.
+    expect(after(BUFFERING_PERIOD, bufferingPeriod(34))).toBe("recovery-point");
     // Too short a mastering display colour volume.
     expect(after(MASTERING_DISPLAY, bytes(23))).toBe("none");
     expect(after(MASTERING_DISPLAY, bytes(24))).toBe("recovery-point");

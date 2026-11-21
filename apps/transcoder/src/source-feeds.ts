@@ -1,5 +1,5 @@
 import type { Logger } from "@aceswarm/shared/logger";
-import { CutPointWatch } from "./cut-point-watch.ts";
+import { CutPointWatch, type CutPointTimes } from "./cut-point-watch.ts";
 import type { FullMode } from "./ffmpeg-args.ts";
 import { killProcess, type Connection, type Generation } from "./generation.ts";
 import type { CutPoint } from "./h264-cut-points.ts";
@@ -126,9 +126,9 @@ export class SourceFeeds {
   private readonly logger: Logger;
   private readonly now: () => number;
 
-  /** `stallMs`: how long a full output may write nothing before its run counts as stuck (see `StuckRuns`). */
-  constructor(host: FeedHost, openSource: OpenSource, logger: Logger, now: () => number, stallMs: number) {
-    this.cutPoints = new CutPointWatch(stallMs);
+  /** `cutTimes`: what decides how far apart the cut points of a copy that comes back may be (see `CutPointWatch`). */
+  constructor(host: FeedHost, openSource: OpenSource, logger: Logger, now: () => number, cutTimes: CutPointTimes) {
+    this.cutPoints = new CutPointWatch(cutTimes);
     this.host = host;
     this.openSource = openSource;
     this.logger = logger;

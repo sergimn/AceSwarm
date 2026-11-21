@@ -120,7 +120,8 @@ export class Pipeline {
     };
     const stuck = settings.stuck ?? DEFAULT_STUCK_LIMITS;
     const openSource = options.openSource ?? readSource;
-    this.feeds = new SourceFeeds(host, openSource, this.logger, this.now, stuck.fullOutputStallMs);
+    const cutTimes = { stallMs: stuck.fullOutputStallMs, segmentMs: settings.plan.segmentSeconds * 1000 };
+    this.feeds = new SourceFeeds(host, openSource, this.logger, this.now, cutTimes);
     this.stuck = new StuckRuns(stuck, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {

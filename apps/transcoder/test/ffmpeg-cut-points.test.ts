@@ -223,7 +223,7 @@ describe.skipIf(FFMPEG === undefined)("cutPointOf and ffmpeg's own key frames", 
     expect(agree(partitioned).points).toEqual(["idr"]);
   });
 
-  // Why key frames only decoding comes back with a copy only at an IDR picture (see `SourceFeeds`).
+  // Why key frames only decoding comes back with a copy only after IDR pictures alone (see `SourceFeeds`).
   it("gives a picture of every IDR when it decodes key frames only, and next to none of recovery points", () => {
     const pictures = Object.entries(KINDS).map(([name, args]) =>
       keyFramesOnlyPictures(encode(name.replaceAll(" ", "-"), args)),

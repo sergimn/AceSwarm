@@ -17,8 +17,9 @@ const MAX_RECOVERY_FRAMES = 1 << 16;
  * A type that is not here, ffmpeg reads without a check, or skips.
  */
 const READS = new Map<number, (payload: Uint8Array) => boolean>([
-  // Buffering period: the number of its SPS.
-  [0, (payload) => (expGolomb(payload) ?? Infinity) <= 31],
+  // Buffering period: the number of its SPS, which ffmpeg's short Exp-Golomb reader takes for 31
+  // from 32 to 34 too.
+  [0, (payload) => (expGolomb(payload) ?? Infinity) <= 34],
   // Picture timing, kept as it comes for later.
   [1, (payload) => payload.length <= 40],
   [4, () => false],
