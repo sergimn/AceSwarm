@@ -85,8 +85,14 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
 /** The fake clock's time: an hour after the engines in these tests started. */
 const clock = { now: Date.parse("2026-11-07T11:00:00Z") };
 
-function setup(engines: FakeEngine[]): { monitor: EngineResourceMonitor; kills: string[] } {
+/**
+ * A monitor over fake engines. `ended` are the runs it told, as "<container> <reason> <start> to
+ * <end>", and `kept` the containers it said there are, per sample.
+ */
+function setup(engines: FakeEngine[]) {
   const kills: string[] = [];
+  const ended: string[] = [];
+  const kept: string[][] = [];
   const monitor = new EngineResourceMonitor(
     fakeDocker(engines),
     {
@@ -94,11 +100,22 @@ function setup(engines: FakeEngine[]): { monitor: EngineResourceMonitor; kills: 
       onOomKill: (stream) => {
         kills.push(stream);
       },
+      runs: {
+        end: (run, reason) => {
+          const until = new Date(run.endedAt).toISOString();
+          ended.push(
+            `${run.containerId} ${run.stream}|${run.sharedPath ?? "-"} ${reason} ${run.startedAt} to ${until}`,
+          );
+        },
+        keep: (ids) => {
+          kept.push([...ids]);
+        },
+      },
       now: () => clock.now,
     },
     createLogger("test", "silent"),
   );
-  return { monitor, kills };
+  return { monitor, kills, ended, kept };
 }
 
 describe("EngineResourceMonitor", () => {
@@ -237,6 +254,66 @@ describe("EngineResourceMonitor", () => {
     await monitor.sample();
 
     expect(kills).toEqual([]);
+  });
+
+  it("tells the run of an engine that exited and was started again, by what ended it", async () => {
+    const killed = { ...engine("a", "s1", 760), startedAt: "2026-11-07T10:00:00Z" };
+    const crashed = { ...engine("b", "", 100), sharedPath: "wg:vpn", startedAt: "2026-11-07T10:30:00Z" };
+    const { monitor, ended } = setup([
+      killed,
+      crashed,
+      { ...engine("c", "s3", 100), startedAt: "2026-11-07T10:00:00Z" },
+    ]);
+    await monitor.sample();
+    expect(ended).toEqual([]);
+
+    // The runtime started both again by the next sample.
+    Object.assign(killed, { finishedAt: "2026-11-07T10:40:00Z", startedAt: "2026-11-07T10:40:01Z", oomKilled: true });
+    Object.assign(crashed, { finishedAt: "2026-11-07T10:45:00Z", startedAt: "2026-11-07T10:45:02Z" });
+    await monitor.sample();
+    await monitor.sample();
+
+    // Each once, from the start the sample before saw until the exit.
+    expect(ended).toEqual([
+      "a s1|- oom-killed 2026-11-07T10:00:00Z to 2026-11-07T10:40:00.000Z",
+      "b |wg:vpn exited 2026-11-07T10:30:00Z to 2026-11-07T10:45:00.000Z",
+    ]);
+  });
+
+  it("tells the run of an engine that exited and stays stopped from the start the container still says", async () => {
+    const stopped = { ...engine("a", "s1", 100), startedAt: "2026-11-07T10:00:00Z" };
+    const { monitor, ended } = setup([stopped]);
+    await monitor.sample();
+
+    // It ran again and stopped between two samples: the run the last sample saw is not the one that ended.
+    Object.assign(stopped, { running: false, startedAt: "2026-11-07T10:20:00Z", finishedAt: "2026-11-07T10:50:00Z" });
+    await monitor.sample();
+
+    expect(ended).toEqual(["a s1|- exited 2026-11-07T10:20:00Z to 2026-11-07T10:50:00.000Z"]);
+  });
+
+  it("tells no run for an exit from before its first look, or one whose start it cannot tell", async () => {
+    const old = { ...engine("a", "s1", 100), startedAt: "2026-11-07T10:00:00Z", finishedAt: "2026-11-07T09:00:00Z" };
+    // Its clock says it started after it exited, both at the sample before and now.
+    const odd = { ...engine("b", "s2", 100), startedAt: "2026-11-07T10:55:00Z" };
+    const { monitor, ended } = setup([old, odd]);
+    await monitor.sample();
+
+    Object.assign(odd, { finishedAt: "2026-11-07T10:50:00Z", startedAt: "2026-11-07T10:56:00Z" });
+    await monitor.sample();
+
+    expect(ended).toEqual([]);
+  });
+
+  it("says which engine containers there are after every sample, so the runs of the others are forgotten", async () => {
+    const engines = [engine("a", "s1", 100), { ...engine("b", "s2", 100), running: false }];
+    const { monitor, kept } = setup(engines);
+
+    await monitor.sample();
+    engines.pop();
+    await monitor.sample();
+
+    expect(kept).toEqual([["a", "b"], ["a"]]);
   });
 
   it("counts the running engines, own and shared, from the last sample", async () => {

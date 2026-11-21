@@ -131,7 +131,7 @@ export class StandbyEngine {
       this.session = await openSession(engine.baseUrl);
     } catch (error) {
       if (!this.shared && !(await this.answers(engine))) {
-        await this.forgetOwnEngine(engine.containerId);
+        await this.forgetOwnEngine(engine.containerId, "it does not answer");
       }
       throw error;
     }
@@ -164,12 +164,11 @@ export class StandbyEngine {
       this.engine = await this.requiredShared().rejoin(engine, this.deps.streamId, "standby");
     } else {
       try {
-        this.engine = await this.deps.engines.restart(engine, async (handle) => {
-          await this.route(handle.ip);
-        });
+        const route = async (handle: EngineHandle): Promise<void> => this.route(handle.ip);
+        this.engine = await this.deps.engines.restart(engine, route, "the standby brought no data");
       } catch (error) {
         if (error instanceof EngineGoneError) {
-          await this.forgetOwnEngine(engine.containerId);
+          await this.forgetOwnEngine(engine.containerId, "it is gone or does not answer after a restart");
         }
         throw error;
       }
@@ -189,9 +188,9 @@ export class StandbyEngine {
         await this.deps.shared?.releaseStandby(engine, this.deps.streamId, this.played).catch(() => undefined);
       }
     } else if (engine !== undefined) {
-      await this.forgetOwnEngine(engine.containerId);
+      await this.forgetOwnEngine(engine.containerId, why);
     } else if (this.generation !== undefined) {
-      await this.forgetOwnEngine(this.deps.engines.ownName(this.deps.streamId, this.generation));
+      await this.forgetOwnEngine(this.deps.engines.ownName(this.deps.streamId, this.generation), why);
     }
     if (engine !== undefined) {
       this.deps.logger.info({ path: this.path, engine: engine.name, reason: why }, "removed the standby");
@@ -224,7 +223,7 @@ export class StandbyEngine {
       });
     } catch (error) {
       // A container that never answered is left behind by the start.
-      await this.forgetOwnEngine(this.deps.engines.ownName(this.deps.streamId, generation));
+      await this.forgetOwnEngine(this.deps.engines.ownName(this.deps.streamId, generation), "it did not start");
       throw error;
     }
     this.deps.metrics.engineStarts.inc({ stream: this.deps.streamId });
@@ -233,8 +232,11 @@ export class StandbyEngine {
     }
   }
 
-  /** Removes the container of its own engine, and its path at the gateway; the next try starts a new one. */
-  private async forgetOwnEngine(idOrName: string): Promise<void> {
+  /**
+   * Removes the container of its own engine, and its path at the gateway; the next try starts a new
+   * one. `why` says in the log what the engine goes for.
+   */
+  private async forgetOwnEngine(idOrName: string, why: string): Promise<void> {
     this.engine = undefined;
     // `owns` knows the container by its generation until it is gone: removing it takes a while.
     const { generation } = this;
@@ -242,7 +244,8 @@ export class StandbyEngine {
       await this.deps.gateway.drop(this.ip);
       this.ip = undefined;
     }
-    await this.deps.engines.remove({ containerId: idOrName, name: idOrName }).catch((error: unknown) => {
+    const engine = { containerId: idOrName, name: idOrName };
+    await this.deps.engines.remove(engine, "standby-removed", why).catch((error: unknown) => {
       this.deps.logger.warn({ err: error, engine: idOrName }, "could not remove a standby engine");
     });
     if (this.generation === generation) {

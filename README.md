@@ -183,14 +183,17 @@ The stream's tile and the player's overlay show its standbys and whether they ar
 Grafana has two dashboards, each with a link to the other at the top:
 
 - **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
-- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory and the recovery steps taken. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
 
 Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
+
+Both dashboards also list every engine that was removed, restarted or that exited: when, why, what it was for and how long it had run. The list comes from the controller's log, so it needs the `logs` profile. The overview counts these by reason and shows how long engines last, which needs only the `metrics` profile.
 
 To use an existing Grafana instead:
 
 1. Import both files in [`monitoring/grafana/dashboards`](monitoring/grafana/dashboards).
 2. Choose your Prometheus and Loki data sources in their variables.
+3. If your Prometheus collects less often than every 15 seconds, set its interval as the scrape interval in the settings of Grafana's Prometheus data source. The bars of "Recovery steps" count with it, and miss steps when it is shorter than the real one.
 
 ## How it works
 

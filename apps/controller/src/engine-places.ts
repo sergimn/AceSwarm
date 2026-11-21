@@ -82,6 +82,19 @@ export class EnginePlaces {
     return places;
   }
 
+  /**
+   * The place a stream's engine had when `resolve` last ran, or the one it had before that while
+   * that is recent: what an engine that is being restarted or removed was for. Undefined for an
+   * engine that `resolve` never saw, such as one that lasted less than the time between two runs.
+   */
+  placeOf(engine: string): EnginePlace | undefined {
+    const last = this.last.get(engine);
+    if (last === undefined) {
+      return undefined;
+    }
+    return this.now() - last.at <= PLACE_HOLD_MS ? last.place : NO_PLACE;
+  }
+
   /** The streams' engines that have a place right now, by container name. A stronger role replaces a weaker one. */
   private current(streams: readonly StreamView[]): Map<string, EnginePlace> {
     const places = new Map<string, EnginePlace>();

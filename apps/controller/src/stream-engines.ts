@@ -3,6 +3,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { AcestreamClient, EngineSession, EngineStats } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import { EnginePaths } from "./engine-paths.ts";
+import type { EngineEndReason } from "./engine-runs.ts";
 import { EngineGoneError, type EngineHandle, type EngineManager, type OnEngineAddress } from "./engines.ts";
 import type { ControllerMetrics } from "./metrics.ts";
 import {
@@ -193,7 +194,7 @@ export class StreamEngines {
     const kept = found.find((engine) => engine.name === wanted) ?? found[0];
     for (const engine of found) {
       if (engine !== kept) {
-        await this.deps.engines.remove(engine);
+        await this.deps.engines.remove(engine, "leftover", "the stream took over another of its engines");
       }
     }
     if (spare !== undefined && spare.engine.containerId !== kept?.containerId) {
@@ -214,12 +215,13 @@ export class StreamEngines {
     return this.remember(engine);
   }
 
-  /** Restarts the stream's own engine in place. A spare keeps its path. */
-  async restartOwn(engine: EngineHandle, onAddress: OnEngineAddress): Promise<EngineHandle> {
-    return this.deps.engines.restart(engine, async (starting) => {
+  /** Restarts the stream's own engine in place, for the reason `why`. A spare keeps its path. */
+  async restartOwn(engine: EngineHandle, why: string, onAddress: OnEngineAddress): Promise<EngineHandle> {
+    const assign = async (starting: EngineHandle): Promise<void> => {
       await this.gateway.keepOnly(starting.ip, ...(this.spare === undefined ? [] : [this.spare.engine.ip]));
       await onAddress(starting);
-    });
+    };
+    return this.deps.engines.restart(engine, assign, why);
   }
 
   /**
@@ -235,12 +237,12 @@ export class StreamEngines {
       return shared.rejoin(current, this.streamId);
     }
     if (current !== undefined) {
-      await this.release(current);
+      await this.release(current, "sharing");
     }
     this.clearSpare();
     await this.gateway.dropAll();
     await this.standbys.dropOwn("streams share engines now");
-    await this.deps.engines.removeAllFor(this.streamId);
+    await this.deps.engines.removeAllFor(this.streamId, "sharing");
     return this.remember(await shared.acquire(path, this.streamId));
   }
 
@@ -481,7 +483,7 @@ export class StreamEngines {
     if (answered) {
       this.logger.info({ engine: engine.name, failures }, "removing the new engine after its move failed");
     }
-    await this.release(engine).catch(() => undefined);
+    await this.release(engine, "move-failed").catch(() => undefined);
   }
 
   /**
@@ -571,7 +573,7 @@ export class StreamEngines {
     }
     this.logger.info({ engine: spare.engine.name, reason: why }, "removing the kept engine");
     await this.gateway.drop(spare.engine.ip);
-    await this.deps.engines.remove(spare.engine).catch((error: unknown) => {
+    await this.deps.engines.remove(spare.engine, "move-failed", why).catch((error: unknown) => {
       this.logger.warn({ err: error, engine: spare.engine.name }, "could not remove the kept engine");
     });
   }
@@ -632,14 +634,17 @@ export class StreamEngines {
     return next;
   }
 
-  /** Lets go of an engine: leaves a shared one (which goes once nobody uses it), removes its own. */
-  async release(engine: EngineHandle): Promise<void> {
+  /**
+   * Lets go of an engine: leaves a shared one (which goes once nobody uses it), removes its own.
+   * `reason` is why its own goes: by default, the stream moved to another engine.
+   */
+  async release(engine: EngineHandle, reason: EngineEndReason = "moved"): Promise<void> {
     if (engine.sharedPath !== null) {
       await this.deps.shared?.release(engine, this.streamId, this.playedOn === engine.containerId);
       return;
     }
     await this.gateway.drop(engine.ip);
-    await this.deps.engines.remove(engine);
+    await this.deps.engines.remove(engine, reason);
   }
 
   /** Lets go of every engine of the stream: its place on a shared engine, its standbys and its own engines. */
@@ -650,7 +655,7 @@ export class StreamEngines {
     await this.standbys.teardown();
     this.clearSpare();
     await this.gateway.dropAll();
-    await this.deps.engines.removeAllFor(this.streamId);
+    await this.deps.engines.removeAllFor(this.streamId, "stopped");
   }
 
   private required(): SharedEngines {

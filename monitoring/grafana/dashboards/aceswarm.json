@@ -47,7 +47,7 @@
           "refId": "streams"
         },
         "definition": "query_result(aceswarm_stream_info or (last_over_time(aceswarm_stream_info[$__range]) unless on (stream) aceswarm_stream_info))",
-        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[^\"=,]+=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
         "description": "Every stream by name. A deleted stream stays while the dashboard's range covers its life.",
         "includeAll": true,
         "multi": true,
@@ -1624,6 +1624,377 @@
       "options": {}
     },
     {
+      "type": "timeseries",
+      "title": "Engines restarted or removed per hour",
+      "id": 47,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How many runs of an engine ended, by reason (aceswarm_engine_lifetime_seconds). A run ends when the engine is removed, restarted in its container, or exits. A stream's own engine: moved (the stream plays from another engine now), move-failed (the new engine of a move that failed, at once or after it was kept to try again), standby-removed (a hot standby that failed or is no longer needed), sharing (the stream plays from its path's shared engine now), stopped (the stream was stopped, disabled or deleted), leftover (an engine nothing used, such as one an earlier run of the controller left behind), restart (a recovery step, a restart by hand, or a standby that brought no data), oom-killed (it exceeded its memory limit, ENGINE_MEMORY_MB) and exited (it ended by itself, or was stopped or restarted from outside). A shared engine: replaced (a new engine took its place), idle (no stream used it any more) and unresponsive (it stopped answering), and leftover, oom-killed and exited as above. The table below lists each one.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 115
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (increase(aceswarm_engine_lifetime_seconds_count[1h])) > 0",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "table",
+      "title": "How long engines ran, by reason",
+      "id": 48,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The runs of engines that ended in the dashboard's range (aceswarm_engine_lifetime_seconds): how many, and how long they lasted, from the engine's start or its last restart until it was removed, restarted or exited. Kind: own for an engine of one stream, shared for a path's shared engine. Average: the mean of those runs. Half ran less than: the median, estimated from the histogram's steps (30 s, 1, 2, 5 and 15 min, 1 and 6 h, 1 day, 1 week), so it is rough between two steps. Short runs under restart, oom-killed or exited are engines that keep failing.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 115
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind, reason) (increase(aceswarm_engine_lifetime_seconds_count[$__range])) > 0",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "sum by (kind, reason) (increase(aceswarm_engine_lifetime_seconds_sum[$__range])) / (sum by (kind, reason) (increase(aceswarm_engine_lifetime_seconds_count[$__range])) > 0)",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum by (kind, reason, le) (increase(aceswarm_engine_lifetime_seconds_bucket[$__range]))) and on (kind, reason) (sum by (kind, reason) (increase(aceswarm_engine_lifetime_seconds_count[$__range])) > 0)",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "kind": 0,
+              "reason": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4
+            },
+            "renameByName": {
+              "kind": "Kind",
+              "reason": "Why",
+              "Value #A": "Ended",
+              "Value #B": "Average",
+              "Value #C": "Half ran less than"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ended"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Average"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Half ran less than"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Ended",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Engines restarted or removed",
+      "id": 49,
+      "datasource": {
+        "type": "loki",
+        "uid": "${logs}"
+      },
+      "description": "Every time an engine was removed, restarted or exited in the dashboard's range, newest first: the engines of the streams picked above, and with All also the shared engines. An engine's name has its stream's id, or its path for a shared engine; the Ace Swarm streams dashboard has this table for each stream by name. From the controller's log, so it needs the logs data source. What: Removed, Restarted in its container by the controller, or Exited: the engine's process ended, and the container runtime starts it again. Why: moved (the stream plays from another engine now), move-failed (the new engine of a move that failed, at once or after it was kept to try again), standby-removed (a hot standby that failed or is no longer needed), sharing (the stream plays from its path's shared engine now), stopped (the stream was stopped, disabled or deleted), leftover (an engine nothing used, such as one an earlier run of the controller left behind), restart (a recovery step, a restart by hand, or a standby that brought no data), oom-killed (it exceeded its memory limit, ENGINE_MEMORY_MB) and exited (it ended by itself, or was stopped or restarted from outside). A shared engine goes for other reasons: replaced (a new engine took its place), idle (no stream used it any more) and unresponsive (it stopped answering). More: what the controller adds to the reason. Was: what the engine was for when it went (playing, standby, kept, starting, shared or other), on the network path in Path; both are empty for an engine that went within seconds of its start. Ran for: from the engine's start, or its last restart, until then.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 123
+      },
+      "targets": [
+        {
+          "expr": "{service=\"controller\"} |~ `\"msg\":\"engine (removed|restarted|exited)\"` | json | stream=~\"$stream\"",
+          "queryType": "range",
+          "maxLines": 500,
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${logs}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Line",
+            "format": "json",
+            "replace": true,
+            "keepTime": true
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Time": true,
+              "msg": true,
+              "reason": true,
+              "detail": true,
+              "role": true,
+              "path": true,
+              "lifetimeSeconds": true,
+              "engine": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "msg": 1,
+              "reason": 2,
+              "detail": 3,
+              "role": 4,
+              "path": 5,
+              "lifetimeSeconds": 6,
+              "engine": 7
+            },
+            "renameByName": {
+              "Time": "When",
+              "msg": "What",
+              "reason": "Why",
+              "detail": "More",
+              "role": "Was",
+              "path": "Path",
+              "lifetimeSeconds": "Ran for",
+              "engine": "Engine"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "When"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "What"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "engine removed": {
+                        "text": "Removed",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "engine restarted": {
+                        "text": "Restarted",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "engine exited": {
+                        "text": "Exited",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Why"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Was"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Path"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ran for"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "When",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
       "type": "row",
       "title": "Network paths",
       "id": 17,
@@ -1632,7 +2003,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 115
+        "y": 131
       },
       "panels": []
     },
@@ -1648,7 +2019,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 116
+        "y": 132
       },
       "targets": [
         {
@@ -1703,7 +2074,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 122
+        "y": 138
       },
       "targets": [
         {
@@ -1738,7 +2109,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 122
+        "y": 138
       },
       "targets": [
         {
@@ -1773,7 +2144,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 122
+        "y": 138
       },
       "targets": [
         {
@@ -1810,7 +2181,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 130
+        "y": 146
       },
       "targets": [
         {
@@ -1851,7 +2222,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 130
+        "y": 146
       },
       "targets": [
         {
@@ -1887,7 +2258,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 138
+        "y": 154
       },
       "panels": []
     },
@@ -1903,7 +2274,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 139
+        "y": 155
       },
       "targets": [
         {
@@ -1937,7 +2308,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 149
+        "y": 165
       },
       "targets": [
         {

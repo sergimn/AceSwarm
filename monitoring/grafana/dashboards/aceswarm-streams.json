@@ -45,7 +45,7 @@
         "type": "datasource",
         "query": "loki",
         "current": {},
-        "hide": 2,
+        "hide": 0,
         "refresh": 1
       },
       {
@@ -61,7 +61,7 @@
           "refId": "streams"
         },
         "definition": "query_result((aceswarm_stream_info and on (stream) last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range])) or (last_over_time(aceswarm_stream_info{enabled=\"true\"}[$__range]) unless on (stream) aceswarm_stream_info))",
-        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[a-zA-Z_][a-zA-Z0-9_]*=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
+        "regex": "/[{,]name=\"(?<text>[\\s\\S]*?)\",(?:[^\"=,]+=\"[^\"]*\",)*stream=\"(?<value>[a-z0-9]+)\"/",
         "description": "The streams that were enabled at some time in the dashboard's range, by name. A deleted stream stays while the range covers its life.",
         "includeAll": true,
         "multi": true,
@@ -675,7 +675,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "The steps the controller took to bring the stream's video back, whether or not they did (aceswarm_stream_recoveries_total), counted in stretches of at least 5 minutes. restart-pipeline: it opened the stream again on the same engine. restart-engine: it restarted the engine's container. switch-path: it moved the stream to a new engine on another network path. failover: it switched to the hot standby on another path.",
+      "description": "The steps the controller took to bring the stream's video back, whether or not they did (aceswarm_stream_recoveries_total), counted in stretches of at least 5 minutes: a bar shows once its stretch is over. restart-pipeline: it opened the stream again on the same engine. restart-engine: it restarted the engine's container. switch-path: it moved the stream to a new engine on another network path. failover: it switched to the hot standby on another path.",
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -702,6 +702,8 @@
           "decimals": 0,
           "custom": {
             "drawStyle": "bars",
+            "barAlignment": -1,
+            "barWidthFactor": 1,
             "fillOpacity": 60,
             "lineWidth": 1,
             "stacking": {
@@ -723,6 +725,206 @@
         }
       },
       "interval": "5m"
+    },
+    {
+      "type": "table",
+      "title": "Engines restarted or removed",
+      "id": 10,
+      "datasource": {
+        "type": "loki",
+        "uid": "${logs}"
+      },
+      "description": "Every time an engine of the stream's own was removed, restarted or exited in the dashboard's range, newest first. A stream that plays from its path's shared engine has none: the overview lists the shared engines too. From the controller's log, so it needs the logs data source. What: Removed, Restarted in its container by the controller, or Exited: the engine's process ended, and the container runtime starts it again. Why: moved (the stream plays from another engine now), move-failed (the new engine of a move that failed, at once or after it was kept to try again), standby-removed (a hot standby that failed or is no longer needed), sharing (the stream plays from its path's shared engine now), stopped (the stream was stopped, disabled or deleted), leftover (an engine nothing used, such as one an earlier run of the controller left behind), restart (a recovery step, a restart by hand, or a standby that brought no data), oom-killed (it exceeded its memory limit, ENGINE_MEMORY_MB) and exited (it ended by itself, or was stopped or restarted from outside). A shared engine goes for other reasons: replaced (a new engine took its place), idle (no stream used it any more) and unresponsive (it stopped answering). More: what the controller adds to the reason. Was: what the engine was for when it went (playing, standby, kept, starting, shared or other), on the network path in Path; both are empty for an engine that went within seconds of its start. Ran for: from the engine's start, or its last restart, until then.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "{service=\"controller\"} |~ `\"msg\":\"engine (removed|restarted|exited)\"` | json | stream=\"$stream\"",
+          "queryType": "range",
+          "maxLines": 500,
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${logs}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Line",
+            "format": "json",
+            "replace": true,
+            "keepTime": true
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "Time": true,
+              "msg": true,
+              "reason": true,
+              "detail": true,
+              "role": true,
+              "path": true,
+              "lifetimeSeconds": true,
+              "engine": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "msg": 1,
+              "reason": 2,
+              "detail": 3,
+              "role": 4,
+              "path": 5,
+              "lifetimeSeconds": 6,
+              "engine": 7
+            },
+            "renameByName": {
+              "Time": "When",
+              "msg": "What",
+              "reason": "Why",
+              "detail": "More",
+              "role": "Was",
+              "path": "Path",
+              "lifetimeSeconds": "Ran for",
+              "engine": "Engine"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "When"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "What"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "engine removed": {
+                        "text": "Removed",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "engine restarted": {
+                        "text": "Restarted",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "engine exited": {
+                        "text": "Exited",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Why"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Was"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Path"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Ran for"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "When",
+            "desc": true
+          }
+        ]
+      }
     }
   ]
 }
