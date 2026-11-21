@@ -17,6 +17,7 @@ COPY --chmod=0755 engine/start-amd64.sh /usr/local/lib/aceswarm/start-engine
 
 FROM docker.io/jopsis/acestream:v3.2.17-fix@sha256:506c4215115d8b0ac1e24f4c67c954f0dbf86e4b4ea508582e497d8c920e9933 AS engine-arm64
 COPY --chmod=0755 engine/start-arm64.sh /usr/local/lib/aceswarm/start-engine
+COPY --chmod=0644 engine/arm64-shim.py /usr/local/lib/aceswarm/arm64-shim.py
 
 # hadolint ignore=DL3006
 FROM engine-${TARGETARCH}
@@ -28,7 +29,7 @@ COPY --from=busybox /bin/busybox /usr/local/lib/aceswarm/busybox
 COPY --chmod=0755 engine/entrypoint.sh /usr/local/lib/aceswarm/entrypoint.sh
 # ACESWARM_DISK_CACHE_BYTES above 0 moves the x86 engine's stream cache from memory to a folder of
 # its own under /cache, where the controller mounts ENGINE_CACHE_DIR (see entrypoint.sh). The arm64
-# engine refuses it (see start-arm64.sh).
+# engine uses it through arm64-shim.py (see start-arm64.sh).
 ENV ACESWARM_ENGINE_USER=1000:1000 \
     ACESWARM_LIVE_CACHE_BYTES=104857600 \
     ACESWARM_MEMORY_CACHE_BYTES=134217728 \
