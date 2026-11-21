@@ -285,11 +285,49 @@ describe("EngineResourceMonitor", () => {
     const { monitor, ended } = setup([stopped]);
     await monitor.sample();
 
-    // It ran again and stopped between two samples: the run the last sample saw is not the one that ended.
-    Object.assign(stopped, { running: false, startedAt: "2026-11-07T10:20:00Z", finishedAt: "2026-11-07T10:50:00Z" });
+    Object.assign(stopped, { running: false, finishedAt: "2026-11-07T10:50:00Z" });
+    await monitor.sample();
     await monitor.sample();
 
-    expect(ended).toEqual(["a s1|- exited 2026-11-07T10:20:00Z to 2026-11-07T10:50:00.000Z"]);
+    expect(ended).toEqual(["a s1|- exited 2026-11-07T10:00:00Z to 2026-11-07T10:50:00.000Z"]);
+  });
+
+  it("tells both runs of an engine that started again and exited again between two samples", async () => {
+    const stopped = { ...engine("a", "s1", 760), startedAt: "2026-11-07T10:00:00Z" };
+    const { monitor, ended, kills } = setup([stopped]);
+    await monitor.sample();
+
+    // The run the last sample saw ended, nobody saw how, and the next one was killed and is not up yet.
+    Object.assign(stopped, {
+      running: false,
+      startedAt: "2026-11-07T10:20:00Z",
+      finishedAt: "2026-11-07T10:50:00Z",
+      oomKilled: true,
+    });
+    await monitor.sample();
+
+    // The first until the second started, which is the latest it can have ended.
+    expect(ended).toEqual([
+      "a s1|- exited 2026-11-07T10:00:00Z to 2026-11-07T10:20:00.000Z",
+      "a s1|- oom-killed 2026-11-07T10:20:00Z to 2026-11-07T10:50:00.000Z",
+    ]);
+    expect(kills).toEqual(["s1"]);
+  });
+
+  it("tells no run that began before the container ever started", async () => {
+    // First seen between its creation and its start.
+    const created = { ...engine("a", "s1", 100), running: false, state: "created" };
+    const stopped = { ...engine("b", "s2", 100), running: false, state: "created" };
+    const { monitor, ended } = setup([created, stopped]);
+    await monitor.sample();
+
+    // One started, exited and runs again by the next sample; the other started and exited.
+    Object.assign(created, { running: true, startedAt: "2026-11-07T10:58:30Z", finishedAt: "2026-11-07T10:58:20Z" });
+    Object.assign(stopped, { state: "exited", startedAt: "2026-11-07T10:58:00Z", finishedAt: "2026-11-07T10:58:20Z" });
+    await monitor.sample();
+
+    // Only the run whose start the container says.
+    expect(ended).toEqual(["b s2|- exited 2026-11-07T10:58:00Z to 2026-11-07T10:58:20.000Z"]);
   });
 
   it("tells no run for an exit from before its first look, or one whose start it cannot tell", async () => {

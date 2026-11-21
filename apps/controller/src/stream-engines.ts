@@ -194,7 +194,9 @@ export class StreamEngines {
     const kept = found.find((engine) => engine.name === wanted) ?? found[0];
     for (const engine of found) {
       if (engine !== kept) {
-        await this.deps.engines.remove(engine, "leftover", "the stream took over another of its engines");
+        // The spare is the engine of a failed move; any other is one nothing used.
+        const reason = engine.containerId === spare?.engine.containerId ? "move-failed" : "leftover";
+        await this.deps.engines.remove(engine, reason, "the stream took over another of its engines");
       }
     }
     if (spare !== undefined && spare.engine.containerId !== kept?.containerId) {
@@ -436,7 +438,7 @@ export class StreamEngines {
     }
     // A move can end on the shared engine the stream came from (it was current again).
     if (moved.engine.containerId !== move.from.containerId) {
-      await this.release(move.from);
+      await this.release(move.from, moved.engine.sharedPath === null ? "moved" : "sharing");
     }
   }
 

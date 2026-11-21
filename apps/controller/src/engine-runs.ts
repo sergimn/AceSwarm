@@ -16,7 +16,8 @@ const EXITS = ["oom-killed", "exited"] as const;
  * Removed, an engine of one stream:
  * - moved: the stream plays from another engine now.
  * - move-failed: the new engine of a move that failed, at once or after it was kept to try again.
- * - standby-removed: a hot standby that failed, or that the stream no longer needs.
+ * - standby-removed: a hot standby that failed, or that the stream no longer needs; also the engine
+ *   a stream left on a failover, when it cannot stay as the standby on its path.
  * - sharing: the stream plays from its path's shared engine now.
  * - stopped: the stream was stopped, disabled or deleted.
  *
@@ -101,6 +102,24 @@ export interface EngineRunsDeps {
   logger: Logger;
 }
 
+/** A run that ended, as one of the two that see it tells it. */
+interface Ending {
+  run: EngineRun;
+  reason: EngineEndReason;
+  detail: string | undefined;
+}
+
+/** A run the controller is ending itself. */
+interface Claim {
+  /** What the engine was for when the controller began: afterwards its place can be forgotten. */
+  place: EnginePlace | undefined;
+  /** What the sampler saw of it meanwhile, which counts if the controller's own action fails. */
+  seen?: Ending;
+}
+
+/** How many runs of one container are remembered: the sampler only tells the last one or two. */
+const RUNS_REMEMBERED = 8;
+
 /**
  * Counts and logs every run of an engine that ends: how long it lasted, why it ended, and what the
  * engine was for. An engine's container name is new with every engine, so the count has the reason
@@ -115,8 +134,8 @@ export interface EngineRunsDeps {
 export class EngineRuns {
   private readonly deps: EngineRunsDeps;
   private readonly logger: Logger;
-  /** The start of the last run that ended or is about to, per container id. */
-  private readonly ended = new Map<string, string>();
+  /** The runs that ended ("told") or that the controller is ending, by container id and run start. */
+  private readonly runs = new Map<string, Map<string, Claim | "told">>();
 
   constructor(deps: EngineRunsDeps) {
     this.deps = deps;
@@ -125,44 +144,65 @@ export class EngineRuns {
 
   /** The run ended for this reason; `detail` says more in the log. Does nothing when it was told before. */
   end(run: EngineRun, reason: EngineEndReason, detail?: string): void {
-    this.ending(run)(reason, detail);
+    const state = this.runs.get(run.containerId)?.get(run.startedAt);
+    if (state === undefined) {
+      this.ending(run)(reason, detail);
+    } else if (state !== "told") {
+      state.seen ??= { run, reason, detail };
+    }
   }
 
   /**
    * The controller is about to end the run itself, by restarting or removing the container. From
    * now on the run counts as told, so the sampler doesn't report the exit it sees meanwhile as one
    * the engine made by itself. Call the returned function with the reason once the container is
-   * restarted or removed, or without one when that failed and the engine runs on.
+   * restarted or removed, or without one when that failed: the run then ended only if the sampler
+   * saw the engine exit meanwhile (a restart that stopped it and could not start it again), and
+   * otherwise the engine runs on.
    */
   ending(run: EngineRun): (reason?: EngineEndReason, detail?: string) => void {
-    if (this.ended.get(run.containerId) === run.startedAt) {
+    const starts = this.runs.get(run.containerId) ?? new Map<string, Claim | "told">();
+    if (starts.has(run.startedAt)) {
       return () => undefined;
     }
-    this.ended.set(run.containerId, run.startedAt);
+    const claim: Claim = { place: this.place(run) };
+    starts.set(run.startedAt, claim);
+    this.runs.set(run.containerId, starts);
+    const oldest = starts.size > RUNS_REMEMBERED ? starts.keys().next().value : undefined;
+    if (oldest !== undefined) {
+      starts.delete(oldest);
+    }
     return (reason, detail) => {
-      if (reason !== undefined) {
-        this.tell(run, reason, detail);
-      } else if (this.ended.get(run.containerId) === run.startedAt) {
-        this.ended.delete(run.containerId);
+      const ended = reason === undefined ? claim.seen : { run, reason, detail };
+      if (ended === undefined) {
+        if (starts.get(run.startedAt) === claim) {
+          starts.delete(run.startedAt);
+        }
+        return;
       }
+      starts.set(run.startedAt, "told");
+      this.tell(ended, claim.place);
     };
   }
 
   /** Forgets the containers that are gone: `containerIds` are the engine containers there are. */
   keep(containerIds: ReadonlySet<string>): void {
-    for (const id of this.ended.keys()) {
+    for (const id of this.runs.keys()) {
       if (!containerIds.has(id)) {
-        this.ended.delete(id);
+        this.runs.delete(id);
       }
     }
   }
 
-  private tell(run: EngineRun, reason: EngineEndReason, detail: string | undefined): void {
+  /** What the engine of this run is for, as far as the controller knows. */
+  private place(run: EngineRun): EnginePlace | undefined {
+    return run.sharedPath === null ? this.deps.placeOf(run.engine) : { role: "shared", path: run.sharedPath };
+  }
+
+  private tell({ run, reason, detail }: Ending, place: EnginePlace | undefined): void {
     const kind: EngineKind = run.sharedPath === null ? "own" : "shared";
     const lifetimeSeconds = Math.max(0, Math.round((run.endedAt - Date.parse(run.startedAt)) / 1000));
     this.deps.observe(kind, reason, lifetimeSeconds);
-    const place: EnginePlace | undefined =
-      run.sharedPath === null ? this.deps.placeOf(run.engine) : { role: "shared", path: run.sharedPath };
     this.logger.info(
       {
         engine: run.engine,

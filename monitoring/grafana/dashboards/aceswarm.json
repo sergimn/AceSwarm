@@ -1668,7 +1668,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "The runs of engines that ended in the dashboard's range (aceswarm_engine_lifetime_seconds): how many, and how long they lasted, from the engine's start or its last restart until it was removed, restarted or exited. Kind: own for an engine of one stream, shared for a path's shared engine. Average: the mean of those runs. Half ran less than: the median, estimated from the histogram's steps (30 s, 1, 2, 5 and 15 min, 1 and 6 h, 1 day, 1 week), so it is rough between two steps. Short runs under restart, oom-killed or exited are engines that keep failing.",
+      "description": "The runs of engines that ended in the dashboard's range (aceswarm_engine_lifetime_seconds): how many, and how long they lasted, from the engine's start or its last restart until it was removed, restarted or exited. Kind: own for an engine of one stream, shared for a path's shared engine. Average: the mean of those runs. Half ran less than: the median, estimated from the histogram's steps (30 s, 1, 2, 5 and 15 min, 1 and 6 h, 1 day, 1 week, 30 days), so it is rough between two steps. Short runs under restart, oom-killed or exited are engines that keep failing.",
       "gridPos": {
         "h": 8,
         "w": 12,

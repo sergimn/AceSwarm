@@ -570,13 +570,16 @@ test("removes a stream from the manage dialog, and its engine", async ({ page, r
 
   // The engine's run ended because its stream stopped: the controller logged it with what the
   // engine was for and how long it ran (the dashboards' "Engines restarted or removed"), from the
-  // start time the container runtime reports, and counted it.
-  const ended = engineRunsEnded(target!.id).filter((run) => run.reason === "stopped");
-  expect(ended).toHaveLength(1);
-  expect(ended[0]).toMatchObject({ msg: "engine removed", engine, role: "playing", path: "direct" });
-  expect(ended[0]!.lifetimeSeconds).toBeGreaterThan(5);
-  expect(ended[0]!.lifetimeSeconds).toBeLessThan(3600);
+  // start time the container runtime reports, and counted it. It does so once the runtime answered
+  // that the container is removed, which can be a moment after the container left the list.
+  await expect
+    .poll(() => engineRunsEnded(target!.id).filter((run) => run.reason === "stopped"), { timeout: 30_000 })
+    .toHaveLength(1);
+  const ended = engineRunsEnded(target!.id).find((run) => run.reason === "stopped");
+  expect(ended).toMatchObject({ msg: "engine removed", engine, role: "playing", path: "direct" });
+  expect(ended!.lifetimeSeconds).toBeGreaterThan(5);
+  expect(ended!.lifetimeSeconds).toBeLessThan(3600);
   const counted = await engineRunsCounted(request, "own", "stopped");
   expect(counted.count).toBeGreaterThan(stopped.count);
-  expect(counted.seconds - stopped.seconds).toBeGreaterThanOrEqual(ended[0]!.lifetimeSeconds);
+  expect(counted.seconds - stopped.seconds).toBeGreaterThanOrEqual(ended!.lifetimeSeconds);
 });

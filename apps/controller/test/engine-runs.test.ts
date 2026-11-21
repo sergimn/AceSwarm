@@ -174,6 +174,51 @@ describe("EngineRuns", () => {
     expect(observed).toEqual(["own oom-killed 3660"]);
   });
 
+  it("counts what the sampler saw of a run when the controller's own ending of it failed", () => {
+    const { runs, observed, lines } = setup({ "aceswarm-engine-s1-4": { role: "playing", path: "direct" } });
+
+    // A restart stopped the engine and could not start it again.
+    const ended = runs.ending(run);
+    runs.end({ ...run, endedAt: NOW + 1000 }, "exited");
+    runs.end({ ...run, endedAt: NOW + 9000 }, "oom-killed");
+    expect(observed).toEqual([]);
+
+    ended();
+    // Once, as the sampler first saw it.
+    expect(observed).toEqual(["own exited 3601"]);
+    expect(lines).toEqual([expect.objectContaining({ msg: "engine exited", reason: "exited", role: "playing" })]);
+
+    runs.end({ ...run, endedAt: NOW + 9000 }, "exited");
+    expect(observed).toHaveLength(1);
+  });
+
+  it("keeps its claim on a run while an earlier run of the same container is told", () => {
+    const { runs, observed } = setup();
+    const earlier = { ...run, startedAt: "2026-11-07T09:00:00Z", endedAt: Date.parse("2026-11-07T09:59:58Z") };
+
+    // The engine was killed and started again; the controller restarts it before the sampler looks.
+    const ended = runs.ending(run);
+    // The sampler looks while the restart stops the engine: it still sees the kill.
+    runs.end(earlier, "oom-killed");
+    ended("restart");
+    // And at its next look, the exit the restart made.
+    runs.end({ ...run, endedAt: NOW + 2000 }, "exited");
+
+    expect(observed).toEqual(["own oom-killed 3598", "own restart 3600"]);
+  });
+
+  it("says what the engine was for when the controller began to end its run", () => {
+    const places: Record<string, EnginePlace> = { "aceswarm-engine-s1-4": { role: "playing", path: "direct" } };
+    const { runs, lines } = setup(places);
+
+    const ended = runs.ending(run);
+    // While the container is removed, a sample without it forgets its place.
+    delete places["aceswarm-engine-s1-4"];
+    ended("stopped");
+
+    expect(lines).toEqual([expect.objectContaining({ reason: "stopped", role: "playing", path: "direct" })]);
+  });
+
   it("leaves a run that was told alone when a second ending of it fails", () => {
     const { runs, observed } = setup();
     runs.end(run, "exited");

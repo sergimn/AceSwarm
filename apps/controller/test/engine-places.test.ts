@@ -1,6 +1,6 @@
 import type { StreamView } from "@aceswarm/shared/api-types";
 import { expect, test } from "vitest";
-import { EnginePlaces, PLACE_HOLD_MS, type KeptEngine } from "../src/engine-places.ts";
+import { EnginePlaces, LEFT_HOLD_MS, PLACE_HOLD_MS, type KeptEngine } from "../src/engine-places.ts";
 
 function stream(id: string, over: Partial<StreamView> = {}): StreamView {
   return {
@@ -185,7 +185,47 @@ test("says what an engine that is about to go was for: its place at the last loo
   clock.now += PLACE_HOLD_MS + 1;
   expect(places.placeOf("e1")).toEqual({ role: "other", path: "" });
 
-  // Gone from the containers there are, it is forgotten.
-  places.resolve([own("e3")], [stream("s1", { path: "wg:b", engine: { name: "e3", shared: false } })]);
+  // Gone from the containers there are, it is forgotten after a short while.
+  const moved = [stream("s1", { path: "wg:b", engine: { name: "e3", shared: false } })];
+  places.resolve([own("e3")], moved);
+  expect(places.placeOf("e1")).toEqual({ role: "other", path: "" });
+  clock.now += LEFT_HOLD_MS + 1;
   expect(places.placeOf("e1")).toBeUndefined();
+  places.resolve([own("e3")], moved);
+  expect(places.placeOf("e1")).toBeUndefined();
+});
+
+test("still says what an engine was for when it has just left the containers there are", () => {
+  const { places, clock } = placesWith();
+  const playing = stream("s1", { engine: { name: "e1", shared: false } });
+  places.resolve([own("e1")], [playing]);
+
+  // It is stopping or restarting: out of a sample or two before its exit shows.
+  clock.now += 15_000;
+  places.resolve([], [playing]);
+  clock.now += 15_000;
+  places.resolve([], [playing]);
+  expect(places.placeOf("e1")).toEqual({ role: "playing", path: "direct" });
+  clock.now += LEFT_HOLD_MS - 15_000;
+  expect(places.placeOf("e1")).toEqual({ role: "playing", path: "direct" });
+  clock.now += 1;
+  expect(places.placeOf("e1")).toBeUndefined();
+});
+
+test("a new engine with the name of one that just left is not taken for it", () => {
+  const { places, clock } = placesWith();
+  const playing = stream("s1", { engine: { name: "e1", shared: false } });
+  const starting = stream("s1", { state: "starting", engine: null });
+  places.resolve([own("e1")], [playing]);
+  places.resolve([], [starting]);
+  expect(places.placeOf("e1")).toEqual({ role: "playing", path: "direct" });
+
+  // The stream was disabled and enabled again: its new engine has the old one's name.
+  clock.now += 5000;
+  expect(places.resolve([own("e1")], [starting])).toEqual([{ role: "starting", path: "" }]);
+  expect(places.placeOf("e1")).toEqual({ role: "starting", path: "" });
+  // And when that one leaves too, it is the one remembered.
+  clock.now += 5000;
+  places.resolve([], [starting]);
+  expect(places.placeOf("e1")).toEqual({ role: "starting", path: "" });
 });

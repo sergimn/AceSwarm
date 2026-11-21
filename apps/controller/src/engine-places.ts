@@ -40,6 +40,12 @@ interface Engine {
  */
 export const PLACE_HOLD_MS = 5 * 60_000;
 
+/**
+ * How long `placeOf` still knows an engine that left the containers there are: an engine that is
+ * stopping or restarting can be out of a sample or two before the sampler sees that it exited.
+ */
+export const LEFT_HOLD_MS = 60_000;
+
 const NO_PLACE: EnginePlace = { role: "other", path: "" };
 
 /**
@@ -55,6 +61,8 @@ export class EnginePlaces {
   private readonly now: () => number;
   /** The place each stream's engine last had (`starting` for one that never had any), and when. */
   private readonly last = new Map<string, { place: EnginePlace; at: number }>();
+  /** The engines that left the containers there are: the place each had then, and when it left. */
+  private readonly left = new Map<string, { place: EnginePlace; at: number }>();
 
   constructor(kept: () => KeptEngine[], now: () => number = Date.now) {
     this.kept = kept;
@@ -63,7 +71,8 @@ export class EnginePlaces {
 
   /**
    * The place of each of these engines, in their order. They have to be all the engine containers
-   * there are, because the ones left out are forgotten.
+   * there are, because the ones left out are forgotten: a new engine with the name of one that
+   * went starts over. Only `placeOf` knows them for a little longer.
    */
   resolve(engines: readonly Engine[], streams: readonly StreamView[]): EnginePlace[] {
     const current = this.current(streams);
@@ -74,25 +83,36 @@ export class EnginePlaces {
         : { role: "shared" as const, path: sharedPath },
     );
     const names = new Set(engines.map(({ engine }) => engine));
-    for (const name of this.last.keys()) {
+    for (const [name, last] of this.last) {
       if (!names.has(name)) {
         this.last.delete(name);
+        this.left.set(name, { place: now - last.at <= PLACE_HOLD_MS ? last.place : NO_PLACE, at: now });
+      }
+    }
+    for (const [name, { at }] of this.left) {
+      // Back, or a new engine with its name: `last` knows that one.
+      if (names.has(name) || now - at > LEFT_HOLD_MS) {
+        this.left.delete(name);
       }
     }
     return places;
   }
 
   /**
-   * The place a stream's engine had when `resolve` last ran, or the one it had before that while
-   * that is recent: what an engine that is being restarted or removed was for. Undefined for an
-   * engine that `resolve` never saw, such as one that lasted less than the time between two runs.
+   * The place a stream's engine had when `resolve` last saw it, or the one it had before that
+   * while that is recent: what an engine that is being restarted or removed was for. That also
+   * holds for a short while after the engine left the containers `resolve` gets, which a stopping
+   * or restarting engine does before its exit shows. Undefined for an engine that `resolve` never
+   * saw, such as one that lasted less than the time between two runs.
    */
   placeOf(engine: string): EnginePlace | undefined {
+    const now = this.now();
     const last = this.last.get(engine);
-    if (last === undefined) {
-      return undefined;
+    if (last !== undefined) {
+      return now - last.at <= PLACE_HOLD_MS ? last.place : NO_PLACE;
     }
-    return this.now() - last.at <= PLACE_HOLD_MS ? last.place : NO_PLACE;
+    const left = this.left.get(engine);
+    return left !== undefined && now - left.at <= LEFT_HOLD_MS ? left.place : undefined;
   }
 
   /** The streams' engines that have a place right now, by container name. A stronger role replaces a weaker one. */

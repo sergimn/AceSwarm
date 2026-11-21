@@ -418,12 +418,15 @@ test("counts how long engines ran by kind and reason, with every reason there fr
   metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 45);
   metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 7200);
   metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 2 * 7 * 86_400);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 60 * 86_400);
 
   const after = await registry.metrics();
   expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="30",kind="own",reason="moved"} 0');
   expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="60",kind="own",reason="moved"} 1');
   expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="21600",kind="own",reason="moved"} 2');
   expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="604800",kind="own",reason="moved"} 2');
-  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="+Inf",kind="own",reason="moved"} 3');
-  expect(after).toContain('aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 3');
+  // Two weeks is within the last step, a month.
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="2592000",kind="own",reason="moved"} 3');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="+Inf",kind="own",reason="moved"} 4');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 4');
 });

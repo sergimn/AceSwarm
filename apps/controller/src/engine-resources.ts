@@ -210,7 +210,7 @@ export class EngineResourceMonitor {
   }
 
   /**
-   * Notices that the engine's process exited since the last sample: the run that sample saw ended.
+   * Notices that the engine's process exited since the last sample, and tells the runs that ended.
    * That is also how a restart or a removal by the controller looks, which the engine manager tells
    * with its reason (see `EngineRuns`): only a run nobody told yet counts here.
    */
@@ -223,14 +223,26 @@ export class EngineResourceMonitor {
     if (previous === undefined || previous.finishedAt === finishedAt) {
       return;
     }
-    // The run that ended is the one the container is still in while it has not started again, or
-    // else the one the last sample saw. An engine that started and exited more than once since
-    // then counts as one run.
+    const exit = oomKilled ? "oom-killed" : "exited";
     const endedAt = Date.parse(finishedAt);
-    const ranFrom = Date.parse(startedAt) <= endedAt ? startedAt : previous.startedAt;
-    if (Date.parse(ranFrom) <= endedAt) {
-      const run = { containerId: details.Id, ...owner, startedAt: ranFrom, endedAt };
-      this.options.runs?.end(run, oomKilled ? "oom-killed" : "exited");
+    const started = Date.parse(startedAt);
+    const told = (ranFrom: string, until: number, reason: "oom-killed" | "exited"): void => {
+      // A container that never started says year 1, which is no run.
+      if (Date.parse(ranFrom) > 0 && Date.parse(ranFrom) <= until) {
+        this.options.runs?.end({ containerId: details.Id, ...owner, startedAt: ranFrom, endedAt: until }, reason);
+      }
+    };
+    if (started > endedAt) {
+      // It runs again: the run the last sample saw ended. An engine that started and exited more
+      // than once since then counts as one run.
+      told(previous.startedAt, endedAt, exit);
+    } else {
+      // It has not started again: the run it is in ended. So did the one the last sample saw, if
+      // that was another: when and how is not known, but it was over when this one started.
+      if (previous.startedAt !== startedAt) {
+        told(previous.startedAt, started, "exited");
+      }
+      told(startedAt, endedAt, exit);
     }
     if (!oomKilled) {
       return;

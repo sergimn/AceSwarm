@@ -533,7 +533,13 @@ export interface EngineRunEnded {
  */
 export function engineRunsEnded(streamId: string): EngineRunEnded[] {
   const ended: EngineRunEnded[] = [];
-  for (const line of compose("logs", "--no-color", "controller").split("\n")) {
+  // The whole log of a long run is more than the megabyte a command's output may have by default.
+  const log = execFileSync("docker", ["compose", "-p", PROJECT, "logs", "--no-color", "controller"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  for (const line of log.split("\n")) {
     // After the prefix compose puts before each line.
     const json = line.slice(Math.max(0, line.indexOf("{")));
     if (!/"msg":"engine (?:removed|restarted|exited)"/.test(json)) {

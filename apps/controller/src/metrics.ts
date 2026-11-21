@@ -181,8 +181,8 @@ export class ControllerMetrics {
         "How long engines ran until they were restarted or removed, per kind of engine (own, shared) " +
         "and reason; an engine that is restarted in its container counts once per run",
       labelNames: ["kind", "reason"],
-      // Half a minute to a week: an engine that fails lasts minutes, a healthy one days.
-      buckets: [30, 60, 120, 300, 900, 3600, 21_600, 86_400, 604_800],
+      // Half a minute to a month: an engine that fails lasts minutes, a healthy one days or weeks.
+      buckets: [30, 60, 120, 300, 900, 3600, 21_600, 86_400, 604_800, 2_592_000],
       registers,
     });
     // From zero, so that the first run that ends for a reason shows as an increase.
