@@ -26,6 +26,19 @@ const MOVED_AGAIN: TableStream[] = [
   { pid: 321, type: 0x0f },
 ];
 
+/** Teletext beside the video and the sound: a stream no decoder here reads. */
+const TELETEXT = [0x56, 5, 0x65, 0x6e, 0x67, 0x09, 0x00];
+const withText = (video: number, audio: number, text: number): TableStream[] => [
+  { pid: video, type: 0x1b },
+  { pid: audio, type: 0x0f },
+  { pid: text, type: 0x06, descriptors: TELETEXT },
+];
+
+const hevc = (video: number, audio: number): TableStream[] => [
+  { pid: video, type: 0x24 },
+  { pid: audio, type: 0x0f },
+];
+
 const original = (): Encoder => new Encoder({ video: 256, audio: 257, start: 900_000 });
 const moved = (options: Partial<EncoderOptions> = {}): Encoder =>
   new Encoder({ video: 211, audio: 221, start: 5_000_000, ...options });
@@ -222,6 +235,120 @@ describe("readSource over a move to other PIDs", () => {
     expect(shown(sink).slice(-2)).toEqual([lastPts + FRAME, lastPts + 2 * FRAME]);
     const pids = new Set(seen(sink).map((packet) => packet.pid));
     expect(pids).toEqual(new Set([0, 0x10_00, 256, 257]));
+  });
+
+  it("keeps a stream the run doesn't know away from ffmpeg over a move", async () => {
+    const opened = open();
+    const encoder = original();
+    const first = [encoder.picture("idr"), encoder.picture("p"), encoder.picture("p")];
+    await opened.feed(tablePackets(withText(256, 257, 258)), ...first);
+    opened.clock.now += 60_000;
+    // The text moves with the others, to a PID ffmpeg has not seen: it would stop to study a
+    // stream there, with no frame for players until it has read enough of it.
+    const there = moved();
+    const writer = new TsWriter();
+    const text = (): Uint8Array => writer.pes(222, "audio", new Uint8Array(40).fill(0x15), { pts: 5_000_000 });
+    const pictures = [there.picture("p"), text(), there.picture("idr"), text(), there.picture("p"), text()];
+    await opened.feed(tablePackets(withText(211, 221, 222), 0x10_00, 1), text(), ...pictures);
+    expect(opened.layouts).toHaveLength(1);
+    expect(opened.moves).toHaveLength(1);
+    expect(shown(opened.sink)).toHaveLength(5);
+    expect(new Set(opened.sink.pids())).toEqual(new Set([0, 0x10_00, 256, 257]));
+  });
+
+  it("gives the next run what was held for a move, when the stream changes again and keeps those PIDs", async () => {
+    const { layouts, moves, next, feed } = await playing();
+    const taker = recordingSink();
+    next.sink = taker;
+    const there = moved();
+    // The new encoder's first picture is held: its sound has not shown what it is yet.
+    const held = concatBytes(there.picture("idr", { silent: true }), there.picture("p", { silent: true }));
+    await feed(tablePackets(MOVED, 0x10_00, 1), held);
+    // A moment later the tables name one more stream: no move any more, and the same PIDs.
+    const more = [...MOVED, { pid: 223, type: 0x0f }];
+    const after = concatBytes(there.picture("p"), there.picture("p"));
+    await feed(tablePackets(more, 0x10_00, 2), after);
+    expect(layouts).toHaveLength(2);
+    expect(layouts[1]?.unfit).toBe("the streams are not the same ones on other PIDs");
+    expect(moves).toEqual([]);
+    // The new run reads the stream from the picture that was held: that is where its video starts.
+    const streams = seen(taker).filter((packet) => packet.pid !== 0 && packet.pid !== 0x10_00);
+    expect(streams).toEqual(readPackets(concatBytes(held, after)));
+    expect(shown(taker, 211)).toHaveLength(4);
+  });
+
+  it("gives the run what was held on a PID it reads, when the tables go back", async () => {
+    const { sink, layouts, moves, feed, encoder } = await playing();
+    // The tables say the video moved; the sound stays on its PID, and is held with it.
+    const videoMoved = [
+      { pid: 211, type: 0x1b },
+      { pid: 257, type: 0x0f },
+    ];
+    const sound = (count: number): Uint8Array =>
+      encoder.writer.pes(257, "audio", adtsFrame(), { pts: encoder.pts + count * 1920 });
+    const stray = new TsWriter().pes(211, "video", new Uint8Array(40).fill(0x15), { pts: 1 });
+    const before = seen(sink).filter((packet) => packet.pid === 257).length;
+    await feed(tablePackets(videoMoved, 0x10_00, 1), sound(0), stray, sound(1));
+    expect(seen(sink).filter((packet) => packet.pid === 257)).toHaveLength(before);
+    await feed(tablePackets(H264, 0x10_00, 2), sound(2));
+    expect(layouts).toHaveLength(1);
+    expect(moves).toEqual([]);
+    // Late, but all of it and in order; what came on the PID the stream left again is of no use.
+    const got = seen(sink).filter((packet) => packet.pid === 257);
+    expect(got.slice(before).map((packet) => packet.pts)).toEqual([0, 1, 2].map((count) => encoder.pts + count * 1920));
+    expect(seen(sink).some((packet) => packet.pid === 211)).toBe(false);
+  });
+
+  it("takes what was held into the next move it looks at, when the stream changes again and keeps those PIDs", async () => {
+    const { sink, layouts, moves, feed, lastPts } = await playing();
+    const there = moved();
+    // The video's first picture is held, its sound still to come. Then the sound is said to be on yet another PID.
+    await feed(tablePackets(MOVED, 0x10_00, 1), there.picture("idr", { silent: true }));
+    const again = [
+      { pid: 211, type: 0x1b },
+      { pid: 231, type: 0x0f },
+    ];
+    const sound = new TsWriter().pes(231, "audio", adtsFrame(), { pts: there.pts });
+    await feed(tablePackets(again, 0x10_00, 2), there.picture("p", { silent: true }), sound);
+    expect(layouts).toHaveLength(1);
+    expect(moves).toHaveLength(1);
+    expect(describeLayout(moves[0]!.layout)).toBe("program 1 [211:h264 231:0x0f]");
+    // The run goes on from the picture that was held for the first move.
+    expect(shown(sink).slice(-2)).toEqual([lastPts + FRAME, lastPts + 2 * FRAME]);
+    expect(new Set(seen(sink).map((packet) => packet.pid))).toEqual(new Set([0, 0x10_00, 256, 257]));
+  });
+
+  it("goes on at once when what was held decides the next move", async () => {
+    const { sink, layouts, moves, feed, lastPts } = await playing();
+    const there = moved();
+    // The tables first name the two streams the wrong way round: nothing to go on from shows on them.
+    const swapped = [
+      { pid: 221, type: 0x1b },
+      { pid: 211, type: 0x0f },
+    ];
+    await feed(tablePackets(swapped, 0x10_00, 1), there.picture("idr"));
+    expect(moves).toEqual([]);
+    // Then the right way round: the picture and the sound that were held are all it takes.
+    await feed(tablePackets(MOVED, 0x10_00, 2));
+    expect(layouts).toHaveLength(1);
+    expect(moves).toHaveLength(1);
+    expect(shown(sink).at(-1)).toBe(lastPts + FRAME);
+    expect(new Set(seen(sink).map((packet) => packet.pid))).toEqual(new Set([0, 0x10_00, 256, 257]));
+  });
+
+  it("keeps leaving out the PIDs of every layout the stream left, run after run", async () => {
+    const { layouts, next, clock, feed, encoder } = await playing();
+    next.sink = recordingSink();
+    await feed(tablePackets(hevc(311, 312), 0x10_00, 1));
+    clock.now += 60_000;
+    const third = recordingSink();
+    next.sink = third;
+    await feed(tablePackets(hevc(411, 412), 0x10_00, 2));
+    expect(layouts).toHaveLength(3);
+    // Encoders of both earlier layouts still send: neither is the third run's.
+    const second = new Encoder({ video: 311, audio: 312, start: 1 });
+    await feed(encoder.picture("p"), second.picture("p"));
+    expect(new Set(third.pids())).toEqual(new Set([0, 0x10_00]));
   });
 
   it("takes tables that move while the streams stay for no change of the stream", async () => {

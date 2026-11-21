@@ -163,7 +163,9 @@ describe("Pipeline following what its source carries", () => {
    * of it waits: what happens to the run meanwhile is up to the test. `reading` settles once that read
    * waits, `aside` puts the pipe out of the way of later reads (the one that waits keeps it), and
    * `end` lets the read end with a playlist of `count` segments. The pipeline's own timer must not
-   * read the pipe too: such a test fakes `setInterval` before it starts its pipeline.
+   * read the pipe too: such a test fakes `setInterval` before it starts its pipeline. A test that
+   * fails on the way leaves nothing waiting: `reading` gives up after four seconds, and the end of
+   * every test ends a read that waits on the pipe, whether the test got to open it or not.
    */
   function holdPlaylist(): {
     reading: () => Promise<void>;
@@ -174,8 +176,18 @@ describe("Pipeline following what its source carries", () => {
     rmSync(path);
     execFileSync("mkfifo", [path]);
     let writer: number | undefined;
+    /** Opens the pipe for writing, which fails until a reader has it open (or once it is out of the way). */
+    const open = (): boolean => {
+      try {
+        writer ??= openSync(path, constants.O_WRONLY | constants.O_NONBLOCK);
+      } catch {
+        // No read waits on it.
+      }
+      return writer !== undefined;
+    };
     const close = (): void => {
-      if (writer === undefined) {
+      // A read that waits on the pipe ends when its writer closes it: one that no writer opened yet too.
+      if (!open() || writer === undefined) {
         return;
       }
       closeSync(writer);
@@ -184,13 +196,12 @@ describe("Pipeline following what its source carries", () => {
     heldOpen.push(close);
     return {
       reading: async () => {
-        while (writer === undefined) {
-          try {
-            // Fails until a reader has the pipe open.
-            writer = openSync(path, constants.O_WRONLY | constants.O_NONBLOCK);
-          } catch {
-            await sleep(2);
+        const giveUpAt = Date.now() + 4000;
+        while (!open()) {
+          if (Date.now() > giveUpAt) {
+            throw new Error("the pipeline did not read the playlist");
           }
+          await sleep(2);
         }
       },
       aside: () => {
@@ -816,6 +827,19 @@ describe("Pipeline following what its source carries", () => {
 
       clock.now += 1000;
       opened[0]?.move(layoutOf(256));
+      const told = iso(clock.now);
+      expect(instance.status()).toMatchObject({ layoutChangedAt: told });
+
+      // Moves that keep coming while the run shows no new frame are no sign of video: a stream
+      // that stalled over them must not look alive for as long as they come.
+      clock.now += 15_000;
+      opened[0]?.move(layoutOf(211));
+      clock.now += 15_000;
+      opened[0]?.move(layoutOf(256));
+      expect(instance.status()).toMatchObject({ layoutChangedAt: told, frames: 75 });
+      await frames(76, 0);
+      clock.now += 1000;
+      opened[0]?.move(layoutOf(211));
       expect(instance.status()).toMatchObject({ layoutChangedAt: iso(clock.now) });
     });
 

@@ -29,23 +29,39 @@ export function nalUnits(...units: string[]): Uint8Array {
 /**
  * The first bytes of a slice, by the kind of its picture. H.264: the NAL header, then the slice
  * header's first two numbers (first macroblock 0, slice type 7 for I and 5 for P). HEVC: the two
- * header bytes of an IDR slice (type 19) and of an ordinary one (type 1).
+ * header bytes of an IDR slice (type 19), of a CRA slice (type 21) and of an ordinary one (type 1).
  */
 const SLICES = {
   idr: "658884",
   intra: "418884",
+  i: "418884",
   p: "419a22",
   hevcIdr: "2601af",
+  hevcCra: "2a01af",
   hevcTrail: "0201d0",
 };
 
-/** An access unit of H.264 as encoders mux it: a delimiter, the parameter sets if any, then the picture. */
-export function h264Unit(picture: "idr" | "intra" | "p", sets: readonly string[] = [], bytes = 300): Uint8Array {
-  return concatBytes(nalUnits("09f0", ...sets), bytesOf("000001"), bytesOf(SLICES[picture]), filler(bytes));
+/** An SEI NAL unit with one message: a recovery point, the encoder's word that a decoder can start at this picture. */
+export const RECOVERY_POINT = "060601c480";
+
+/** A picture of H.264: "intra" is one coded by itself that the stream marks as a point to start at, "i" one it doesn't mark. */
+export type H264Picture = "idr" | "intra" | "i" | "p";
+
+/**
+ * An access unit of H.264 as encoders mux it: a delimiter, the parameter sets if any, the mark of
+ * a point to start at for a picture that is one without being an IDR picture, then the picture.
+ */
+export function h264Unit(picture: H264Picture, sets: readonly string[] = [], bytes = 300): Uint8Array {
+  const front = picture === "intra" ? [...sets, RECOVERY_POINT] : sets;
+  return concatBytes(nalUnits("09f0", ...front), bytesOf("000001"), bytesOf(SLICES[picture]), filler(bytes));
 }
 
 /** The same of HEVC. */
-export function hevcUnit(picture: "hevcIdr" | "hevcTrail", sets: readonly string[] = [], bytes = 300): Uint8Array {
+export function hevcUnit(
+  picture: "hevcIdr" | "hevcCra" | "hevcTrail",
+  sets: readonly string[] = [],
+  bytes = 300,
+): Uint8Array {
   return concatBytes(nalUnits("460150", ...sets), bytesOf("000001"), bytesOf(SLICES[picture]), filler(bytes));
 }
 
@@ -222,7 +238,7 @@ export interface EncoderOptions {
   frame?: number;
 }
 
-export type Picture = "idr" | "p" | "intra";
+export type Picture = H264Picture;
 
 /** An encoder: pictures at a steady pace, each followed by a frame of sound with the same time. */
 export class Encoder {

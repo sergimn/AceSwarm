@@ -19,6 +19,7 @@ import {
   hevcUnit,
   nalUnits,
   readPackets,
+  RECOVERY_POINT,
   SETS,
   TsWriter,
 } from "./es-fixtures.ts";
@@ -40,6 +41,18 @@ const of = (format: "adts" | "mpeg" | "ac3", frame: Uint8Array): string | undefi
 
 /** Parameter sets as `videoStart` names them. */
 const settingsOf = (sets: readonly string[]): string => sets.join(",");
+
+/** The start of a unit of sound shown at 9000, read from a header whose byte `index` was set to `value`. */
+function changed(index: number, value: number): ReturnType<typeof pesStart> {
+  const packet = new TsWriter().pes(256, "audio", adtsFrame(), { pts: 9000 });
+  const parts = packetParts(packet, 0);
+  packet[parts.payloadAt + index] = value;
+  return pesStart(packet, 0, parts);
+}
+
+/** Whether a picture coded by itself counts as one to start at, with these NAL units in front of it. */
+const marked = (...units: string[]): boolean | undefined =>
+  videoStart("h264", h264Unit("i", [...H264_SETS, ...units]), false)?.key;
 
 describe("MPEG-TS timestamps", () => {
   it("tells which of two is later across the wrap", () => {
@@ -108,6 +121,19 @@ describe("the start of a PES packet", () => {
     expect(pesStart(packet, 0, parts)).toBeUndefined();
   });
 
+  it("is none for a header that can't hold what it says it has, or that is of the older kind", () => {
+    // Unchanged, it reads; its fields are five bytes, the time the unit is shown.
+    expect(changed(8, 5)).toMatchObject({ pts: 9000 });
+    // The header says it has a time, and has four bytes of fields.
+    expect(changed(8, 4)).toBeUndefined();
+    // Its fields would end behind the packet.
+    expect(changed(8, 200)).toBeUndefined();
+    // An MPEG-1 packet has no flags where MPEG-2 has its two marker bits.
+    expect(changed(6, 0x21)).toBeUndefined();
+    // Flags that name a time to decode without a time to show are not allowed: neither is read.
+    expect(changed(7, 0x40)).toMatchObject({ pts: undefined, dts: undefined });
+  });
+
   it("moves a unit's times in place, across the wrap too", () => {
     const writer = new TsWriter();
     const packet = writer.pes(256, "video", h264Unit("p"), { pts: WRAP - 1000, dts: WRAP - 4600 });
@@ -153,6 +179,15 @@ describe("a packet's clock reference", () => {
       shiftPcr(packets, packetParts(packets, at), 1500);
     }
     expect(packets).toEqual(before);
+  });
+
+  it("is left alone in a field too short to hold one, whatever its flags say", () => {
+    const packet = new TsWriter().pes(256, "video", h264Unit("p"), { pts: 9000, pcr: 123_456 });
+    // A damaged packet: the field says it has a clock reference, in three bytes.
+    packet[4] = 3;
+    const before = Uint8Array.from(packet);
+    shiftPcr(packet, packetParts(packet, 0), 1500);
+    expect(packet).toEqual(before);
   });
 });
 
@@ -245,16 +280,48 @@ describe("how an access unit of video starts", () => {
     expect(videoStart("hevc", hevcUnit("hevcTrail"), false)).toEqual({ settings: "", key: false });
   });
 
-  it("takes a picture coded by itself for one a decoder can start at, as encoders without IDR pictures send them", () => {
-    expect(videoStart("h264", h264Unit("intra", H264_SETS), false)).toEqual({
-      settings: settingsOf(H264_SETS),
+  it("takes a picture coded by itself for one to start at where the stream marks it, as encoders without IDR pictures send them", () => {
+    const settings = settingsOf(H264_SETS);
+    expect(videoStart("h264", h264Unit("intra", H264_SETS), false)).toEqual({ settings, key: true });
+    // Coded by itself and not marked: what follows it may still need what came before it.
+    expect(videoStart("h264", h264Unit("i", H264_SETS), false)).toEqual({ settings, key: false });
+    // The mark in front of a picture that needs earlier ones (an encoder that renews the picture
+    // bit by bit): the pictures only come right some time after it.
+    const renewing = h264Unit("p", [...H264_SETS, RECOVERY_POINT]);
+    expect(videoStart("h264", renewing, false)).toEqual({ settings, key: false });
+    // The same settings in front of a picture that is neither: no place to start.
+    expect(videoStart("h264", h264Unit("p", H264_SETS), false)).toEqual({ settings, key: false });
+  });
+
+  it("finds the mark of a point to start at among the other messages encoders send with it", () => {
+    // Behind a message of three bytes.
+    expect(marked("060003aabbcc0601c480")).toBe(true);
+    // Behind one whose size takes two bytes (255 and 1).
+    expect(marked(`0605ff01${"a5".repeat(256)}0601c480`)).toBe(true);
+    // Behind one whose type takes two bytes; that one (255 and 6) is not the mark.
+    expect(marked("06ff0601aa0601c480")).toBe(true);
+    expect(marked("06ff0601aa80")).toBe(false);
+    // Behind one whose bytes have 00 00 01, which the stream writes as 00 00 03 01: the 03 is not counted.
+    expect(marked("06050400000301ee0601c480")).toBe(true);
+    // Bytes of another message that look like the mark are none.
+    expect(marked("060102060180")).toBe(false);
+    // In the second of two such units.
+    expect(marked("060003aabbcc80", RECOVERY_POINT)).toBe(true);
+    // The same bytes in a unit of another kind (filler data) say nothing.
+    expect(marked("0c0601c480")).toBe(false);
+  });
+
+  it("takes every kind of HEVC random access picture for one to start at, and no other picture", () => {
+    expect(videoStart("hevc", hevcUnit("hevcCra", HEVC_SETS), false)).toEqual({
+      settings: settingsOf(HEVC_SETS),
       key: true,
     });
-    // The same settings in front of a picture that is not: no place to start.
-    expect(videoStart("h264", h264Unit("p", H264_SETS), false)).toEqual({
-      settings: settingsOf(H264_SETS),
-      key: false,
-    });
+    const keyOf = (type: number): boolean | undefined => {
+      const slice = concatBytes(bytesOf("000001"), Uint8Array.of(type << 1, 0x01, 0xaf), new Uint8Array(50).fill(0xa5));
+      return videoStart("hevc", concatBytes(nalUnits("460150", ...HEVC_SETS), slice), false)?.key;
+    };
+    // Types 16 to 23 are the random access pictures; 15 and 24 are next to them.
+    expect([15, 16, 23, 24].map((type) => keyOf(type))).toEqual([false, true, true, false]);
   });
 
   it("tells other settings apart", () => {

@@ -117,6 +117,8 @@ export class Generation {
   handedOverAt: number | undefined;
   state: PipelineState = "starting";
   frames = 0;
+  /** How many frames it had when the broadcast last moved its streams to other PIDs (see `SourceFeeds.onMove`). */
+  framesAtMove = 0;
   lastFrameAt: number | undefined;
   fps: number | undefined;
   videoCodec: string | undefined;

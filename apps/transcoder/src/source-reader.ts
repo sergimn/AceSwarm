@@ -367,17 +367,21 @@ class EngineReader implements SourceReader {
     if (layout === undefined || layout.key === (this.looking ?? previous)?.key) {
       return;
     }
+    // A move that was still being looked at is off: the stream changed again.
+    const held = this.moves.giveUp();
     if (this.looking !== undefined) {
-      // A move that was still being looked at is off: the stream changed again, and what was held
-      // of it belongs to a layout that is gone.
-      this.moves.giveUp();
       this.dropped = this.dropped.union(streamPids(this.looking)).difference(streamPids(layout));
       this.looking = undefined;
-      if (layout.key === previous?.key) {
-        // Back to what the run reads.
-        return;
-      }
     }
+    // Back to what the run reads, or on to another layout.
+    if (layout.key !== previous?.key) {
+      this.decide(layout, previous, out, waited);
+    }
+    this.again(held, out);
+  }
+
+  /** Whether the run reads on over the change to `layout`, and how; a new one starts here otherwise. */
+  private decide(layout: Layout, previous: Layout | undefined, out: Piece[], waited: boolean): void {
     const fit = previous === undefined ? undefined : this.moves.consider(layout, waited);
     if (fit === "carried" && previous !== undefined) {
       this.fed = layout;
@@ -388,6 +392,25 @@ class EngineReader implements SourceReader {
       this.dropped = this.dropped.difference(streamPids(layout));
     } else {
       this.startOver({ layout, previous, unfit: typeof fit === "object" ? fit.no : undefined }, [], out);
+    }
+  }
+
+  /**
+   * What was held for a move that is off takes the way of any packet now, late but in order. The
+   * layout that follows may well have those PIDs too (tables that gain a stream a moment after a
+   * new encoder came up), and whichever run reads on needs what came on them: the key picture
+   * that was held is where its video starts.
+   */
+  private again(held: readonly Uint8Array[], out: Piece[]): void {
+    for (const bytes of held) {
+      const pid = (((bytes[1] ?? 0) & 0x1f) << 8) | (bytes[2] ?? 0);
+      const left = this.dropped.has(pid);
+      const verdict = left ? "drop" : this.moves.packet(bytes, 0, pid, this.tables.carriesTables(pid));
+      if (verdict === "pass") {
+        out.push({ sink: this.sink, bytes });
+      } else {
+        this.settle(verdict, out);
+      }
     }
   }
 

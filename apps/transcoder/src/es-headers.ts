@@ -242,26 +242,87 @@ function expGolomb(data: Uint8Array, bit: number): { value: number; next: number
   return { value: value - 1, next: bit + 2 * zeros + 1 };
 }
 
-/** What kind of NAL unit begins with the header at `at`: one of a picture, and if so of one a decoder can start at. */
-function nalKind(
-  codec: "h264" | "hevc",
-  head: Uint8Array,
-  at: number,
-): { type: number; picture: boolean; key: boolean } {
+/** What a NAL unit is: its type, whether it is a slice of a picture, and whether of one a decoder can start at. */
+interface NalKind {
+  type: number;
+  picture: boolean;
+  key: boolean;
+  /** A picture coded by itself that is no IDR picture: one to start at only where the stream marks it as such (see `marksRecovery`). */
+  intra: boolean;
+}
+
+/** What kind of NAL unit begins with the header at `at`. */
+function nalKind(codec: "h264" | "hevc", head: Uint8Array, at: number): NalKind {
   const header = head[at] ?? 0;
   if (codec === "hevc") {
     // Types up to 31 are slices; 16 to 23 those of random access pictures (BLA, IDR, CRA).
     const type = (header >> 1) & 0x3f;
-    return { type, picture: type <= 31, key: type >= 16 && type <= 23 };
+    return { type, picture: type <= 31, key: type >= 16 && type <= 23, intra: false };
   }
   const type = header & 0x1f;
   if (type !== 1) {
     // 5 is a slice of an IDR picture; 2 to 4 are parts of slices, which say less.
-    return { type, picture: type >= 1 && type <= 5, key: type === 5 };
+    return { type, picture: type >= 1 && type <= 5, key: type === 5, intra: false };
   }
-  // Any other picture can be started at if it is coded by itself: slice type I (2, or 7 for "all of them").
+  // Slice type I (2, or 7 for "all of the picture's slices").
   const sliceType = expGolomb(head, expGolomb(head, (at + 1) * 8).next).value;
-  return { type, picture: true, key: sliceType % 5 === 2 };
+  return { type, picture: true, key: false, intra: sliceType % 5 === 2 };
+}
+
+const H264_SEI_NAL = 6;
+const RECOVERY_POINT_MESSAGE = 6;
+
+/**
+ * Whether an H.264 SEI NAL unit (`body` is what follows its header byte) has a recovery point
+ * message: the encoder's word that a decoder can start at this picture. Encoders that send no
+ * IDR pictures mark the pictures to start at this way.
+ */
+function marksRecovery(body: Uint8Array): boolean {
+  // The messages' sizes count the bytes without the 03 that keeps 00 00 from looking like a start code.
+  const bytes = body.filter((value, index) => value !== 3 || body[index - 1] !== 0 || body[index - 2] !== 0);
+  let at = 0;
+  // A number is the sum of its bytes, the last of which is the first below 255.
+  const number = (): number => {
+    let value = 0;
+    while (bytes[at] === 0xff) {
+      value += 0xff;
+      at += 1;
+    }
+    at += 1;
+    return value + (bytes[at - 1] ?? 0);
+  };
+  // After the last message comes one byte that ends the unit.
+  while (at + 1 < bytes.length) {
+    if (number() === RECOVERY_POINT_MESSAGE) {
+      return true;
+    }
+    // A message's size comes after its type, and its bytes after that.
+    const size = number();
+    at += size;
+  }
+  return false;
+}
+
+/**
+ * The NAL units in `head`, in order: where each one's header byte is and where it ends, at the
+ * next start code (00 00 01; zeros in front of that belong to neither unit) or, for the last one,
+ * with the bytes (`open`: more of it may still come).
+ */
+function* nalSpans(head: Uint8Array): Generator<{ at: number; end: number; open: boolean }> {
+  let from = -1;
+  for (let at = 0; at + 3 < head.length; at += 1) {
+    if (head[at] !== 0 || head[at + 1] !== 0 || head[at + 2] !== 1) {
+      continue;
+    }
+    if (from >= 0) {
+      yield { at: from, end: at, open: false };
+    }
+    from = at + 3;
+    at += 2;
+  }
+  if (from >= 0) {
+    yield { at: from, end: head.length, open: true };
+  }
 }
 
 function withoutTrailingZeros(bytes: Uint8Array): Uint8Array {
@@ -276,7 +337,13 @@ function withoutTrailingZeros(bytes: Uint8Array): Uint8Array {
 export interface VideoStart {
   /** What a decoder is set up with (the parameter sets it carries), as one string; "" if it has none. */
   settings: string;
-  /** Whether its picture is one a decoder can start at: a random access picture, or one coded by itself. */
+  /**
+   * Whether its picture is one a decoder can start at: an IDR picture; in H.264 also a picture
+   * coded by itself that the stream marks as a point to start at (a recovery point), as encoders
+   * without IDR pictures send them; in HEVC any random access picture. Only after an IDR picture
+   * is every picture that follows sure to need nothing from before it: after the others, the
+   * few that are shown before the start but come after it in the stream may show damaged.
+   */
   key: boolean;
 }
 
@@ -291,33 +358,31 @@ export interface VideoStart {
 export function videoStart(codec: "h264" | "hevc", head: Uint8Array, whole: boolean): VideoStart | undefined {
   const sets: string[] = [];
   let sps = false;
-  let from = -1;
-  let picture: { key: boolean } | undefined;
-  // NAL units begin after a start code (00 00 01); zeros in front of the next one belong to neither.
-  for (let at = 0; at + 3 < head.length && picture === undefined; at += 1) {
-    if (head[at] !== 0 || head[at + 1] !== 0 || head[at + 2] !== 1) {
-      continue;
-    }
-    if (from >= 0) {
-      const set = withoutTrailingZeros(head.subarray(from, at));
-      sets.push(hex(set));
-    }
-    const kind = nalKind(codec, head, at + 3);
+  let cut = false;
+  let marked = false;
+  let key: boolean | undefined;
+  for (const unit of nalSpans(head)) {
+    const kind = nalKind(codec, head, unit.at);
     if (kind.picture) {
       // Its slice header's first bytes say what kind of picture it is.
-      if (at + 6 > head.length && !whole) {
+      if (unit.at + 3 > head.length && !whole) {
         return undefined;
       }
-      picture = kind;
+      key = kind.key || (kind.intra && marked);
+      break;
     }
     sps ||= kind.type === SPS_NAL[codec];
-    from = SETTINGS_NALS[codec].has(kind.type) ? at + 3 : -1;
-    at += 2;
+    const bytes = head.subarray(unit.at, unit.end);
+    if (SETTINGS_NALS[codec].has(kind.type)) {
+      // One that was still open when the bytes ran out may be cut short: without it they don't count.
+      cut = unit.open;
+      sets.push(hex(withoutTrailingZeros(bytes)));
+    }
+    // (HEVC's type 6 is a slice, which ended the search.)
+    marked ||= kind.type === H264_SEI_NAL && marksRecovery(bytes.subarray(1));
   }
-  if (picture === undefined && !whole) {
+  if (key === undefined && !whole) {
     return undefined;
   }
-  // One that was still open when the bytes ran out may be cut short: without it they don't count.
-  const complete = sps && (picture !== undefined || from < 0);
-  return { settings: complete ? sets.join(",") : "", key: picture?.key ?? false };
+  return { settings: sps && !cut ? sets.join(",") : "", key: key ?? false };
 }

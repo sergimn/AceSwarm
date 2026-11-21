@@ -69,6 +69,28 @@ const twoVideos = (first: number): TableStream[] => [
   { pid: first, type: 0x1b },
   { pid: first + 1, type: 0x1b },
 ];
+/** Sound as AAC in LATM: its frames are not read here. */
+const latmStreams = (video: number, audio: number): TableStream[] => [
+  { pid: video, type: 0x1b },
+  { pid: audio, type: 0x11 },
+];
+/** Teletext beside the video and the sound: a stream no decoder here reads. */
+const TELETEXT = [0x56, 5, 0x65, 0x6e, 0x67, 0x09, 0x00];
+const withText = (video: number, audio: number, text: number): TableStream[] => [
+  { pid: video, type: 0x1b },
+  { pid: audio, type: 0x0f },
+  { pid: text, type: 0x06, descriptors: TELETEXT },
+];
+const TEXT_BASE = layoutOf(withText(256, 257, 258));
+const TEXT_NEXT = layoutOf(withText(211, 221, 222));
+/** A unit of such a stream, of `bytes` bytes, shown at `pts`. */
+const textUnit = (writer: TsWriter, pid: number, pts: number, bytes = 40): Uint8Array =>
+  writer.pes(pid, "audio", new Uint8Array(bytes).fill(0x15), { pts });
+/** The same packet with another continuity counter, or with the mark of a break in the stream. */
+const withCounter = (packet: Uint8Array, counter: number): Uint8Array =>
+  Uint8Array.from(packet, (byte, index) => (index === 3 ? (byte & 0xf0) | counter : byte));
+const withBreak = (packet: Uint8Array): Uint8Array =>
+  Uint8Array.from(packet, (byte, index) => (index === 5 ? byte | 0x80 : byte));
 
 const original = (): Encoder => new Encoder({ video: 256, audio: 257, start: 900_000 });
 const moved = (options: Partial<EncoderOptions> = {}): Encoder =>
@@ -353,13 +375,15 @@ describe("PidMoves", () => {
     expect(run.got()).toHaveLength(length);
   });
 
-  it("goes on from a picture coded by itself that carries the settings, as encoders without IDR pictures send them", () => {
+  it("goes on from a picture coded by itself that the stream marks as a point to start at, as encoders without IDR pictures send them", () => {
     const { run, encoder, before } = playing();
     const lastPts = encoder.pts - FRAME;
     run.moves.consider(NEXT);
     const next = moved();
-    // The settings in front of a picture that needs earlier ones: no place to start.
+    // The settings in front of a picture that needs earlier ones: no place to start. Nor is a
+    // picture coded by itself that the stream doesn't mark: what follows may need what came before it.
     expect(run.kinds(next.picture("p", { sets: true }))).toEqual(["hold"]);
+    expect(run.kinds(next.picture("i", { sets: true }))).toEqual(["hold"]);
     expect(run.feed(next.picture("intra", { sets: true }))[0]).toHaveProperty("carried");
     expect(starts(run.got().slice(before), 256).map((packet) => packet.pts)).toEqual([lastPts + FRAME]);
   });
@@ -554,6 +578,35 @@ describe("PidMoves", () => {
     ]);
   });
 
+  it("goes on from the first picture to start at, however many come before the sound shows its settings", () => {
+    const { run, encoder, before } = playing();
+    const lastPts = encoder.pts - FRAME;
+    run.moves.consider(NEXT);
+    const next = moved();
+    const silent = concatBytes(
+      next.picture("idr", { silent: true }),
+      next.picture("p", { silent: true }),
+      next.picture("idr", { silent: true }),
+    );
+    expect(run.kinds(silent)).toEqual(["hold"]);
+    expect(run.feed(next.picture("p")).at(-1)).toHaveProperty("carried");
+    // All four pictures, from the first one on.
+    expect(starts(run.got().slice(before), 256).map((packet) => packet.pts)).toEqual(
+      [1, 2, 3, 4].map((count) => lastPts + count * FRAME),
+    );
+  });
+
+  it("gives up when the video shows other settings while the sound has not shown its own", () => {
+    const { run } = playing();
+    run.moves.consider(NEXT);
+    const next = moved();
+    expect(run.kinds(next.picture("idr", { silent: true }))).toEqual(["hold"]);
+    // The picture to go on from is found; the next one to start at is of another size.
+    const other = moved({ sets: [SETS.smallSps, SETS.pps] });
+    const verdict = run.feed(other.picture("idr", { silent: true })).find((given) => isFailure(given));
+    expect(verdict).toMatchObject({ why: "the video's decoder settings differ" });
+  });
+
   it("gives up after 2.5 seconds without a picture to go on from", () => {
     const { run } = playing();
     run.moves.consider(NEXT);
@@ -594,6 +647,8 @@ describe("PidMoves", () => {
     expect(run.kinds(tablePackets(H264))).toEqual(["pass"]);
     run.moves.consider(NEXT);
     expect(run.kinds(tables)).toEqual(["drop"]);
+    // Nor is a table ffmpeg's because it is on a PID the run's video had until now.
+    expect(run.kinds(pmtPackets(MOVED, 1, 256), [0, 256])).toEqual(["drop"]);
     const next = moved();
     run.feed(next.picture("idr"));
     expect(run.kinds(tables)).toEqual(["drop"]);
@@ -657,6 +712,10 @@ describe("PidMoves", () => {
     const double = runOn(layoutOf(twoVideos(256)));
     const doubleMoved = layoutOf(twoVideos(211));
     expect(double.moves.consider(doubleMoved)).toEqual(unchecked);
+    // Video that could be checked beside sound that can't: the sound's decoder would go on unchecked.
+    const unheard = runOn(layoutOf(latmStreams(256, 257)));
+    const unheardMoved = layoutOf(latmStreams(211, 221));
+    expect(unheard.moves.consider(unheardMoved)).toEqual(unchecked);
   });
 
   it("says no until the run has read its streams' settings", () => {
@@ -708,22 +767,139 @@ describe("PidMoves", () => {
   it("carries a clock reference that has a PID of its own", () => {
     const { run, encoder, before } = playing(BASE_CLOCKED);
     const lastPts = encoder.pts - FRAME;
-    expect(run.feed(encoder.writer.clock(300, lastPts))).toEqual(["pass"]);
+    const oldClock = withCounter(encoder.writer.clock(300, lastPts), 9);
+    expect(run.feed(oldClock)).toEqual(["pass"]);
     expect(run.moves.consider(NEXT_CLOCKED)).toBe("looking");
     const next = moved();
     // The new clock's packets are held like the streams', and passed on once the video is.
-    expect(run.feed(next.writer.clock(400, next.pts - 100))).toEqual(["hold"]);
+    const clock = (counter: number): Uint8Array => withCounter(next.writer.clock(400, next.pts - 100), counter);
+    expect(run.feed(clock(3))).toEqual(["hold"]);
     run.feed(next.picture("idr"));
-    expect(run.feed(next.writer.clock(400, next.pts - 100))).toEqual(["pass"]);
+    // The new encoder marks a break on its packets, as it may: to ffmpeg the first one goes on.
+    const after = concatBytes(withBreak(clock(3)), withBreak(clock(3)), clock(4));
+    expect(run.feed(after)).toEqual(["pass", "pass", "pass"]);
     const clocks = run
       .got()
       .slice(before)
       .filter((packet) => packet.pid === 300);
     // Before the first picture it belongs to the part left out; after it, it is on the old clock's time.
-    expect(clocks.map((packet) => packet.pcr)).toEqual([lastPts, lastPts + 2 * FRAME - 100]);
-    // A PID without payloads has no counter to go on from: the packets' own stays.
-    expect(clocks.map((packet) => packet.counter)).toEqual([0, 0]);
+    expect(clocks.map((packet) => packet.pcr)).toEqual([lastPts, ...[1, 2, 3].map(() => lastPts + 2 * FRAME - 100)]);
+    // A packet without a payload repeats the counter of the one before it: the first one passed on
+    // repeats the last one ffmpeg got, and from there the stream's own steps show.
+    expect(clocks.map((packet) => packet.counter)).toEqual([9, 9, 9, 10]);
+    // A break the stream marks later is its own.
+    expect(clocks.map((packet) => packet.discontinuity)).toEqual([false, false, true, false]);
     expect(run.got().some((packet) => packet.pid === 400)).toBe(false);
+  });
+
+  it("keeps the stream's own steps in the counters, so that ffmpeg sees where a packet was lost", () => {
+    const { run, before } = playing();
+    run.moves.consider(NEXT);
+    const next = moved();
+    // A clock reference alone between two pictures, as muxers send it on the video's PID.
+    const sent = concatBytes(
+      next.picture("idr"),
+      next.picture("p"),
+      next.writer.clock(211, next.pts),
+      next.picture("p"),
+      next.picture("p"),
+    );
+    // The second packet of the picture before the last never arrives.
+    const all = readPackets(sent);
+    const tails = all
+      .keys()
+      .filter((index) => all[index]?.pid === 211 && all[index].payload.length > 0 && !all[index].start);
+    const gone = tails.toArray().at(-2) ?? -1;
+    const last = starts(run.got(), 256).at(-1);
+    run.feed(concatBytes(sent.subarray(0, gone * 188), sent.subarray((gone + 1) * 188)));
+    const got = run.got().slice(before);
+    const video = got.filter((packet) => packet.pid === 256);
+    const source = all.filter((packet, index) => packet.pid === 211 && index !== gone);
+    expect(video).toHaveLength(source.length);
+    // The first packet goes on from the last one ffmpeg got on the PID...
+    const shift = ((last?.counter ?? 0) + 2 - (source[0]?.counter ?? 0)) & 0x0f;
+    // ...(the old picture had two packets)...
+    expect(video[0]?.counter).toBe(((last?.counter ?? 0) + 2) & 0x0f);
+    // ...and every one after it is as far from the stream's own as the first: the packet without
+    // a payload repeats the counter before it, and the lost one leaves its gap.
+    expect(video.map((packet) => packet.counter)).toEqual(source.map((packet) => (packet.counter + shift) & 0x0f));
+    expect(countersContinue(source)).toBe(false);
+    expect(countersContinue(video)).toBe(false);
+  });
+
+  it("lets in no stream the run doesn't know, while it looks at a move and once the move is on", () => {
+    const { run, encoder } = playing(TEXT_BASE);
+    const writer = new TsWriter();
+    // The text where the run found it, where it is after the move, and a stream the tables don't list.
+    const known = textUnit(writer, 258, 5_000_000);
+    const unknown = textUnit(writer, 222, 5_000_000);
+    const unlisted = textUnit(writer, 600, 5_000_000);
+    // The stream as the run found it is all ffmpeg's.
+    expect(run.kinds(concatBytes(known, unlisted))).toEqual(["pass"]);
+    expect(run.moves.consider(TEXT_NEXT)).toBe("looking");
+    // A stream on a PID ffmpeg has not seen would make it stop and study it, with no frame for
+    // players meanwhile.
+    expect(run.kinds(concatBytes(unknown, unlisted))).toEqual(["drop"]);
+    // What the old layout still sends on the PIDs the run knows goes on.
+    const still = concatBytes(known, encoder.picture("p"));
+    expect(run.kinds(still)).toEqual(["pass"]);
+    const next = moved();
+    expect(run.feed(next.picture("idr")).at(-1)).toHaveProperty("carried");
+    const late = concatBytes(unknown, unlisted, known, encoder.picture("p"));
+    expect(run.kinds(late)).toEqual(["drop"]);
+    expect(run.kinds(next.picture("p"))).toEqual(["pass"]);
+  });
+
+  it("leaves out a PID of the run's that the new layout has for another stream, while it looks", () => {
+    const { run, encoder } = playing();
+    const writer = new TsWriter();
+    // The sound's old PID is the text's now.
+    const reused = layoutOf(withText(211, 221, 257));
+    expect(run.moves.consider(reused)).toBe("looking");
+    expect(run.kinds(textUnit(writer, 257, 5_000_000))).toEqual(["drop"]);
+    expect(run.kinds(encoder.video("p"))).toEqual(["pass"]);
+    // The move is off (the tables went back): the run's PIDs are its own again, and so is the rest.
+    expect(run.moves.giveUp()).toEqual([]);
+    const rest = concatBytes(encoder.picture("p"), textUnit(writer, 600, 5_000_000));
+    expect(run.kinds(rest)).toEqual(["pass"]);
+  });
+
+  it("starts a stream that rides with the clock reference at the start of one of its units", () => {
+    // The clock reference is on the text's PID, before the move and after it.
+    const { run, before } = playing(withClockOn(TEXT_BASE, 258));
+    const writer = new TsWriter();
+    expect(run.kinds(textUnit(writer, 258, 900_000))).toEqual(["pass"]);
+    expect(run.moves.consider(withClockOn(TEXT_NEXT, 222))).toBe("looking");
+    const next = moved();
+    // A unit of three packets that belongs before the picture the run goes on from ends after it.
+    const long = textUnit(writer, 222, next.pts - 9000, 400);
+    expect(run.kinds(long.subarray(0, 188))).toEqual(["hold"]);
+    expect(run.feed(next.picture("idr")).at(-1)).toHaveProperty("carried");
+    expect(run.kinds(long.subarray(188))).toEqual(["drop"]);
+    expect(run.kinds(textUnit(writer, 222, next.pts))).toEqual(["pass"]);
+    const texts = run
+      .got()
+      .slice(before)
+      .filter((packet) => packet.pid === 258);
+    expect(texts.map((packet) => packet.start)).toEqual([true, true]);
+  });
+
+  it("starts the sound with a unit that tells its time, not with a packet that has none", () => {
+    const { run, encoder, before } = playing();
+    // The old sound ran four frames ahead of the old pictures.
+    const ahead = [0, 1, 2, 3].map((count) =>
+      encoder.writer.pes(257, "audio", adtsFrame(), { pts: encoder.pts + count * 1920 }),
+    );
+    run.feed(concatBytes(...ahead));
+    const lastSound = encoder.pts + 3 * 1920;
+    run.moves.consider(NEXT);
+    const next = moved();
+    // A clock reference alone on the sound's new PID comes right behind the first picture.
+    run.feed(concatBytes(next.picture("idr"), next.writer.clock(221, next.pts), next.picture("p"), next.picture("p")));
+    const sound = starts(run.got().slice(before), 257).map((packet) => packet.pts ?? 0);
+    // Nothing of the new sound that belongs before the end of the old one was passed on.
+    expect(sound.slice(4).every((pts) => pts > lastSound)).toBe(true);
+    expect(sound.every((pts, index) => index === 0 || pts > (sound[index - 1] ?? 0))).toBe(true);
   });
 
   it("starts fresh with every run", () => {

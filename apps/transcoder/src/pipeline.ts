@@ -107,8 +107,12 @@ export class Pipeline {
         this.retire(run);
       },
       moved: (run: Generation) => {
-        // As for a new run (see `succeed`): only for the source players get, and one that had video.
-        this.layoutChangedAt = run === this.active && run.frames > 0 ? this.now() : this.layoutChangedAt;
+        // As for a new run (see `succeed`): only for the source players get, and one that had video
+        // since its last move. Moves that keep coming over a run that shows nothing must not look
+        // like a stream that does.
+        const shown = run === this.active && run.frames > run.framesAtMove;
+        this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
+        run.framesAtMove = run.frames;
       },
     };
     this.feeds = new SourceFeeds(host, options.openSource ?? readSource, this.logger, this.now);

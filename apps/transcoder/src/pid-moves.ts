@@ -114,25 +114,27 @@ interface Known {
 /** Where the packets of one of the stream's PIDs go, once the stream moved. */
 interface Gate {
   to: number;
-  known: Known | undefined;
+  known: Known;
   /** Whether the stream's packets are passed on yet: from a point the decoder can go on from. */
   open: boolean;
   lead: boolean;
-  /** The next packet with a payload is the first on the PID ffmpeg knows it by. */
-  first: boolean;
+  /**
+   * What is added to the stream's own continuity counters, so that they go on from the last one
+   * ffmpeg got on the PID; undefined until the first packet is passed on.
+   */
+  shift: number | undefined;
   /** Nothing about the PID changed: its packets go on untouched. */
   same: boolean;
 }
 
+/**
+ * What ffmpeg gets once the stream's layout changed: the packets on the PIDs that have a gate,
+ * and nothing else. Not the tables (it keeps the ones it has), not what still comes on PIDs its
+ * streams left, and no stream it doesn't know: for one of those it would hold everything back
+ * until it has studied it (up to `-probesize` of input), with no frame for players meanwhile.
+ */
 interface Moved {
   gates: Map<number, Gate>;
-  /** The PIDs ffmpeg reads, tables included: anything else the stream sends on them now would get mixed in. */
-  targets: Set<number>;
-  /**
-   * The PIDs the streams were on between the run's start and this move. What still comes on one
-   * is left out, unless the streams are on it again (its gate then says where it goes).
-   */
-  left: Set<number>;
   /** What is added to the stream's timestamps, so that they go on where the old ones ended. */
   offset: number;
   /** When the first picture passed on is shown, on the stream's own clock. */
@@ -150,6 +152,10 @@ interface Candidate {
 interface Search {
   layout: Layout;
   places: Map<number, number>;
+  /** PIDs the new layout has for streams that are none of the run's: left out, whatever was on them before. */
+  others: Set<number>;
+  /** What ffmpeg got before the move came up, and gets again if it is given up. */
+  before: Moved | undefined;
   leadPid: number;
   held: { pid: number; bytes: Uint8Array }[];
   bytes: number;
@@ -335,18 +341,7 @@ export class PidMoves {
       return { no: "no run reads the stream yet" };
     }
     if (staysPut(real, next)) {
-      const pids = this.known.keys().toArray();
-      this.moved ??= {
-        gates: new Map(pids.map((pid) => [pid, this.gate(pid, true)])),
-        targets: new Set([...pids, ...base.programs.map((program) => program.pmtPid)]),
-        left: new Set(),
-        offset: 0,
-        startPts: 0,
-        leadOpen: true,
-      };
-      // What the stream carries next to the run's streams now is left out (a PID with a gate goes
-      // where that says): ffmpeg knows no such PIDs, and would study them for what they are.
-      this.moved.left = this.moved.left.union(streamPids(next));
+      this.moved ??= this.inPlace();
       return "carried";
     }
     if (waited) {
@@ -376,6 +371,8 @@ export class PidMoves {
     this.search = {
       layout: next,
       places,
+      others: streamPids(next).difference(places),
+      before: this.moved,
       leadPid,
       held: [],
       bytes: 0,
@@ -385,6 +382,8 @@ export class PidMoves {
       start: undefined,
       audio: new Map(audio.map(([from]) => [from, false])),
     };
+    // While it is looked at, the run's PIDs go on as they do, and nothing else is let in.
+    this.moved ??= this.inPlace();
     return "looking";
   }
 
@@ -399,9 +398,10 @@ export class PidMoves {
 
   /** Gives up on the move being looked at, if any (the stream changed again): what was held, as it came. */
   giveUp(): Uint8Array[] {
-    const held = this.search?.held.map((packet) => packet.bytes) ?? [];
+    const { search } = this;
     this.search = undefined;
-    return held;
+    this.moved = search === undefined ? this.moved : search.before;
+    return search?.held.map((packet) => packet.bytes) ?? [];
   }
 
   /**
@@ -418,30 +418,28 @@ export class PidMoves {
     if (search?.places.has(pid) === true) {
       return this.hold(search, data, at, pid);
     }
-    if (table && (search !== undefined || moved !== undefined)) {
-      return "drop";
-    }
     if (moved === undefined) {
+      // The stream is as the run found it: all of it is ffmpeg's.
       const known = this.known.get(pid);
       if (known !== undefined) {
         this.note(known, data, at, packetParts(data, at));
       }
       return "pass";
     }
-    const gate = moved.gates.get(pid);
-    if (gate === undefined) {
-      return moved.targets.has(pid) || moved.left.has(pid) ? "drop" : "pass";
-    }
-    return this.through(moved, gate, data, at) ? "pass" : "drop";
+    const gate = table || search?.others.has(pid) === true ? undefined : moved.gates.get(pid);
+    return gate !== undefined && this.through(moved, gate, data, at) ? "pass" : "drop";
   }
 
-  /** The PIDs ffmpeg takes for the run's streams and tables: whatever else the stream sends on them now is left out. */
-  private targets(places: Map<number, number>): Set<number> {
-    return new Set([...places.values(), ...(this.base?.programs.map((program) => program.pmtPid) ?? [])]);
+  /** The gates of a run whose streams are where it found them: each of its PIDs goes on as it comes (see `Moved`). */
+  private inPlace(): Moved {
+    const gates = this.known.keys().map((pid): [number, Gate] => [pid, this.gate(pid, true)]);
+    return { gates: new Map(gates), offset: 0, startPts: 0, leadOpen: true };
   }
 
   private gate(to: number, same: boolean): Gate {
-    return { to, known: this.known.get(to), open: same, lead: to === this.lead?.pid, first: !same, same };
+    // Every PID a gate leads to is one of the run's.
+    const known = this.known.get(to) ?? { counter: -1, watched: undefined };
+    return { to, known, open: same, lead: to === this.lead?.pid, shift: undefined, same };
   }
 
   /** Keeps a packet of a stream that moved, and looks at what it tells about going on. */
@@ -452,7 +450,8 @@ export class PidMoves {
     const parts = packetParts(bytes, 0);
     const pes = pesStart(bytes, 0, parts);
     let why: string | undefined;
-    if (pid === search.leadPid && search.start === undefined) {
+    if (pid === search.leadPid) {
+      // Also once a picture to go on from is found: until the move is on, the video must not show other settings.
       why = this.lookForStart(search, bytes, parts, pes) ? undefined : "the video's decoder settings differ";
     } else if (pes !== undefined && !this.audioFits(search, pid, bytes, parts, pes)) {
       why = "an audio stream's settings differ";
@@ -516,8 +515,6 @@ export class PidMoves {
     const byPts = lead.lastPts === undefined ? byDts : tsAdd(tsAdd(lead.lastPts, lead.unit), -start.pts);
     const moved: Moved = {
       gates: new Map([...search.places].map(([from, to]) => [from, this.gate(to, false)])),
-      targets: this.targets(search.places),
-      left: new Set([...(this.moved?.left ?? []), ...(this.moved?.gates.keys() ?? [])]),
       offset: tsDiff(byPts, byDts) > 0 ? byPts : byDts,
       startPts: start.pts,
       leadOpen: false,
@@ -544,10 +541,9 @@ export class PidMoves {
   /** Whether a packet of a stream that moved is passed on. If so it is rewritten in place (see `PidMoves`). */
   private through(moved: Moved, gate: Gate, data: Uint8Array, at: number): boolean {
     const parts = packetParts(data, at);
+    const { known } = gate;
     if (gate.same) {
-      if (gate.known !== undefined) {
-        this.note(gate.known, data, at, parts);
-      }
+      this.note(known, data, at, parts);
       return true;
     }
     const pes = pesStart(data, at, parts);
@@ -559,27 +555,24 @@ export class PidMoves {
     }
     data[at + 1] = ((data[at + 1] ?? 0) & 0xe0) | (gate.to >> 8);
     data[at + 2] = gate.to & 0xff;
-    const known = gate.known;
-    const counted = ((data[at + 3] ?? 0) & 0x10) !== 0;
-    if (known !== undefined && known.counter >= 0) {
-      // The counter goes on from the last packet ffmpeg got on the PID; only packets with a payload count.
-      known.counter = (known.counter + (counted ? 1 : 0)) & 0x0f;
-      data[at + 3] = ((data[at + 3] ?? 0) & 0xf0) | known.counter;
-    }
-    if (gate.first && parts.adaptationAt >= 0) {
+    const header = data[at + 3] ?? 0;
+    if (gate.shift === undefined && parts.adaptationAt >= 0) {
       // The stream may say that it breaks here (a new encoder does): to ffmpeg it goes on.
       data[parts.adaptationAt] = (data[parts.adaptationAt] ?? 0) & 0x7f;
     }
-    gate.first &&= !counted;
+    // The first packet's counter goes on from the last one ffmpeg got on the PID (a packet
+    // without a payload repeats it, one with a payload adds one), and the packets after it step
+    // as the stream's own do: where the stream lost a packet on its way here, ffmpeg still sees
+    // that one is missing.
+    gate.shift ??= known.counter + ((header >> 4) & 1) - (header & 0x0f);
+    data[at + 3] = (header & 0xf0) | ((header + gate.shift) & 0x0f);
     if (moved.offset !== 0) {
       if (pes !== undefined) {
         shiftPes(data, pes, moved.offset);
       }
       shiftPcr(data, parts, moved.offset);
     }
-    if (known !== undefined) {
-      this.note(known, data, at, parts, true);
-    }
+    this.note(known, data, at, parts);
     return true;
   }
 
@@ -589,11 +582,12 @@ export class PidMoves {
    * (its last unit lasts as long as the one before it did).
    */
   private opens(moved: Moved, gate: Gate, parts: PacketParts, pes: PesStart | undefined): boolean {
+    const { watched } = gate.known;
     if (pes?.pts === undefined) {
-      // Units without a time (tables, data), or a PID that only carries the clock: once the video is on.
-      return moved.leadOpen && (parts.unitStart || parts.payloadAt < 0);
+      // A PID that only carries the clock, or units without a time: once the video is on. Sound
+      // waits for a unit that tells its time.
+      return watched === undefined && moved.leadOpen && (parts.unitStart || parts.payloadAt < 0);
     }
-    const watched = gate.known?.watched;
     const unit = watched?.unit ?? 0;
     const last = watched?.lastDts;
     const late = tsDiff(pes.pts, moved.startPts) >= -unit;
@@ -601,10 +595,8 @@ export class PidMoves {
   }
 
   /** ffmpeg gets this packet on a PID it knows: remembers its counter, its times and its decoder settings. */
-  private note(known: Known, data: Uint8Array, at: number, parts: PacketParts, counted = false): void {
-    if (!counted && ((data[at + 3] ?? 0) & 0x10) !== 0) {
-      known.counter = (data[at + 3] ?? 0) & 0x0f;
-    }
+  private note(known: Known, data: Uint8Array, at: number, parts: PacketParts): void {
+    known.counter = (data[at + 3] ?? 0) & 0x0f;
     const { watched } = known;
     if (watched === undefined) {
       return;
