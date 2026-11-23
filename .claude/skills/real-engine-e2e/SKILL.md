@@ -10,7 +10,7 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 ## 1. Rules
 
 - **Real engines only.** No mock engine, no stubbed `getstream`, no fake peers. Tests make failures with real firewall rules, paused containers, stopped broadcasts and broadcasts that change their layout (`setDirectPathBlocked`, `setVpnServerUnreachable`, `setBroadcastBlocked`, `setBroadcastInput`, `setBroadcastLayout` in `e2e/tests/mesh.ts`).
-- **The suite runs in CI only.** It needs four machines joined by a mesh, so there is no local or single-machine run. `npm run check` covers typecheck, lint, format and unit tests, not E2E.
+- **The suite runs in CI only.** It needs five machines joined by a mesh, so there is no local or single-machine run. `npm run check` covers typecheck, lint, format and unit tests, not E2E.
 - **No stream loads in a cloud sandbox.** The engine starts and its API answers, but its peer-to-peer traffic doesn't get out, so `getstream` answers "failed to load content". That says nothing about the code. Streams play in CI and on the Testing environment.
 - Never skip, disable or loosen a test to get green. `retries: 0` is on purpose: no test is run again. `openApp` only loads a page again, and says so.
 
@@ -24,25 +24,26 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 
 ## 3. Read a run
 
-Four jobs start together:
+Five jobs start together:
 
-| Job                                 | Role                                                           | Tells you             |
-| ----------------------------------- | -------------------------------------------------------------- | --------------------- |
-| WireGuard server                    | `wg`: the VPN server under test                                | no AceSwarm result    |
-| Dummy Acestream broadcast           | `source`: six real broadcasts (`bc1`-`bc6`) and the tracker    | no AceSwarm result    |
-| AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`           | the result for Docker |
-| AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6` | the result for Podman |
+| Job                                 | Role                                                                                          | Tells you                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------- |
+| WireGuard server                    | `wg`: the VPN server under test                                                               | no AceSwarm result         |
+| Dummy Acestream broadcast           | `source`: eight real broadcasts (`bc1`-`bc8`) and the tracker                                 | no AceSwarm result         |
+| AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`                                          | the result for Docker      |
+| AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6`                                | the result for Podman      |
+| AceSwarm with real engines (arm64)  | `stack-arm64`: Docker on `ubuntu-24.04-arm`, `bc7` and `bc8`, only `arm64-disk-cache.spec.ts` | the arm64 disk cache check |
 
-- The result is the **Run the tests** step of each stack job, about half an hour. Playwright stops at 45 minutes. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
+- The result is the **Run the tests** step of each x86_64 stack job, about half an hour. Playwright stops at 45 minutes. The **Run the arm64 disk cache test** step of the arm64 job takes a few minutes, with a limit of 20. Once the stacks have joined the mesh, the stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when every stack job is green.
 - Specs run in file order with one worker, and each starts from `resetStack`. Most are serial: after a test fails, the rest of that file is skipped, so read the first failure.
-- A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
+- A failed stack job uploads `e2e-results-<role>-<attempt>` (`stack`, `stack-podman` or `stack-arm64`): the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
 - **Stop AceSwarm** on the Podman job may print "rootless netns: kill network process: permission denied". That step is allowed to fail and is not a test failure.
-- **Check that the stack left no engines** runs after it on both jobs and is a real result: it fails when `docker compose down` left an engine container, which the stack's `cleanup` service should have removed. It lists the ones it found.
+- **Check that the stack left no engines** runs after it on every stack job and is a real result: it fails when `docker compose down` left an engine container, which the stack's `cleanup` service should have removed. It lists the ones it found.
 
 ## 4. Real failure or not
 
-- **The same test fails on both stack jobs.** Real, as long as the `wg` and `source` jobs are healthy.
-- **A test fails on one stack job.** Often real and specific to that runtime (on Podman the fault rules go into Podman's network namespace, and rootless containers have no AppArmor profile of their own, so the host's profiles apply to them: `ubuntu-26.04` ships ones for `wg` and `pasta`). Re-run all jobs once. If it fails again, it is real. If it passes, report a flaky test with the links to both attempts, don't drop it.
+- **The same test fails on both x86_64 stack jobs.** Real, as long as the `wg` and `source` jobs are healthy.
+- **A test fails on one x86_64 stack job.** Often real and specific to that runtime (on Podman the fault rules go into Podman's network namespace, and rootless containers have no AppArmor profile of their own, so the host's profiles apply to them: `ubuntu-26.04` ships ones for `wg` and `pasta`). Re-run all jobs once. If it fails again, it is real. If it passes, report a flaky test with the links to both attempts, don't drop it.
 - **A run is cancelled with no new run for the same branch.** A runner couldn't join the mesh and cancelled the run. Every job usually shows as cancelled, that one included, so find the jobs with a failed step up to "Join the mesh" (a cleanup step can also fail after the cancel, so ignore those). Between `wg` and `source` a failed hole punch fails on both ends, so there can be two: start with the one whose step failed first, and read it like the next point. If that step is "Find this runner's public UDP address", the next attempt starts by itself (section 2): the run's page shows the latest attempt, and the **E2E retry** run for each attempt says what it decided.
 - **A step fails before the tests**: finding the public UDP address, "Join the mesh" ("no connectivity to …"), waiting for the profile or `broadcasts.json`, or `stack.sh check`. Usually infrastructure: re-run all jobs once (a run that stopped at finding the public UDP address re-runs by itself, section 2). It is real if the change touches what that step runs: anything in `e2e/`, the workflow, or for `stack.sh check` the gateway, `compose.yaml` and the netgw stage of the `Dockerfile`. If the same step fails again, compare with the latest E2E run on `main`: only a failure there too makes it an outage. When the wait for the profile or `broadcasts.json` fails, the cause is in the `wg` or `source` job: read its **Logs** step. "Build the images and start AceSwarm" is always suspect, because the change can break a build or a service's health check.
 - **Every test times out waiting for "playing".** Read the `source` job's logs first: each engine should announce to the tracker and get its broadcast as a peer. If the announces are there, suspect the change. If they are missing, the engines couldn't resolve the broadcast through Acestream's lookup service, or couldn't get out at all. A change to the gateway, the engine image or the compose files does that too, since `stack.sh check` only pings from the gateway itself. Call it an outage only when E2E on `main` from the same time fails the same way.
@@ -53,10 +54,10 @@ No other check is known to be flaky.
 
 ## 5. Add or change a spec
 
-- Get broadcasts with `broadcasts(n)` from `e2e/tests/mesh.ts`. Their infohashes and content IDs are new in every run, and each stack runner has three.
+- Get broadcasts with `broadcasts(n)` from `e2e/tests/mesh.ts`. Their infohashes and content IDs are new in every run, each x86_64 stack runner has three, and the arm64 one has two.
 - Open the page with `openApp(page)` (`helpers.ts`), never `page.goto("/")`: it loads the page again when Docker's network changes cut the load (see section 4).
 - Start from `resetStack(request)` (`e2e/tests/helpers.ts`) in `beforeAll`, and remove every fault the spec adds.
-- Both runtimes have to pass. Use `docker` and `compose` from `helpers.ts` and the fault setters from `mesh.ts`, never iptables or the runtime directly: on Podman the rules go into another chain. Pause and unpause by container ID or name with `docker(...)`, because `compose unpause` finds nothing on Podman (see `paths.spec.ts`). Use `MESH.self`, not a literal address.
+- Both x86_64 runtimes have to pass; the arm64 job runs only its own spec. Use `docker` and `compose` from `helpers.ts` and the fault setters from `mesh.ts`, never iptables or the runtime directly: on Podman the rules go into another chain. Pause and unpause by container ID or name with `docker(...)`, because `compose unpause` finds nothing on Podman (see `paths.spec.ts`). Use `MESH.self`, not a literal address.
 - Real engines are slow to start: `waitForPlaying` allows 180 s. Don't shorten a timeout to make a spec faster.
 - Update the spec table and the order diagram in `e2e/README.md`.
 

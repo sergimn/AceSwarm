@@ -105,12 +105,10 @@ describe("engine cache on disk", () => {
 
   it("only takes the full path of a folder", () => {
     for (const dir of ["/mnt/ssd/aceswarm-cache", "/srv/cache/", "/mnt/My Disk/cache:1", "/var/lib/..cache"]) {
-      expect(loadConfig({ ENGINE_CACHE_DIR: dir }, "x64").ENGINE_CACHE_DIR, dir).toBe(dir);
+      expect(loadConfig({ ENGINE_CACHE_DIR: dir }).ENGINE_CACHE_DIR, dir).toBe(dir);
     }
     for (const dir of ["cache", "./cache", "~/cache", "/", "//", "/mnt/../etc", "/mnt/./cache", "/mnt/a\nb", " /mnt"]) {
-      expect(() => loadConfig({ ENGINE_CACHE_DIR: dir }, "x64"), dir).toThrow(
-        /ENGINE_CACHE_DIR has to be the full path/,
-      );
+      expect(() => loadConfig({ ENGINE_CACHE_DIR: dir }), dir).toThrow(/ENGINE_CACHE_DIR has to be the full path/);
     }
   });
 
@@ -126,28 +124,22 @@ describe("engine cache on disk", () => {
     const onDisk = { ENGINE_CACHE_DIR: "/mnt/ssd/cache" };
     // Too small for the default 128 MB memory cache, which stays empty with the cache on disk.
     expect(() => loadConfig({ ENGINE_MEMORY_MB: "256" })).toThrow(/too small for ENGINE_MEMORY_CACHE_MB=128/);
-    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "256" }, "x64").ENGINE_MEMORY_MB).toBe(256);
-    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "0" }, "x64").ENGINE_MEMORY_MB).toBe(0);
-    expect(() => loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "255" }, "x64")).toThrow(
+    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "256" }).ENGINE_MEMORY_MB).toBe(256);
+    expect(loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "0" }).ENGINE_MEMORY_MB).toBe(0);
+    expect(() => loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "255" })).toThrow(
       /ENGINE_MEMORY_MB=255 is too small\. With its cache on disk \(ENGINE_CACHE_DIR\) an engine still needs at least 256 MB/,
     );
   });
 
-  it("refuses the folder on arm64, where the engine keeps its cache in memory", () => {
-    const onDisk = { ENGINE_CACHE_DIR: "/mnt/ssd/cache" };
-    expect(() => loadConfig(onDisk, "arm64")).toThrow(
-      /✖ ENGINE_CACHE_DIR is for x86_64 only, and this machine is arm64 .* lower ENGINE_MEMORY_CACHE_MB\n {2}→ at ENGINE_CACHE_DIR/,
-    );
-    // Said together with whatever else is wrong, so one start names everything to change.
-    expect(() => loadConfig({ ...onDisk, ENGINE_MEMORY_MB: "255" }, "arm64")).toThrow(
-      /ENGINE_MEMORY_MB=255 is too small[^]*ENGINE_CACHE_DIR is for x86_64 only/,
-    );
-    // A folder that is no folder is the first thing to say.
-    expect(() => loadConfig({ ENGINE_CACHE_DIR: "cache" }, "arm64")).toThrow(/has to be the full path/);
-    // Without the folder nothing is refused, and the other settings read the same on both.
-    expect(loadConfig({}, "arm64")).toEqual(loadConfig({}, "x64"));
-    expect(loadConfig({ ENGINE_DISK_CACHE_MB: "300" }, "arm64").ENGINE_DISK_CACHE_MB).toBe(300);
-    expect(loadConfig(onDisk, "x64").ENGINE_CACHE_DIR).toBe("/mnt/ssd/cache");
+  it("takes the folder on every architecture, the arm64 engine included", () => {
+    // The arm64 engine's shim answers the disk calls and shows it a smaller memory (engine/arm64-shim.py),
+    // so the controller no longer refuses the folder there: the settings read the same on any machine.
+    const onDisk = { ENGINE_CACHE_DIR: "/mnt/ssd/cache", ENGINE_DISK_CACHE_MB: "300" };
+    expect(loadConfig(onDisk).ENGINE_CACHE_DIR).toBe("/mnt/ssd/cache");
+    expect(loadConfig(onDisk).ENGINE_DISK_CACHE_MB).toBe(300);
+    expect(loadConfig({})).toEqual(loadConfig({ ENGINE_DISK_CACHE_MB: "256" }));
+    // A folder that is no folder is still the first thing to say.
+    expect(() => loadConfig({ ENGINE_CACHE_DIR: "cache" })).toThrow(/has to be the full path/);
   });
 });
 

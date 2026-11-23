@@ -1,13 +1,15 @@
-# End-to-end tests across four GitHub-hosted runners, with real Acestream engines (no mocks):
+# End-to-end tests across five GitHub-hosted runners, with real Acestream engines (no mocks):
 #
 #   wg            a throwaway WireGuard server; generates one client profile per stack runner
-#   source        six dummy live broadcasts from real Acestream engines, plus the tracker players
-#                 use: bc1-bc3 for one stack runner, bc4-bc6 for the other
+#   source        eight dummy live broadcasts from real Acestream engines, plus the tracker players
+#                 use: bc1-bc3 for one stack runner, bc4-bc6 for the other, bc7-bc8 for the arm64 one
 #   stack         AceSwarm on Docker with real engines, and the Playwright tests
 #   stack-podman  the same on rootless Podman, set up like a host that runs `docker compose up` on
 #                 Podman (e2e/podman.sh)
+#   stack-arm64   the same on Docker on an arm64 runner, with the arm64 engine (the Raspberry Pi's),
+#                 running only the arm64 disk cache test (e2e/tests/arm64-disk-cache.spec.ts)
 #
-# All four run on ubuntu-26.04. Its AppArmor profiles for wg and pasta matter to the mesh and the
+# All but stack-arm64 run on ubuntu-26.04. Its AppArmor profiles for wg and pasta matter to the mesh and the
 # Podman leg (see "The Podman stack runner" in e2e/README.md).
 #
 # The runners can't accept connections from the internet, so they first join a WireGuard mesh by
@@ -48,7 +50,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ubuntu-26.04
-    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    # Serves until all stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,12 +78,12 @@ jobs:
         # it. One that fails before joining cancels the run from its own job.
         # Usually seconds; up to 10 minutes per peer for a runner that starts late.
         timeout-minutes: 20
-        run: e2e/mesh.sh join wg source "stack?" "stack-podman?"
+        run: e2e/mesh.sh join wg source "stack?" "stack-podman?" "stack-arm64?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # wg and source need each other, and both stacks need both of them, so without this
+        # wg and source need each other, and all stacks need both of them, so without this
         # runner the others would wait minutes and then fail too. Only a failure up to here
         # cancels.
         if: failure()
@@ -93,12 +95,12 @@ jobs:
         timeout-minutes: 10
         run: |
           e2e/vpn.sh build
-          e2e/vpn.sh start "$(e2e/mesh.sh ip wg)" client-stack client-stack-podman
-          for client in client-stack client-stack-podman; do
+          e2e/vpn.sh start "$(e2e/mesh.sh ip wg)" client-stack client-stack-podman client-stack-arm64
+          for client in client-stack client-stack-podman client-stack-arm64; do
             e2e/mesh.sh share "$(e2e/vpn.sh profile "$client")"
           done
       - name: Serve until the tests are done
-        run: e2e/mesh.sh wait-all "done" stack stack-podman
+        run: e2e/mesh.sh wait-all "done" stack stack-podman stack-arm64
       - name: Logs
         if: always()
         timeout-minutes: 5
@@ -115,7 +117,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ubuntu-26.04
-    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    # Serves until all stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,12 +143,12 @@ jobs:
       - name: Join the mesh
         # Usually seconds; up to 10 minutes per peer for a runner that starts late.
         timeout-minutes: 20
-        run: e2e/mesh.sh join source wg "stack?" "stack-podman?"
+        run: e2e/mesh.sh join source wg "stack?" "stack-podman?" "stack-arm64?"
         env:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # wg and source need each other, and both stacks need both of them, so without this
+        # wg and source need each other, and all stacks need both of them, so without this
         # runner the others would wait minutes and then fail too. Only a failure up to here
         # cancels.
         if: failure()
@@ -157,11 +159,11 @@ jobs:
       - name: Start the broadcasts
         timeout-minutes: 10
         run: |
-          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 6
+          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 8
           e2e/broadcast.sh wait > "$RUNNER_TEMP/broadcasts.json"
           e2e/mesh.sh share "$RUNNER_TEMP/broadcasts.json"
       - name: Serve until the tests are done
-        run: e2e/mesh.sh wait-all "done" stack stack-podman
+        run: e2e/mesh.sh wait-all "done" stack stack-podman stack-arm64
       - name: Logs
         if: always()
         timeout-minutes: 5
@@ -171,7 +173,7 @@ jobs:
 
   stack:
     # mesh.sh (job_name) looks for these jobs by name.
-    name: AceSwarm with real engines${{ matrix.runtime == 'podman' && ' (Podman)' || '' }}
+    name: AceSwarm with real engines${{ matrix.label }}
     permissions:
       contents: read
       # The runners publish their mesh addresses as artifacts and read the others' through the
@@ -180,23 +182,35 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
-      # Each stack runner tests on its own: once both have joined the mesh, one failing must not
+      # Each stack runner tests on its own: once all stacks have joined the mesh, one failing must not
       # cancel the other. A failure up to the join cancels the whole run on purpose.
       fail-fast: false
       matrix:
         include:
           - runtime: docker
             role: stack
+            arch: amd64
+            label: ""
             os: ubuntu-26.04
             broadcasts: bc1,bc2,bc3
           # Rootless Podman 5 from the distribution, as on a current Ubuntu host.
           - runtime: podman
             role: stack-podman
+            arch: amd64
+            label: " (Podman)"
             os: ubuntu-26.04
             broadcasts: bc4,bc5,bc6
+          # The Raspberry Pi's engine: the arm64 Android build, on an arm64 runner. Its job runs only the
+          # arm64 disk cache test, which checks that the arm64 engine keeps its stream cache on disk.
+          - runtime: docker
+            role: stack-arm64
+            arch: arm64
+            label: " (arm64)"
+            os: ubuntu-24.04-arm
+            broadcasts: bc7,bc8
     env:
       MESH_ROLE: ${{ matrix.role }}
-      # Its own broadcasts: the tests tell the paths apart by who announced to the tracker, and both
+      # Its own broadcasts: the tests tell the paths apart by who announced to the tracker, and all
       # stack runners' VPN traffic leaves from the WireGuard server's runner.
       E2E_BROADCASTS: ${{ matrix.broadcasts }}
     steps:
@@ -231,10 +245,10 @@ jobs:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # The other stack could still run without this one (wg and source take the stacks as
+        # The other stacks could still run without this one (wg and source take the stacks as
         # optional peers), but a run with a stack missing can't validate a change, so cancel it
         # for a fast red result instead. Only a failure up to here cancels: after the mesh is up,
-        # a stack job's failure must not cancel the other's tests.
+        # a stack job's failure must not cancel the others' tests.
         if: failure()
         timeout-minutes: 2
         run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
@@ -254,7 +268,7 @@ jobs:
           e2e/stack.sh build
           e2e/stack.sh up
       - name: Wait for the WireGuard server and the broadcasts
-        # Usually ready by now, but the shared runners start their servers only once both stacks
+        # Usually ready by now, but the shared runners start their servers only once all stacks
         # joined or 10 minutes passed.
         timeout-minutes: 15
         run: |
@@ -263,8 +277,15 @@ jobs:
           e2e/stack.sh check
       - name: Run the tests
         # About half an hour. Playwright stops at 45 minutes (globalTimeout) and still writes its report.
+        if: matrix.arch != 'arm64'
         timeout-minutes: 50
         run: npm run e2e
+      - name: Run the arm64 disk cache test
+        # The goal of this leg: the arm64 engine keeps its stream cache on disk, which
+        # e2e/tests/arm64-disk-cache.spec.ts checks. The other stack jobs run the whole suite instead.
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 20
+        run: npm run e2e -- e2e/tests/arm64-disk-cache.spec.ts
       - name: Tell the other runners the tests are done
         # Also after failed tests, but not in a cancelled run: the other jobs are being cancelled
         # too, so nobody would fetch the file and this step would wait out wait-fetched's limit.
@@ -288,7 +309,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         timeout-minutes: 5
         with:
-          name: e2e-results-${{ matrix.runtime }}-${{ github.run_attempt }}
+          name: e2e-results-${{ matrix.role }}-${{ github.run_attempt }}
           path: |
             playwright-report/
             test-results/

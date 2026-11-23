@@ -19,7 +19,7 @@ async function fetchText(url: string): Promise<string> {
   return await response.text();
 }
 
-/** This runner's mesh role: `stack`, or `stack-podman` on the rootless Podman runner. */
+/** This runner's mesh role: `stack`, `stack-podman` on the rootless Podman runner, or `stack-arm64` on the arm64 runner. */
 const ROLE = process.env["MESH_ROLE"] ?? "stack";
 
 /** The client profile the WireGuard server on the other runner generated for this runner. */
