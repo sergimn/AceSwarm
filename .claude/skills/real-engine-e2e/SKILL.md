@@ -26,18 +26,19 @@ description: How AceSwarm's end-to-end tests run with real Acestream engines, an
 
 Four jobs start together:
 
-| Job                                 | Role                                                           | Tells you             |
-| ----------------------------------- | -------------------------------------------------------------- | --------------------- |
-| WireGuard server                    | `wg`: the VPN server under test                                | no AceSwarm result    |
-| Dummy Acestream broadcast           | `source`: six real broadcasts (`bc1`-`bc6`) and the tracker    | no AceSwarm result    |
-| AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`           | the result for Docker |
-| AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6` | the result for Podman |
+| Job                                 | Role                                                                                | Tells you                  |
+| ----------------------------------- | ----------------------------------------------------------------------------------- | -------------------------- |
+| WireGuard server                    | `wg`: the VPN server under test                                                     | no AceSwarm result         |
+| Dummy Acestream broadcast           | `source`: seven real broadcasts (`bc1`-`bc7`) and the tracker                       | no AceSwarm result         |
+| AceSwarm with real engines          | `stack`: Docker on `ubuntu-26.04`, plays `bc1`-`bc3`                                | the result for Docker      |
+| AceSwarm with real engines (Podman) | `stack-podman`: rootless Podman on `ubuntu-26.04`, `bc4`-`bc6`                      | the result for Podman      |
+| AceSwarm with real engines (arm64)  | `stack-arm64`: Docker on `ubuntu-24.04-arm`, `bc7`, only `arm64-disk-cache.spec.ts` | the arm64 disk cache check |
 
-- The result is the **Run the tests** step of each stack job, about half an hour. Playwright stops at 45 minutes. Once both have joined the mesh, the two stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when both are green.
+- The result is the **Run the tests** step of each x86_64 stack job, or the **Run the arm64 disk cache test** step of the arm64 job, about half an hour. Playwright stops at 45 minutes. Once the stacks have joined the mesh, the stack jobs don't cancel each other (a stack that fails before joining cancels the whole run), and a change is validated only when every stack job is green.
 - Specs run in file order with one worker, and each starts from `resetStack`. Most are serial: after a test fails, the rest of that file is skipped, so read the first failure.
-- A failed stack job uploads `e2e-results-<docker|podman>-<attempt>`: the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
+- A failed stack job uploads `e2e-results-<role>-<attempt>` (`stack`, `stack-podman` or `stack-arm64`): the Playwright report, traces, videos and `e2e-stack.log` (every service and engine). Each job's **Logs** step prints the mesh and its own side: the end of `e2e-stack.log`, the WireGuard server, or the tracker, ffmpeg and broadcast engines.
 - **Stop AceSwarm** on the Podman job may print "rootless netns: kill network process: permission denied". That step is allowed to fail and is not a test failure.
-- **Check that the stack left no engines** runs after it on both jobs and is a real result: it fails when `docker compose down` left an engine container, which the stack's `cleanup` service should have removed. It lists the ones it found.
+- **Check that the stack left no engines** runs after it on every stack job and is a real result: it fails when `docker compose down` left an engine container, which the stack's `cleanup` service should have removed. It lists the ones it found.
 
 ## 4. Real failure or not
 

@@ -18,7 +18,7 @@ import { broadcasts, type Broadcast } from "./mesh.ts";
 /**
  * The goal of the arm64 work: the Android engine (arm64, the Raspberry Pi's engine) keeps its stream
  * cache in a folder under ENGINE_CACHE_DIR, as the x86_64 engine does in disk-cache.spec.ts. It only
- * runs on the arm64 runner of the E2E workflow, and fails until the arm64 engine does that. The
+ * runs on the arm64 runner of the E2E workflow, and checks that the arm64 engine does that. The
  * x86_64 runs skip it. See engine/arm64-shim.py.
  */
 test.skip(process.arch !== "arm64", "the arm64 engine only: the arm64 leg of the E2E workflow runs this");

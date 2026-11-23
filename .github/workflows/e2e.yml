@@ -1,4 +1,4 @@
-# End-to-end tests across four GitHub-hosted runners, with real Acestream engines (no mocks):
+# End-to-end tests across five GitHub-hosted runners, with real Acestream engines (no mocks):
 #
 #   wg            a throwaway WireGuard server; generates one client profile per stack runner
 #   source        six dummy live broadcasts from real Acestream engines, plus the tracker players
@@ -50,7 +50,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ubuntu-26.04
-    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    # Serves until all stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,7 +83,7 @@ jobs:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # wg and source need each other, and both stacks need both of them, so without this
+        # wg and source need each other, and all stacks need both of them, so without this
         # runner the others would wait minutes and then fail too. Only a failure up to here
         # cancels.
         if: failure()
@@ -117,7 +117,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ubuntu-26.04
-    # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
+    # Serves until all stack jobs are done, which may start late, so it outlasts their limit.
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -148,7 +148,7 @@ jobs:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # wg and source need each other, and both stacks need both of them, so without this
+        # wg and source need each other, and all stacks need both of them, so without this
         # runner the others would wait minutes and then fail too. Only a failure up to here
         # cancels.
         if: failure()
@@ -201,7 +201,7 @@ jobs:
             os: ubuntu-26.04
             broadcasts: bc4,bc5,bc6
           # The Raspberry Pi's engine: the arm64 Android build, on an arm64 runner. Its job runs only the
-          # arm64 disk cache test, which fails until the arm64 engine keeps its stream cache on disk.
+          # arm64 disk cache test, which checks that the arm64 engine keeps its stream cache on disk.
           - runtime: docker
             role: stack-arm64
             arch: arm64
@@ -268,7 +268,7 @@ jobs:
           e2e/stack.sh build
           e2e/stack.sh up
       - name: Wait for the WireGuard server and the broadcasts
-        # Usually ready by now, but the shared runners start their servers only once both stacks
+        # Usually ready by now, but the shared runners start their servers only once all stacks
         # joined or 10 minutes passed.
         timeout-minutes: 15
         run: |

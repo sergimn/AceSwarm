@@ -310,7 +310,7 @@ Until the new run has video of its own, the stream's last frame is the old run's
 The entrypoint runs as root only for these steps:
 
 1. Set the default route through the gateway (`ACESWARM_GATEWAY`) and the DNS servers (`ACESWARM_DNS`).
-2. With the cache on disk (x86 only), make the engine's cache folder (see [cache on disk](#cache-on-disk)).
+2. With the cache on disk, make the engine's cache folder (see [cache on disk](#cache-on-disk)).
 3. Drop to uid 1000 with `chpst`, which clears every capability, under `setpriv --nnp`, so nothing can regain privileges.
 4. Start the engine.
 
@@ -318,7 +318,7 @@ By default engines keep their cache in memory, capped by `ENGINE_MEMORY_CACHE_MB
 
 ### Cache on disk
 
-With `ENGINE_CACHE_DIR` set, engines keep their stream cache in that host folder instead of in memory. This is for the x86 engine only (see the last point below). The controller only mounts the folder at `/cache` in every engine it creates and passes the size on (`ACESWARM_DISK_CACHE_BYTES`, from `ENGINE_DISK_CACHE_MB`). It gives the folder as a mount, not as a "bind": the container runtime then refuses a folder that does not exist, where it would make one for a bind, on whatever disk happens to be there. The rest happens in the engine's entrypoint, while it is still root:
+With `ENGINE_CACHE_DIR` set, engines keep their stream cache in that host folder instead of in memory. The arm64 engine works too, through a shim (see the last point below). The controller only mounts the folder at `/cache` in every engine it creates and passes the size on (`ACESWARM_DISK_CACHE_BYTES`, from `ENGINE_DISK_CACHE_MB`). It gives the folder as a mount, not as a "bind": the container runtime then refuses a folder that does not exist, where it would make one for a bind, on whatever disk happens to be there. The rest happens in the engine's entrypoint, while it is still root:
 
 ```mermaid
 flowchart TD
