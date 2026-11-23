@@ -25,8 +25,8 @@ esac
 # ACESWARM_CACHE_DIR is the folder the entrypoint made for this engine when the cache goes to disk
 # (ENGINE_CACHE_DIR), and ACESWARM_DISK_CACHE_BYTES the most the engine keeps in it. The same options
 # as on x86_64 (see start-amd64.sh). The bridge of the arm64 engine lacks the disk-space calls the
-# engine makes for the cache folder, so arm64-shim.py answers them. The engine also picks memory unless
-# its saved settings name a cache type, so the shim saves disk there before the engine starts.
+# engine makes for the cache folder, and the engine picks memory for its cache on a machine of the
+# Pi's size: arm64-shim.py answers the calls, and shows the engine less memory in disk mode.
 disk_bytes="${ACESWARM_DISK_CACHE_BYTES:-0}"
 case "$disk_bytes" in
   *[!0-9]*)

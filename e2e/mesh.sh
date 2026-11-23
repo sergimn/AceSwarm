@@ -27,7 +27,8 @@
 #                                  waits (up to 2 minutes) until each ROLE that joined fetched NAME
 #
 # Roles: wg (WireGuard server), source (Acestream broadcast), stack and stack-podman (AceSwarm and
-# the tests, on Docker and on rootless Podman). Both stacks share the other two.
+# the tests, on Docker and on rootless Podman) and stack-arm64 (the same on Docker on an arm64 runner).
+# The stacks share the other two.
 # Needs sudo, wireguard-tools, jq, node (for stun.ts) and gh with GH_TOKEN (actions: read).
 set -euo pipefail
 
@@ -54,6 +55,7 @@ job_name() {
     source) echo "Dummy Acestream broadcast" ;;
     stack) echo "AceSwarm with real engines" ;;
     stack-podman) echo "AceSwarm with real engines (Podman)" ;;
+    stack-arm64) echo "AceSwarm with real engines (arm64)" ;;
     *)
       log "unknown role $1"
       exit 2
@@ -69,6 +71,7 @@ mesh_ip() {
     source) echo 192.0.2.2 ;;
     stack) echo 192.0.2.3 ;;
     stack-podman) echo 192.0.2.4 ;;
+    stack-arm64) echo 192.0.2.5 ;;
     *)
       log "unknown role $1"
       exit 2
