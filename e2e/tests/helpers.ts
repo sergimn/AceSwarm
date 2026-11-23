@@ -10,7 +10,13 @@ import {
   type Request,
   type Response,
 } from "@playwright/test";
-import type { BulkAddResponse, PathAssignment, Snapshot, StreamView } from "../../packages/shared/src/api-types.ts";
+import type {
+  BulkAddResponse,
+  PathAssignment,
+  PipelineStatus,
+  Snapshot,
+  StreamView,
+} from "../../packages/shared/src/api-types.ts";
 
 const PROJECT = process.env["COMPOSE_PROJECT_NAME"] ?? "aceswarm-e2e";
 
@@ -424,6 +430,32 @@ export function gatewayRequest(method: string, path: string, body?: unknown): { 
   return JSON.parse(output) as { status: number; body: string };
 }
 
+/** Fetches a path of the transcoder's own API from inside its container: it is not published. */
+function transcoderGet(path: string): string {
+  const script = "process.stdout.write(await (await fetch(process.argv[1])).text());";
+  const url = `http://127.0.0.1:8081${path}`;
+  return compose("exec", "-T", "transcoder", "node", "--input-type=module", "-e", script, url);
+}
+
+/** What the transcoder says of a stream's pipeline: its ffmpeg run, and what its source carries. */
+export function pipelineStatus(streamId: string): PipelineStatus | undefined {
+  const status = JSON.parse(transcoderGet(`/pipelines/${streamId}`)) as Partial<PipelineStatus>;
+  return status.id === streamId ? (status as PipelineStatus) : undefined;
+}
+
+/** How many ffmpeg runs the transcoder started for a stream, by reason (aceswarm_pipeline_starts_total). */
+export function pipelineStarts(streamId: string): Record<string, number> {
+  const starts: Record<string, number> = {};
+  const series = /^aceswarm_pipeline_starts_total\{([^}]*)\} (\S+)$/gm;
+  for (const [, labels = "", value] of transcoderGet("/metrics").matchAll(series)) {
+    const reason = /reason="([^"]*)"/.exec(labels)?.[1];
+    if (reason !== undefined && labels.includes(`stream="${streamId}"`)) {
+      starts[reason] = Number(value);
+    }
+  }
+  return starts;
+}
+
 /** Like `gatewayAssignments`, but undefined while the gateway is not answering. */
 export function tryGatewayAssignments(): PathAssignment[] | undefined {
   try {
@@ -497,6 +529,82 @@ export async function recoveriesSucceeded(
     counts[action] = Number(line?.[1]);
   }
   return counts;
+}
+
+/**
+ * What the controller's engine gauges say an engine container is for and which network path it is
+ * on, as "role path" (the labels of aceswarm_engine_memory_bytes, which the dashboards draw engines
+ * by); undefined while the engine has no memory sample.
+ */
+export async function enginePlace(request: APIRequestContext, engine: string): Promise<string | undefined> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const labels = `[^}]*engine="${engine}",role="([^"]*)",path="([^"]*)"[^}]*`;
+  const match = new RegExp(String.raw`^aceswarm_engine_memory_bytes\{${labels}\} \S+$`, "m").exec(
+    await response.text(),
+  );
+  return match === null ? undefined : `${match[1]!} ${match[2]!}`;
+}
+
+/** A line the controller logs when a run of an engine ends (see `EngineRuns` in the controller). */
+export interface EngineRunEnded {
+  /** "engine removed", "engine restarted" or "engine exited". */
+  msg: string;
+  engine: string;
+  stream: string;
+  role: string;
+  path: string;
+  reason: string;
+  detail?: string;
+  lifetimeSeconds: number;
+}
+
+/**
+ * The runs of the stream's engines that ended, oldest first, from the controller's log: the lines
+ * both dashboards list as "Engines restarted or removed".
+ */
+export function engineRunsEnded(streamId: string): EngineRunEnded[] {
+  const ended: EngineRunEnded[] = [];
+  // The whole log of a long run is more than the megabyte a command's output may have by default.
+  const log = execFileSync("docker", ["compose", "-p", PROJECT, "logs", "--no-color", "controller"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  for (const line of log.split("\n")) {
+    // After the prefix compose puts before each line.
+    const json = line.slice(Math.max(0, line.indexOf("{")));
+    if (!/"msg":"engine (?:removed|restarted|exited)"/.test(json)) {
+      continue;
+    }
+    const entry = JSON.parse(json) as EngineRunEnded;
+    if (entry.stream === streamId) {
+      ended.push(entry);
+    }
+  }
+  return ended;
+}
+
+/**
+ * How many runs of engines of this kind ("own" or "shared") the controller counted as ended for
+ * this reason (aceswarm_engine_lifetime_seconds_count, which the overview's engine panels add up),
+ * and how long they lasted together, in seconds. Every reason has a count from the start, 0 at first.
+ */
+export async function engineRunsCounted(
+  request: APIRequestContext,
+  kind: string,
+  reason: string,
+): Promise<{ count: number; seconds: number }> {
+  const response = await request.get("/metrics");
+  expect(response.ok()).toBe(true);
+  const text = await response.text();
+  // A histogram's series have the registry's service label before their own.
+  const labels = `[^}]*kind="${kind}",reason="${reason}"`;
+  const count = metricValue(text, "aceswarm_engine_lifetime_seconds_count", labels);
+  const seconds = metricValue(text, "aceswarm_engine_lifetime_seconds_sum", labels);
+  expect(count, `no count of ${kind} engines that ended for ${reason}`).toBeDefined();
+  expect(seconds).toBeDefined();
+  return { count: count!, seconds: seconds! };
 }
 
 /**

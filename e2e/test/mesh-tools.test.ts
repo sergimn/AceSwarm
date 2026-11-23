@@ -44,12 +44,28 @@ describe("STUN binding responses", () => {
 
 describe("tracker", () => {
   it("stops and starts a broadcast's input container, and nothing else", () => {
-    expect(inputCommand("POST", "/inputs/bc4/stop")).toEqual(["stop", "aceswarm-broadcast-input-4"]);
-    expect(inputCommand("POST", "/inputs/bc12/start")).toEqual(["start", "aceswarm-broadcast-input-12"]);
+    expect(inputCommand("POST", "/inputs/bc4/stop")).toEqual(["docker", "stop", "aceswarm-broadcast-input-4"]);
+    expect(inputCommand("POST", "/inputs/bc12/start")).toEqual(["docker", "start", "aceswarm-broadcast-input-12"]);
     expect(inputCommand("GET", "/inputs/bc4/stop")).toBeUndefined();
     expect(inputCommand("POST", "/inputs/bc4/rm")).toBeUndefined();
     expect(inputCommand("POST", "/inputs/bc4;rm/stop")).toBeUndefined();
     expect(inputCommand("POST", "/inputs/x/stop")).toBeUndefined();
+  });
+
+  it("starts a broadcast's input again with one of the layouts it knows", () => {
+    expect(inputCommand("POST", "/inputs/bc3/layout/hevc")).toEqual([
+      "bash",
+      expect.stringMatching(/\/e2e\/broadcast\.sh$/),
+      "input",
+      "3",
+      "hevc",
+    ]);
+    expect(inputCommand("POST", "/inputs/bc12/layout/moved")?.slice(2)).toEqual(["input", "12", "moved"]);
+    expect(inputCommand("POST", "/inputs/bc3/layout/default")?.slice(2)).toEqual(["input", "3", "default"]);
+    expect(inputCommand("GET", "/inputs/bc3/layout/hevc")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/bc3/layout/vp9")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/bc3/layout/hevc;id")).toBeUndefined();
+    expect(inputCommand("POST", "/inputs/bc3/layout/")).toBeUndefined();
   });
 
   const infoHash = Buffer.from("7ff57ff270e8fa6851c61af6765009a93de110ae", "hex");

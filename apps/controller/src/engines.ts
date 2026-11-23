@@ -2,6 +2,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import { describeError } from "@aceswarm/shared/http";
 import type { AcestreamClient } from "./acestream.ts";
 import type { ContainerDetails, DockerClient } from "./docker.ts";
+import { engineRun, type EngineEndReason, type EngineRuns } from "./engine-runs.ts";
 
 /**
  * The engine is gone: its container disappeared or exited, or its API never answered. Unlike an
@@ -109,12 +110,21 @@ export class EngineManager {
   private readonly ace: AcestreamClient;
   private readonly options: EngineManagerOptions;
   private readonly logger: Logger;
+  /** Told about every run of an engine that a restart or a removal ends. */
+  private readonly runs: EngineRuns | undefined;
 
-  constructor(docker: DockerClient, ace: AcestreamClient, options: EngineManagerOptions, logger: Logger) {
+  constructor(
+    docker: DockerClient,
+    ace: AcestreamClient,
+    options: EngineManagerOptions,
+    logger: Logger,
+    runs?: EngineRuns,
+  ) {
     this.docker = docker;
     this.ace = ace;
     this.options = options;
     this.logger = logger.child({ component: "engines" });
+    this.runs = runs;
   }
 
   /** Pulls the engine image when it is not on the host yet. */
@@ -192,7 +202,7 @@ export class EngineManager {
   ): Promise<EngineHandle> {
     const existing = await this.docker.inspectContainer(name);
     if (existing !== undefined) {
-      await this.docker.removeContainer(existing.Id);
+      await this.remove({ containerId: existing.Id, name }, "leftover", "a new engine takes its name");
     }
     const id = await this.docker.createContainer(name, {
       Image: this.options.image,
@@ -219,9 +229,12 @@ export class EngineManager {
     return this.waitReady(id, onAddress);
   }
 
-  async restart(handle: EngineHandle, onAddress?: OnEngineAddress): Promise<EngineHandle> {
+  /** Restarts an engine in its container. `why` says in the log what the restart is for. */
+  async restart(handle: EngineHandle, onAddress?: OnEngineAddress, why?: string): Promise<EngineHandle> {
     this.logger.info({ container: handle.name }, "restarting engine");
-    await this.docker.restartContainer(handle.containerId);
+    await this.endRun(handle.containerId, "restart", why, async () => {
+      await this.docker.restartContainer(handle.containerId);
+    });
     return this.waitReady(handle.containerId, onAddress);
   }
 
@@ -237,16 +250,51 @@ export class EngineManager {
     return this.waitReady(handle.containerId, onAddress);
   }
 
-  async remove(handle: Pick<EngineHandle, "containerId" | "name">): Promise<void> {
+  /**
+   * Removes an engine's container, which `containerId` may also name. `reason` is why its run ends
+   * (see `EngineEndReason`), and `why` says more in the log.
+   */
+  async remove(
+    handle: Pick<EngineHandle, "containerId" | "name">,
+    reason: EngineEndReason = "leftover",
+    why?: string,
+  ): Promise<void> {
     this.logger.info({ container: handle.name }, "removing engine");
-    await this.docker.removeContainer(handle.containerId);
+    await this.endRun(handle.containerId, reason, why, async () => {
+      await this.docker.removeContainer(handle.containerId);
+    });
   }
 
-  async removeAllFor(streamId: string): Promise<void> {
+  /** Removes every engine of the stream's own, its standbys' included. */
+  async removeAllFor(streamId: string, reason: EngineEndReason, why?: string): Promise<void> {
     const handles = await this.find(streamId);
     for (const handle of handles) {
-      await this.remove(handle);
+      await this.remove(handle, reason, why);
     }
+  }
+
+  /**
+   * Restarts or removes a container (`act`), and tells how long the run that ends with it lasted.
+   * The run is read before: afterwards the container is gone, or only knows its new run.
+   */
+  private async endRun(
+    idOrName: string,
+    reason: EngineEndReason,
+    why: string | undefined,
+    act: () => Promise<void>,
+  ): Promise<void> {
+    // Not being able to read the run must not keep the engine from being restarted or removed.
+    const details =
+      this.runs === undefined ? undefined : await this.docker.inspectContainer(idOrName).catch(() => undefined);
+    const run = details === undefined ? undefined : engineRun(details, Date.now());
+    const ended = run === undefined ? undefined : this.runs?.ending(run);
+    try {
+      await act();
+    } catch (error) {
+      ended?.();
+      throw error;
+    }
+    ended?.(reason, why);
   }
 
   /**
@@ -268,7 +316,8 @@ export class EngineManager {
       if (streamId !== undefined && keepStreamIds.has(streamId)) {
         continue;
       }
-      await this.remove({ containerId: container.Id, name: container.Names[0] ?? container.Id });
+      const name = (container.Names[0] ?? container.Id).replace(/^\//, "");
+      await this.remove({ containerId: container.Id, name }, "leftover", "its stream is gone or disabled");
       removed += 1;
     }
     return removed;

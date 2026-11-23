@@ -60,6 +60,8 @@ async function harness(video = true) {
   });
   /** What the fakes were asked to do, in order. */
   const events: string[] = [];
+  // Why the engines of a stream were removed, one for each "remove engines" event.
+  const removalReasons: string[] = [];
   /** Promises the fakes wait for before they answer, set by a test to hold something up. */
   const holds: { teardown?: Promise<void>; stats?: Promise<void> | undefined } = {};
   /** The streams to keep, as `removeOrphans` was asked on each start. */
@@ -89,6 +91,8 @@ async function harness(video = true) {
         fps: null,
         videoCodec: null,
         mode: "copy",
+        layout: null,
+        layoutChangedAt: null,
         exitCode: null,
         error: null,
         pendingSource: null,
@@ -120,8 +124,9 @@ async function harness(video = true) {
       return Promise.resolve(0);
     },
     find: () => Promise.resolve([]),
-    removeAllFor: (streamId: string) => {
+    removeAllFor: (streamId: string, reason: string) => {
       events.push(`remove engines ${streamId}`);
+      removalReasons.push(reason);
       return Promise.resolve();
     },
     remove: () => Promise.resolve(),
@@ -196,7 +201,7 @@ async function harness(video = true) {
     await orchestrator.start();
     return { orchestrator, store };
   };
-  return { start, pipelines, reported, events, holds, orphanChecks };
+  return { start, pipelines, reported, events, removalReasons, holds, orphanChecks };
 }
 
 test("tells every screen whether the admin allows thumbnails only in the tiles", async () => {
@@ -398,6 +403,8 @@ test("a removed stream's engines are removed after its teardown in progress", as
   await vi.waitFor(() => {
     expect(events).toEqual([`stop pipeline ${id}`, `remove engines ${id}`, `remove engines ${id}`]);
   });
+  // By the stream's teardown, then by its removal: both because it stopped.
+  expect(setup.removalReasons.slice(-2)).toEqual(["stopped", "stopped"]);
 });
 
 test("shutting down waits a moment for a teardown in progress, not for ever", async () => {

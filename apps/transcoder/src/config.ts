@@ -16,7 +16,8 @@ const schema = z.object({
    * video: smooth low-res preview (decodes every frame).
    * keyframes: decodes only keyframes, about one preview frame per second; far cheaper on CPUs
    * without a hardware H.264 decoder such as the Raspberry Pi 5. A stream whose broadcast has no
-   * key frames ffmpeg can use is decoded in full after a while (see `decodesKeyFramesOnly`).
+   * key frames ffmpeg can use is decoded in full after a while, and one whose full stream is
+   * re-encoded always is (see `decodesKeyFramesOnly`).
    */
   PREVIEW_MODE: z.enum(["video", "keyframes"]).default("video"),
   /**
@@ -38,8 +39,9 @@ const schema = z.object({
   /** How long a new source may take to deliver video while the old one keeps playing. */
   HANDOVER_TIMEOUT_SECONDS: envInt(120),
   /**
-   * ffmpeg waits this long for data from the engine before giving up. A handover waits at least
-   * HANDOVER_TIMEOUT_SECONDS: a new engine on a slow swarm can take longer than this to deliver.
+   * A source's reader waits this long for data from the engine before giving up (see
+   * `readSource`). A handover waits at least HANDOVER_TIMEOUT_SECONDS: a new engine on a slow swarm
+   * can take longer than this to deliver.
    */
   INPUT_TIMEOUT_SECONDS: envInt(60),
   /**

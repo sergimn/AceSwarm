@@ -1,9 +1,11 @@
 import type { ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import type { PipelineState } from "@aceswarm/shared/api-types";
+import type { PipelineState, PipelineStatus } from "@aceswarm/shared/api-types";
 import type { FullMode } from "./ffmpeg-args.ts";
 import type { LiveEdge } from "./live-edge.ts";
+import { NO_SINK, type Sink, type SourceReader } from "./source-reader.ts";
+import type { Layout } from "./ts-tables.ts";
 
 export type Variant = "full" | "preview";
 /** Whether a run's source sends data now: it does, it stopped for a while, or nothing is known yet. */
@@ -20,6 +22,17 @@ const KILL_GRACE_MS = 3000;
  */
 const EDGE_FRESH_MS = 20_000;
 
+/**
+ * The connection a run reads its source through. A run that takes over from it in the middle of
+ * the stream gets the connection too (see `Pipeline`), so the engine's session is read on.
+ */
+export interface Connection {
+  /** Undefined only until the reader is open. */
+  reader: SourceReader | undefined;
+  /** The run it feeds now. */
+  run: Generation;
+}
+
 /** What a generation runs: its number, source and output directory, and how ffmpeg reads it. */
 export interface GenerationPlan {
   number: number;
@@ -30,8 +43,34 @@ export interface GenerationPlan {
   mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   allFrames: boolean;
+  /** Takes over in the middle of a stream that is already being read (see `FfmpegPlan`). */
+  midStream?: boolean;
   startedAt: number;
   inputTimeoutSeconds: number;
+}
+
+/** What a pipeline that has no run reports. */
+export function statusWithoutRun(
+  id: string,
+  now: number,
+  rest: Pick<PipelineStatus, "layoutChangedAt" | "pendingSource" | "restartedAt">,
+): PipelineStatus {
+  return {
+    id,
+    state: "exited",
+    source: "",
+    startedAt: new Date(now).toISOString(),
+    lastFrameAt: null,
+    frames: 0,
+    fps: null,
+    videoCodec: null,
+    mode: "copy",
+    layout: null,
+    exitCode: null,
+    error: "not started",
+    liveEdge: null,
+    ...rest,
+  };
 }
 
 /** One ffmpeg run of a stream's pipeline, on one source, writing to its own directory. */
@@ -59,24 +98,47 @@ export class Generation {
   readonly mode: FullMode;
   /** Decodes every frame, as the broadcast has no key frames to decode alone (see `FfmpegPlan`). */
   readonly allFrames: boolean;
+  /** Takes over in the middle of a stream that is already being read (see `FfmpegPlan`). */
+  readonly midStream: boolean;
   readonly startedAt: number;
-  /** How long ffmpeg waits for data from the source before it gives up. */
+  /** How long the source's reader waits for data before it gives up. */
   readonly inputTimeoutSeconds: number;
   process: ChildProcess | undefined;
+  /** The connection to its source, while it is the run that connection feeds. */
+  connection: Connection | undefined;
+  /** Its ffmpeg's input, once ffmpeg started. */
+  sink: Sink = NO_SINK;
+  /** What the source's program tables say it carries (see `TsTables`): only known of MPEG-TS, once they came. */
+  layout: Layout | undefined;
+  /**
+   * When another run took over from it in the middle of the stream: its input ended there, and
+   * the last segments its ffmpeg writes out are still to be published.
+   */
+  handedOverAt: number | undefined;
   state: PipelineState = "starting";
   frames = 0;
+  /** How many frames it had when the broadcast last moved its streams to other PIDs (see `SourceFeeds.onMove`). */
+  framesAtMove = 0;
+  /**
+   * When the broadcast changed the layout of the source players get while this run went on with
+   * it, or the run whose place it took (see `LayoutChanges`), until players get a frame of it that
+   * came after (see `show`).
+   */
+  gapSince: number | undefined;
   lastFrameAt: number | undefined;
   fps: number | undefined;
   videoCodec: string | undefined;
   exitCode: number | null = null;
   error: string | null = null;
   readonly stderrTail: string[] = [];
-  /** How many more times ffmpeg opens the source again when this run fails before any video. */
+  /** How many more times the source is opened again, by a new run, when this one fails before any video. */
   reopens = 0;
   /** When the handover this run is for began: the first run's start, for a run that reopened. */
   handoverSince: number;
   /** Stopped for good: another generation took its place, or none is needed any more. */
   retired = false;
+  /** The run that took over from this one mid-stream, or its place (see `takeOver`, `replaces`), if one did. */
+  successor: Generation | undefined;
   /** The timer that removes its directory (see `removeLater`). */
   private removal: NodeJS.Timeout | undefined;
   /** Since when the data comes without a break (see `watchFlow`), or none yet. */
@@ -93,9 +155,85 @@ export class Generation {
     this.directory = plan.directory;
     this.mode = plan.mode;
     this.allFrames = plan.allFrames;
+    this.midStream = plan.midStream === true;
     this.startedAt = plan.startedAt;
     this.inputTimeoutSeconds = plan.inputTimeoutSeconds;
     this.handoverSince = plan.startedAt;
+  }
+
+  /**
+   * Goes on where `old` is in its source, in the middle of the stream: the connection feeds this
+   * run from here on, and it is the same attempt on the same session. So it gets what belongs to
+   * the session rather than to one ffmpeg run: the live edge's watch, the handover it is part of,
+   * the tries left, and the last frame players got (until its own first one, the stream's last
+   * frame is still that one, which `old` moves on while it writes out what it has: see
+   * `SourceFeeds.drain`). Where `old` could already publish, all of this run's output can:
+   * everything it reads comes after what was published.
+   */
+  takeOver(old: Generation, layout: Layout): void {
+    old.successor = this;
+    this.layout = layout;
+    this.connection = old.connection;
+    old.connection = undefined;
+    if (this.connection !== undefined) {
+      this.connection.run = this;
+    }
+    this.watch = old.watch;
+    old.watch = undefined;
+    this.reopens = old.reopens;
+    this.handoverSince = old.handoverSince;
+    this.publishedFrameAt = old.publishedFrameAt;
+    if (old.publishingSince === undefined) {
+      return;
+    }
+    this.publishingSince = old.publishingSince;
+    for (const variant of VARIANTS) {
+      this.publishFrom[variant] = -1;
+    }
+  }
+
+  /**
+   * Takes the place of `old`, a run on the same source that stops (see `Pipeline.swap`): the
+   * handover `old` was part of goes on with this one, and so do the last frame players got (until
+   * this one has its own: a run that took over mid-stream carries it, as does one that replaced a
+   * stuck run) and the wait at a layout change (see `gapSince`): `old` is retired, and its last
+   * frames end no wait. Frames that the run before `old` still writes out count for this one (see
+   * `SourceFeeds.drain`).
+   */
+  replaces(old: Generation): void {
+    this.handoverSince = old.handoverSince;
+    this.publishedFrameAt = old.publishedFrameAt;
+    this.gapSince = old.gapSince;
+    old.successor = this;
+  }
+
+  /**
+   * Its newest frame is one players can get now. When that is the first to come after a layout
+   * change (see `gapSince`), returns how long players had no new frame, in ms: since the last one
+   * they got, which may be one that the run before it wrote out after the change (see
+   * `SourceFeeds.drain`). ffmpeg tells of its frames once a second, so that is about as exact.
+   */
+  show(): number | undefined {
+    const { gapSince, lastFrameAt, publishedFrameAt: before } = this;
+    this.publishedFrameAt = lastFrameAt ?? before;
+    if (gapSince === undefined || lastFrameAt === undefined || lastFrameAt <= gapSince) {
+      return undefined;
+    }
+    this.gapSince = undefined;
+    return before === undefined ? undefined : lastFrameAt - before;
+  }
+
+  /**
+   * Stops its ffmpeg, and the reading of its source while that feeds this run. ffmpeg reads the
+   * source from a pipe, and while it waits there for more it acts on no signal: its input ends
+   * first, which it notices at once. Otherwise every stop would take until it is killed.
+   */
+  halt(): void {
+    if (this.connection?.run === this) {
+      this.connection.reader?.stop();
+    }
+    this.sink.end();
+    killProcess(this.process);
   }
 
   /**
@@ -115,14 +253,22 @@ export class Generation {
   }
 
   /**
-   * Ends it as its stream stops: ffmpeg is killed at once, nothing follows its live edge, and its
-   * directory is not removed later by itself (the stream's next pipeline starts with the same
-   * directory names, and the stop removes the files of every run).
+   * Ends it as its stream stops: its source is read no more, ffmpeg is killed at once, nothing
+   * follows its live edge, and its directory is not removed later by itself (the stream's next
+   * pipeline starts with the same directory names, and the stop removes the files of every run).
+   * ffmpeg's input ends first, as in `halt`, but it is killed in the same turn, before it sees
+   * that: it gets no time to write out what it holds (see `Pipeline.stop`).
    */
   stopNow(): void {
     clearTimeout(this.removal);
     this.error ??= "stopped with its stream";
-    this.process?.kill("SIGKILL");
+    if (this.connection?.run === this) {
+      this.connection.reader?.stop();
+    }
+    this.sink.end();
+    if (this.process?.exitCode === null && this.process.signalCode === null) {
+      this.process.kill("SIGKILL");
+    }
     this.watch?.stop();
   }
 
@@ -144,7 +290,7 @@ export class Generation {
   }
 
   /**
-   * Notes whether the broadcast's data comes at `now`: ffmpeg opened the source (it knows its
+   * Notes whether the broadcast's data comes at `now`: ffmpeg got the stream (it knows its
    * video), the run may publish, and the live edge moved lately (a source without a stat URL has
    * nothing to tell, and counts). It notes when the data began to come, together with how long it
    * came for the stream's earlier runs (`carried`), and starts over, with that too, when it stopped
@@ -188,7 +334,7 @@ export class Generation {
     return edge === undefined || edge.state() === "none" || edge.movedWithin(EDGE_FRESH_MS);
   }
 
-  /** Whether ffmpeg failed before any video, and opens the source again. */
+  /** Whether its ffmpeg failed before any video, and a new run opens the source again. */
   willReopen(): boolean {
     // A stale source is not opened again: it would only serve the same old window.
     return this.state === "exited" && this.frames === 0 && this.reopens > 0 && !this.retired && !this.staleStopped;

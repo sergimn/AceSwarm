@@ -60,7 +60,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 ### Raspberry Pi 5
 
 - The arm64 engine is the Android build of Acestream. It needs a kernel with 4 KB memory pages. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot. `getconf PAGESIZE` should then print `4096`.
-- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`. To save the most, set `LOW_CPU_PREVIEWS=true`: the tiles then only show thumbnails, and **Live video** is greyed out under **Settings**. Both decode only the key frames of an H.264 broadcast. A broadcast whose key frames ffmpeg can't use (no IDR frames and no recovery points, as with some open GOPs and intra refresh) gives them nothing to decode: after about 45 seconds of data without a picture, the transcoder decodes every frame of that stream, which costs more CPU (and with `LOW_CPU_PREVIEWS` still makes no live preview), and logs `key frames only decoding gave no frame`. The dashboard's **Key frames only or every frame** timeline shows which streams decode key frames only and which switched.
+- The Pi has no hardware H.264 decoder for previews, so set `PREVIEW_MODE=keyframes`. To save the most, set `LOW_CPU_PREVIEWS=true`: the tiles then only show thumbnails, and **Live video** is greyed out under **Settings**. Both decode only the key frames of an H.264 broadcast (one that is re-encoded is decoded in full). A broadcast whose key frames ffmpeg can't use (no IDR frames and no recovery points, as with some open GOPs and intra refresh) gives them nothing to decode: after about 45 seconds of data without a picture, the transcoder decodes every frame of that stream, which costs more CPU (and with `LOW_CPU_PREVIEWS` still makes no live preview), and logs `key frames only decoding gave no frame`. The dashboard's **Key frames only or every frame** timeline shows which streams decode key frames only and which switched.
 - Turn on **One engine per path** (under **Settings**) when you run several streams: they then share one engine instead of each starting its own.
 - With WireGuard profiles, [hot standby](#hot-standby) gives each stream an engine on every other path too, so streams × paths engines without **One engine per path**. On a Pi, turn that on, or set `STANDBY_MAX_PATHS=1`, or turn hot standby off.
 - An engine levels off at about its cache plus 150 MB, about 275 MB with the default settings. The Pi's arm64 engine behaved like the x86 one in testing, so an 8 GB Pi has room for several streams with their own engines. The dashboard shows how much each engine really uses.
@@ -178,12 +178,22 @@ The stream's tile and the player's overlay show its standbys and whether they ar
 | --------- | ------------------------------------------- | ---- |
 | `metrics` | Prometheus, with recording rules and alerts | 9090 |
 | `logs`    | Alloy collecting container logs into Loki   | 3100 |
-| `grafana` | Grafana with the Ace Swarm dashboard        | 3000 |
+| `grafana` | Grafana with the Ace Swarm dashboards       | 3000 |
+
+Grafana has two dashboards, each with a link to the other at the top:
+
+- **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+
+Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
+
+Both dashboards also list every engine that was removed, restarted or that exited: when, why, what it was for and how long it had run. The list comes from the controller's log, so it needs the `logs` profile. The overview counts these by reason and shows how long engines last, which needs only the `metrics` profile.
 
 To use an existing Grafana instead:
 
-1. Import [`monitoring/grafana/dashboards/aceswarm.json`](monitoring/grafana/dashboards/aceswarm.json).
-2. Choose your Prometheus and Loki data sources in its variables.
+1. Import both files in [`monitoring/grafana/dashboards`](monitoring/grafana/dashboards).
+2. Choose your Prometheus and Loki data sources in their variables.
+3. If your Prometheus collects less often than every 15 seconds, set its interval as the scrape interval in the settings of Grafana's Prometheus data source. The bars of "Recovery steps" count with it, and miss steps when it is shorter than the real one.
 
 ## How it works
 
@@ -201,7 +211,7 @@ flowchart LR
 
 - **controller:** the web UI and API. It runs one supervisor per stream, which creates the stream's engine, watches its health and recovers it.
 - **cleanup:** removes the engines when the whole stack goes down (`docker compose down` or `stop`). A controller restart leaves them running, so the streams play on.
-- **transcoder:** reads each stream once with ffmpeg. It produces a full-quality HLS stream (copied when it is already H.264), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails.
+- **transcoder:** reads each stream once and runs it through ffmpeg. It produces a full-quality HLS stream (copied while the video is H.264, re-encoded while it is not), a small preview (none with `LOW_CPU_PREVIEWS`) and thumbnails. When a broadcast moves its video to another PID or codec mid-stream, ffmpeg starts over on the same engine session, right at the change.
 - **netgw:** the network gateway. Every engine routes through it. It owns the WireGuard tunnels, routes each engine through its path, probes the paths, and counts each engine's peers from connection tracking.
 - **engine:** the Acestream engine. It starts as root only to point its default route at the gateway, then drops to an unprivileged user with no capabilities.
 

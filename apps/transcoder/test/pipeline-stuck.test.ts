@@ -8,6 +8,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { createLogger } from "@aceswarm/shared/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { fakeSources, layoutOf, type FakeSource } from "./fake-source.ts";
 
 const H264 = "  Stream #0:0[0x100]: Video: h264 (High), yuv420p(progressive), 1920x1080, 25 fps\n";
 const HEVC = "  Stream #0:0[0x100]: Video: hevc (Main), yuv420p(tv), 1920x1080, 25 fps\n";
@@ -18,6 +19,7 @@ function fakeFfmpeg(pid: number, signals: string[]): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   Object.assign(child, {
     pid,
+    stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     exitCode: null,
@@ -47,6 +49,25 @@ function fullCodec(args: string[] | undefined): string | undefined {
 const fullPlaylist = (count: number): string =>
   `#EXTM3U\n#EXT-X-TARGETDURATION:2\n${Array.from({ length: count }, (_, index) => `#EXTINF:2.0,\nseg_${String(index)}.ts\n`).join("")}`;
 
+/**
+ * The cut points of a broadcast with key frames every 2 s (IDR pictures unless told otherwise),
+ * from `from` (90 kHz) for up to `seconds`, until the owner hands over at one. Returns how many
+ * seconds after `from` it did.
+ */
+function keyFrames(
+  source: FakeSource | undefined,
+  from: number,
+  seconds: number,
+  point: "idr" | "recovery-point" = "idr",
+): number | undefined {
+  for (let at = 0; at <= seconds; at += 2) {
+    if (source?.cutPoint(from + at * 90_000, point) === true) {
+      return at;
+    }
+  }
+  return undefined;
+}
+
 describe("Pipeline with a run that goes on but is stuck", () => {
   let hlsDir: string;
   let pipeline: Pipeline | undefined;
@@ -59,6 +80,8 @@ describe("Pipeline with a run that goes on but is stuck", () => {
   const memory = new Map<number, number>();
   const streamLogger = createLogger("test", "silent");
   let warn = vi.spyOn(streamLogger, "warn");
+  /** The source each run opened, in the same order. */
+  let readers: FakeSource[] = [];
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "pipeline-stuck-test-"));
@@ -76,7 +99,11 @@ describe("Pipeline with a run that goes on but is stuck", () => {
     await rm(hlsDir, { recursive: true, force: true });
   });
 
-  function start(previewMode: PipelineSettings["plan"]["previewMode"] = "video"): Pipeline {
+  function start(
+    previewMode: PipelineSettings["plan"]["previewMode"] = "video",
+    stallMs = 30_000,
+    segmentSeconds = 2,
+  ): Pipeline {
     const settings: PipelineSettings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
@@ -88,19 +115,23 @@ describe("Pipeline with a run that goes on but is stuck", () => {
         previewBitrateKbps: 400,
         fullTranscodeMaxHeight: 1080,
         audioBitrateKbps: 128,
-        segmentSeconds: 2,
+        segmentSeconds,
         playlistSize: 6,
         thumbnailIntervalSeconds: 10,
         inputTimeoutSeconds: 60,
       },
-      stuck: { fullOutputStallMs: 30_000, maxMemoryGrowthBytes: 512 * MB },
+      stuck: { fullOutputStallMs: stallMs, maxMemoryGrowthBytes: 512 * MB },
     };
     const events = {
       generationStarted: (_id: string, reason: string) => {
         reasons.push(reason);
       },
       handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
     };
+    const sources = fakeSources();
+    readers = sources.opened;
     const logger = createLogger("test", "silent");
     vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
     pipeline = new Pipeline("s1", settings, logger, events, {
@@ -114,6 +145,7 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       },
       now: () => clock.now,
       memoryOf: (pid) => memory.get(pid) ?? 80 * MB,
+      openSource: sources.open,
     });
     return pipeline;
   }
@@ -140,6 +172,41 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       await wrote("full/index.m3u8", run, fullPlaylist(Math.floor(frame / 50)));
     }
     await pipeline?.sync();
+  }
+
+  /** Seconds of the run with its preview going on and its full output stopped, until a run replaces it. */
+  async function stalls(run: number, frames: (at: number) => number): Promise<void> {
+    const before = runs.length;
+    for (let at = 1; at <= 40 && runs.length === before; at += 1) {
+      await second(run, false, frames(at));
+    }
+    await vi.waitFor(() => {
+      expect(runs).toHaveLength(before + 1);
+    });
+  }
+
+  /**
+   * Takes the stream from a copy that plays to a re-encode, as when its broadcast stops sending
+   * key frames: the copy stalls, and so does the one that replaces it. Returns the index of the
+   * run that re-encodes, once it plays.
+   */
+  async function reencoded(run: number): Promise<number> {
+    (children[run]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 10; at += 1) {
+      await second(run, true, at * 25);
+    }
+    await stalls(run, (at) => (10 + at) * 25);
+    (children[run + 1]?.stderr as PassThrough).write(H264);
+    await stalls(run + 1, () => 0);
+    const reencoding = run + 2;
+    expect(fullCodec(runs[reencoding])).toBe("libx264");
+    // Its source's tables say the video is H.264, and so does ffmpeg.
+    expect(readers.at(-1)?.layout(layoutOf(256))).toBe(false);
+    (children[reencoding]?.stderr as PassThrough).write(H264);
+    for (let at = 1; at <= 5; at += 1) {
+      await second(reencoding, true, at * 25);
+    }
+    return reencoding;
   }
 
   it("starts ffmpeg again on the same source once its full output wrote nothing for 30 s", async () => {
@@ -243,6 +310,11 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       "the full output wrote no segment again after a restart: the copied video has no key frames to cut it at; re-encoding it",
     );
 
+    // The source's tables and ffmpeg both say the video is H.264: the run re-encodes it all the same.
+    expect(readers[2]?.layout(layoutOf(256))).toBe(false);
+    (children[2]?.stderr as PassThrough).write(H264);
+    await nextTurn();
+    expect(runs).toHaveLength(3);
     // It plays, and the stream's later runs re-encode too: a run started again for its memory, and
     // one on another source.
     for (let at = 1; at <= 70; at += 1) {
@@ -353,5 +425,153 @@ describe("Pipeline with a run that goes on but is stuck", () => {
       "ffmpeg's memory keeps growing; starting it again",
     );
     expect(fullCodec(runs[1])).toBe("copy");
+  });
+
+  describe("once the full stream is re-encoded because a copy couldn't be cut", () => {
+    it("copies it again from a key frame once the broadcast sent them for a minute, and decodes key frames only again", async () => {
+      const info = vi.spyOn(streamLogger, "info");
+      const instance = start("keyframes");
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      expect(runs[run]).not.toContain("-skip_frame");
+      const source = readers.at(-1);
+      expect(source?.request.cutPoints?.watching()).toBe(true);
+      expect(keyFrames(source, 5_000_000, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(run + 2);
+      });
+      expect(reasons.at(-1)).toBe("key-frames");
+      expect(fullCodec(runs[run + 1])).toBe("copy");
+      expect(runs[run + 1]).toContain("-skip_frame");
+      expect(instance.status().mode).toBe("copy");
+      expect(instance.decoding()).toBe("key-frames");
+      expect(info).toHaveBeenCalledWith(
+        { generation: run + 1, seconds: 60, at: "idr", onlyIdrs: true },
+        "the broadcast's video has key frames again; copying the full stream again",
+      );
+      // The copy reads on from the connection the re-encode had, where the re-encode's input ended,
+      // and looks for no more cut points.
+      expect(readers.at(-1)).toBe(source);
+      expect((children[run]?.stdin as PassThrough).writableEnded).toBe(true);
+      // It writes out what it has first.
+      expect(signals[run]).toEqual([]);
+      expect((children[run + 1]?.stdin as PassThrough).writableEnded).toBe(false);
+      expect(source?.request.cutPoints?.watching()).toBe(false);
+      // Later runs of the stream copy too.
+      await instance.start("http://engine-2/play", false);
+      expect(fullCodec(runs.at(-1))).toBe("copy");
+    });
+
+    it("copies it again at a recovery point too, but goes on decoding every frame", async () => {
+      const instance = start("keyframes");
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      expect(keyFrames(readers.at(-1), 0, 120, "recovery-point")).toBe(60);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(run + 2);
+      });
+      expect(fullCodec(runs[run + 1])).toBe("copy");
+      // Key frames only decoding would show next to nothing of such a broadcast.
+      expect(runs[run + 1]).not.toContain("-skip_frame");
+      expect(instance.decoding()).toBe("all-frames-fallback");
+    });
+
+    it("waits twice as long after a copy that came back could not be cut again", async () => {
+      const instance = start();
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      expect(keyFrames(readers.at(-1), 0, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(run + 2);
+      });
+      // The copy plays a while, then the key frames stop again: two stalls, and a re-encode.
+      const again = await reencoded(run + 1);
+      expect(reasons.slice(run + 1)).toEqual(["key-frames", "full-output-stalled", "full-output-stalled"]);
+      expect(instance.status().mode).toBe("transcode");
+      expect(keyFrames(readers.at(-1), 0, 200)).toBe(120);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(again + 2);
+      });
+      expect(fullCodec(runs.at(-1))).toBe("copy");
+    });
+
+    it("allows cut points no further apart than half the stall time", async () => {
+      const instance = start("video", 8000);
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      const source = readers.at(-1);
+      // 4.5 s apart: close enough for a stall time of 30 s, but not under half of this one.
+      for (let at = 0; at <= 180; at += 4.5) {
+        expect(source?.cutPoint(Math.round(at * 90_000))).toBe(false);
+      }
+      expect(runs).toHaveLength(run + 1);
+      expect(keyFrames(source, 200 * 90_000, 120)).toBe(60);
+    });
+
+    it("judges the copy's first segment by the stream's segment time", async () => {
+      const instance = start("video", 30_000, 6);
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      const source = readers.at(-1);
+      // 4 s apart: the first segment of a copy would end 8 s on, longer than a segment of 6 s.
+      for (let at = 0; at <= 180; at += 4) {
+        expect(source?.cutPoint(at * 90_000)).toBe(false);
+      }
+      expect(runs).toHaveLength(run + 1);
+      // 2 s apart: 6 s.
+      expect(keyFrames(source, 200 * 90_000, 120)).toBe(60);
+    });
+
+    it("copies again from a source that waits to take over and still re-encodes once the other came back", async () => {
+      const instance = start();
+      await instance.start("http://engine-1/play", false);
+      await reencoded(0);
+      const active = readers.at(-1);
+      await instance.start("http://engine-2/play", true);
+      const pending = readers.at(-1);
+      expect(pending?.layout(layoutOf(256))).toBe(false);
+      // Its ffmpeg found the video before the other source came back.
+      (children.at(-1)?.stderr as PassThrough).write(H264);
+      await nextTurn();
+      expect(keyFrames(active, 0, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(reasons.at(-1)).toBe("key-frames");
+      });
+      expect(instance.status().mode).toBe("copy");
+      // It would re-encode for as long as it lives, once it took over: it counts a wait of its own.
+      const before = runs.length;
+      expect(pending?.request.cutPoints?.watching()).toBe(true);
+      expect(keyFrames(pending, 3_000_000, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(runs).toHaveLength(before + 1);
+      });
+      expect(reasons.at(-1)).toBe("key-frames");
+      expect(fullCodec(runs.at(-1))).toBe("copy");
+      expect(instance.status().pendingSource).toBe("http://engine-2/play");
+    });
+
+    it("counts the cut points of one source at a time: each has a clock of its own", async () => {
+      const instance = start();
+      await instance.start("http://engine-1/play", false);
+      const run = await reencoded(0);
+      const active = readers.at(-1);
+      // A source that is to take over, and re-encodes too.
+      await instance.start("http://engine-2/play", true);
+      const pending = readers.at(-1);
+      expect(pending).not.toBe(active);
+      expect(pending?.layout(layoutOf(256))).toBe(false);
+      expect(pending?.request.cutPoints?.watching()).toBe(true);
+      // Its clock is a second ahead: one after the other, their cut points come every second.
+      for (let at = 0; at <= 120; at += 2) {
+        expect(active?.cutPoint(1_000_000 + at * 90_000)).toBe(false);
+        expect(pending?.cutPoint(1_090_000 + at * 90_000)).toBe(false);
+      }
+      expect(keyFrames(active, 1_000_000 + 122 * 90_000, 120)).toBe(60);
+      await vi.waitFor(() => {
+        expect(reasons.at(-1)).toBe("key-frames");
+      });
+      expect(fullCodec(runs.at(-1))).toBe("copy");
+      expect(runs.length).toBeGreaterThan(run + 2);
+    });
   });
 });

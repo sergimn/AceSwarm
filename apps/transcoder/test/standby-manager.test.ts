@@ -9,6 +9,7 @@ import { createService } from "@aceswarm/shared/service";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager } from "../src/server.ts";
+import { fakeSources } from "./fake-source.ts";
 
 const logger = createLogger("test", "silent");
 
@@ -57,10 +58,16 @@ describe("standby readers of a stream", () => {
       children.push(child);
       return child;
     };
-    manager = new PipelineManager(createService({ name: "test", logger }), settings, logger, spawner, {
-      idleTimeoutMs: 60_000,
-      retryMs: 60_000,
-    });
+    const standbys = { idleTimeoutMs: 60_000, retryMs: 60_000 };
+    const options = { openSource: fakeSources().open };
+    manager = new PipelineManager(
+      createService({ name: "test", logger }),
+      settings,
+      logger,
+      spawner,
+      standbys,
+      options,
+    );
   });
 
   afterEach(async () => {

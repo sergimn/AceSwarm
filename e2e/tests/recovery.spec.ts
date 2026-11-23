@@ -3,6 +3,9 @@ import {
   addStream,
   docker,
   engineContainers,
+  enginePlace,
+  engineRunsCounted,
+  engineRunsEnded,
   metricValue,
   recoveriesSucceeded,
   resetStack,
@@ -68,6 +71,8 @@ test("restarting one engine leaves the other streams alone", async ({ request })
 
   const [engine] = engineContainers(victim.id);
   expect(engine).toBeDefined();
+  // Once the controller's engine sampler has seen it: it notices an exit by what changed since.
+  await expect.poll(async () => enginePlace(request, engine!), { timeout: 60_000 }).toBe("playing direct");
   docker("restart", "--time", "1", engine!);
 
   // The bystander keeps receiving new frames while the victim recovers.
@@ -80,6 +85,17 @@ test("restarting one engine leaves the other streams alone", async ({ request })
   await waitForPlaying(request, victim.id);
   const after = await streamById(request, bystander.id);
   expect(Date.parse(after!.lastFrameAt!)).toBeGreaterThan(Date.parse(before.lastFrameAt!));
+
+  // Nobody told the controller: its sampler saw that the engine's process had exited, and logged the
+  // run that ended with it (the dashboards' "Engines restarted or removed") as one it did not end itself.
+  await expect
+    .poll(() => engineRunsEnded(victim.id).filter((run) => run.reason === "exited"), { timeout: 60_000 })
+    .toHaveLength(1);
+  const exited = engineRunsEnded(victim.id).find((run) => run.reason === "exited");
+  expect(exited).toMatchObject({ msg: "engine exited", engine, role: "playing", path: "direct" });
+  expect(exited!.lifetimeSeconds).toBeGreaterThan(5);
+  expect(exited!.lifetimeSeconds).toBeLessThan(3600);
+  expect((await engineRunsCounted(request, "own", "exited")).count).toBeGreaterThanOrEqual(1);
 });
 
 test("waits for a broadcast that stops, never plays its old window, and plays it again once it is back", async ({

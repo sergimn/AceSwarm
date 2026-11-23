@@ -51,7 +51,7 @@ jobs:
       actions: write
     runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -118,7 +118,7 @@ jobs:
       actions: write
     runs-on: ubuntu-26.04
     # Serves until both stack jobs are done, which may start late, so it outlasts their limit.
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 3
@@ -180,7 +180,7 @@ jobs:
       # API; write also lets a runner that can't join the mesh cancel the run.
       actions: write
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: 60
     strategy:
       # Each stack runner tests on its own: once both have joined the mesh, one failing must not
       # cancel the other. A failure up to the join cancels the whole run on purpose.
@@ -276,13 +276,13 @@ jobs:
           e2e/mesh.sh wait-file source broadcasts.json
           e2e/stack.sh check
       - name: Run the tests
-        # About 14 minutes. Playwright stops at 30 (globalTimeout) and still writes its report.
+        # About half an hour. Playwright stops at 45 minutes (globalTimeout) and still writes its report.
         if: matrix.arch != 'arm64'
-        timeout-minutes: 35
+        timeout-minutes: 50
         run: npm run e2e
       - name: Run the arm64 disk cache test
-        # The arm64 engine's cache on disk, the goal of this leg: it fails until the engine keeps the
-        # stream in the folder (e2e/tests/arm64-disk-cache.spec.ts).
+        # The goal of this leg: the arm64 engine keeps its stream cache on disk, which
+        # e2e/tests/arm64-disk-cache.spec.ts checks. The other stack jobs run the whole suite instead.
         if: matrix.arch == 'arm64'
         timeout-minutes: 20
         run: npm run e2e -- e2e/tests/arm64-disk-cache.spec.ts

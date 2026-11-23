@@ -100,6 +100,7 @@ def capped_meminfo(text, limit_kb):
 def show_capped_meminfo(limit_kb):
     # Every open of /proc/meminfo in this process gives the capped text from now on. Python code reads
     # the memory figures through open() (psutil does), so that is where the engine's pick is answered.
+    # Code that reads the file another way, such as a C library, does not see the cap.
     def open_meminfo(file, mode='r', *args, **kwargs):
         if file != MEMINFO:
             return _real_open(file, mode, *args, **kwargs)

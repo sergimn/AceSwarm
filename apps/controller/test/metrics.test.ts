@@ -1,7 +1,8 @@
 import { Registry } from "@prometheus-io/client";
 import type { StreamView, ViewerView } from "@aceswarm/shared/api-types";
 import { expect, test } from "vitest";
-import type { EngineCount } from "../src/engine-resources.ts";
+import type { EngineCount, EngineMemory } from "../src/engine-resources.ts";
+import { EnginePlaces } from "../src/engine-places.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import type { SharedEngineView } from "../src/shared-engines.ts";
 
@@ -60,23 +61,103 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
     recoveries: 0,
     viewers: 0,
     hls: { preview: "", full: "", thumbnail: "" },
-    engine: null,
+    engine: { name: "e1", shared: false },
     standbys: [],
   };
+  const places = new EnginePlaces(() => []);
   new ControllerMetrics(
     registry,
     () => ({ streams: [stream], paths: [] }),
     () => [
-      { stream: "s1", engine: "e1", usedBytes: 300, limitBytes: 512, cacheLimitBytes: 128, cacheBytes: 128 },
-      { stream: "", engine: "e2", usedBytes: 900, limitBytes: 0, cacheLimitBytes: null, cacheBytes: 700 },
+      {
+        stream: "s1",
+        engine: "e1",
+        sharedPath: null,
+        usedBytes: 300,
+        limitBytes: 512,
+        cacheLimitBytes: 128,
+        cacheBytes: 128,
+      },
+      {
+        stream: "",
+        engine: "e2",
+        sharedPath: "wg:a",
+        usedBytes: 900,
+        limitBytes: 0,
+        cacheLimitBytes: null,
+        cacheBytes: 700,
+      },
     ],
+    { enginePlaces: (engines, streams) => places.resolve(engines, streams) },
   );
   const scrape = await registry.metrics();
   expect(scrape).toContain('aceswarm_stream_peers{stream="s1",kind="uploading"} 1');
-  expect(scrape).toContain('aceswarm_engine_memory_cache_bytes{stream="s1",engine="e1"} 128');
-  expect(scrape).toContain('aceswarm_engine_memory_cache_limit_bytes{stream="s1",engine="e1"} 128');
-  expect(scrape).toContain('aceswarm_engine_memory_cache_bytes{stream="",engine="e2"} 700');
-  expect(scrape).not.toContain('aceswarm_engine_memory_cache_limit_bytes{stream="",engine="e2"}');
+  // Each engine says what it is for and which path it is on, next to its container's name.
+  const own = 'stream="s1",engine="e1",role="playing",path="direct"';
+  const shared = 'stream="",engine="e2",role="shared",path="wg:a"';
+  expect(scrape).toContain(`aceswarm_engine_memory_bytes{${own}} 300`);
+  expect(scrape).toContain(`aceswarm_engine_memory_limit_bytes{${own}} 512`);
+  expect(scrape).toContain(`aceswarm_engine_memory_cache_bytes{${own}} 128`);
+  expect(scrape).toContain(`aceswarm_engine_memory_cache_limit_bytes{${own}} 128`);
+  expect(scrape).toContain(`aceswarm_engine_memory_cache_bytes{${shared}} 700`);
+  expect(scrape).not.toContain('aceswarm_engine_memory_cache_limit_bytes{stream="",engine="e2"');
+});
+
+/** A reading of an engine of stream s1. */
+const sample = (engine: string): EngineMemory => ({
+  stream: "s1",
+  engine,
+  sharedPath: null,
+  usedBytes: 300,
+  limitBytes: 512,
+  cacheLimitBytes: null,
+  cacheBytes: 100,
+});
+
+test("an engine that replaces another keeps its place's labels, and the one that went is gone at the next scrape", async () => {
+  const registry = new Registry();
+  const stream = { ...streamOnSharedEngine("s1"), engine: { name: "aceswarm-engine-s1-1", shared: false } };
+  let memory = [sample("aceswarm-engine-s1-1")];
+  const places = new EnginePlaces(() => []);
+  new ControllerMetrics(
+    registry,
+    () => ({ streams: [stream], paths: [] }),
+    () => memory,
+    { enginePlaces: (engines, streams) => places.resolve(engines, streams) },
+  );
+  const place = 'role="playing",path="direct"';
+  expect(await registry.metrics()).toContain(
+    `aceswarm_engine_memory_bytes{stream="s1",engine="aceswarm-engine-s1-1",${place}} 300`,
+  );
+
+  // The stream moved to a new engine on the same path: another container name, the same place.
+  stream.engine = { name: "aceswarm-engine-s1-2", shared: false };
+  memory = [sample("aceswarm-engine-s1-2")];
+  const scrape = await registry.metrics();
+  expect(scrape).toContain(`aceswarm_engine_memory_bytes{stream="s1",engine="aceswarm-engine-s1-2",${place}} 300`);
+  expect(scrape).not.toContain("aceswarm-engine-s1-1");
+});
+
+test("without a source for the engines' places, their role and path are empty", async () => {
+  const registry = new Registry();
+  new ControllerMetrics(
+    registry,
+    () => ({ streams: [], paths: [] }),
+    () => [
+      {
+        stream: "s1",
+        engine: "e1",
+        sharedPath: null,
+        usedBytes: 300,
+        limitBytes: 512,
+        cacheLimitBytes: null,
+        cacheBytes: 0,
+      },
+    ],
+  );
+  expect(await registry.metrics()).toContain(
+    'aceswarm_engine_memory_bytes{stream="s1",engine="e1",role="",path=""} 300',
+  );
 });
 
 function streamOnSharedEngine(id: string): StreamView {
@@ -312,4 +393,40 @@ test("exports how long the broadcast is quiet from the stream's quiet time, not 
   expect(await quiet()).toBeUndefined();
   current = { ...waiting, enabled: false, state: "stopped", path: null, liveEdge: null };
   expect(await quiet()).toBeUndefined();
+});
+
+test("counts how long engines ran by kind and reason, with every reason there from the start", async () => {
+  const registry = new Registry();
+  const metrics = new ControllerMetrics(registry, () => ({ streams: [], paths: [] }));
+
+  const before = await registry.metrics();
+  // At zero before the first engine goes, so that one shows as an increase.
+  for (const series of [
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="restart"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="own",reason="oom-killed"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="shared",reason="replaced"} 0',
+    'aceswarm_engine_lifetime_seconds_count{kind="shared",reason="exited"} 0',
+    'aceswarm_engine_lifetime_seconds_bucket{le="30",kind="own",reason="move-failed"} 0',
+  ]) {
+    expect(before).toContain(series);
+  }
+  // Only a stream's own engine restarts in its container.
+  expect(before).not.toContain('kind="shared",reason="restart"');
+  expect(before.match(/^aceswarm_engine_lifetime_seconds_count/gm)).toHaveLength(15);
+
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 45);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 7200);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 2 * 7 * 86_400);
+  metrics.engineLifetime.observe({ kind: "own", reason: "moved" }, 60 * 86_400);
+
+  const after = await registry.metrics();
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="30",kind="own",reason="moved"} 0');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="60",kind="own",reason="moved"} 1');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="21600",kind="own",reason="moved"} 2');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="604800",kind="own",reason="moved"} 2');
+  // Two weeks is within the last step, a month.
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="2592000",kind="own",reason="moved"} 3');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_bucket{le="+Inf",kind="own",reason="moved"} 4');
+  expect(after).toContain('aceswarm_engine_lifetime_seconds_count{kind="own",reason="moved"} 4');
 });

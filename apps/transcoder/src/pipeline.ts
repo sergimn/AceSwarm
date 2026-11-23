@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PipelineStatus } from "@aceswarm/shared/api-types";
 import type { Logger } from "@aceswarm/shared/logger";
 import { buildFfmpegArgs, type FfmpegPlan } from "./ffmpeg-args.ts";
-import { Generation, killProcess, lastErrorLine, modifiedAt, VARIANTS, type Variant } from "./generation.ts";
+import { attachFfmpeg } from "./ffmpeg-process.ts";
+import { Generation, modifiedAt, statusWithoutRun, VARIANTS, type GenerationPlan, type Variant } from "./generation.ts";
 import { KeyFrames, REOPENS_AFTER_FALLBACK, type Decoding } from "./key-frames.ts";
+import { LayoutChanges } from "./layout-changes.ts";
 import {
   DEFAULT_LIVE_EDGE_SETTINGS,
   LiveEdge,
@@ -18,18 +20,20 @@ import {
 } from "./live-edge.ts";
 import type { PipelineEvents, PipelineOptions, PipelineSettings, Spawner } from "./pipeline-settings.ts";
 import { parseMediaPlaylist, segmentIndex, VirtualPlaylist, type PlaylistSegment } from "./playlist.ts";
-import { parseInputVideoCodec, ProgressParser } from "./progress.ts";
+import { makeRunDirectory, makeRunDirectoryNow, removeStreamFiles } from "./run-files.ts";
+import { SourceFeeds, type Succession } from "./source-feeds.ts";
+import { readSource } from "./source-reader.ts";
 import { DEFAULT_STUCK_LIMITS, StuckRuns } from "./stuck-runs.ts";
+import { describeLayout, videoCodecOfLayout } from "./ts-tables.ts";
 
 export { VARIANTS, type Variant } from "./generation.ts";
 export type { PipelineEvents, PipelineOptions, PipelineSettings, PlanSettings, Spawner } from "./pipeline-settings.ts";
 
-const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+/** ffmpeg gets the stream on its standard input, from the source's reader. */
+const defaultSpawner: Spawner = (command, args) => spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
 
-/** Browsers only decode H.264 reliably, so other codecs are re-encoded for the full output. */
-const COPYABLE_CODECS = new Set(["h264"]);
 const OLD_GENERATION_TTL_MS = 60_000;
-/** How long after a run that failed before any video ffmpeg opens its source again (see `start`). */
+/** How long after a run that failed before any video its source is opened again (see `start`). */
 const REOPEN_DELAY_MS = 1000;
 
 /**
@@ -37,6 +41,10 @@ const REOPEN_DELAY_MS = 1000;
  * players see a single continuous playlist because {@link VirtualPlaylist} stitches generations.
  * With handover, the new generation runs next to the old one and only takes over once it has
  * produced its first segment (make-before-break).
+ *
+ * The pipeline reads each source itself and passes it on to ffmpeg (see `SourceFeeds`). When the
+ * broadcast changes its layout mid-stream, a new generation takes over right at the change, on the
+ * same connection to the engine (see `succeed`).
  *
  * With a source's stat URL, its output is only published while the engine's live edge moves (see
  * `LiveEdge`): an engine whose broadcast stopped keeps serving the old window it has, and so do
@@ -59,7 +67,12 @@ export class Pipeline {
   /** Runs that were retired and whose files are still to be removed (see `retire`). */
   private readonly retiredRuns = new Set<Generation>();
   private nextNumber = 1;
-  private forceTranscode = false;
+  /** Reads the sources, and knows what the full output does with their video. */
+  private readonly feeds: SourceFeeds;
+  /** When the source players get last changed its layout mid-stream (see `succeed`, and `FeedHost.moved`). */
+  private layoutChangedAt: number | undefined;
+  /** How often that happens, and how long players wait for video at a change. */
+  private readonly changes: LayoutChanges;
   /** Whether the stream's broadcast has key frames ffmpeg can use (see `KeyFrames`). */
   private readonly keyFrames = new KeyFrames();
   private readonly stuck: StuckRuns;
@@ -90,7 +103,31 @@ export class Pipeline {
     this.now = options.now ?? Date.now;
     this.watchLiveEdge = options.watchLiveEdge ?? defaultWatch;
     this.liveEdge = settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS;
-    this.stuck = new StuckRuns(settings.stuck ?? DEFAULT_STUCK_LIMITS, settings.plan.thumbnailIntervalSeconds, options);
+    this.changes = new LayoutChanges(id, events, this.now);
+    const host = {
+      succeed: (old: Generation, how: Succession, reason: string) => this.succeed(old, how, reason),
+      publish: (run: Generation) => this.publish(run, () => this.feeds.drains(run)),
+      retire: (run: Generation) => {
+        this.retire(run);
+      },
+      moved: (run: Generation) => {
+        // As for a new run (see `succeed`): only for the source players get, and one that had video
+        // since its last move. Moves that keep coming over a run that shows nothing must not look
+        // like a stream that does.
+        const shown = run === this.active && run.frames > run.framesAtMove;
+        this.layoutChangedAt = shown ? this.now() : this.layoutChangedAt;
+        run.framesAtMove = run.frames;
+        if (run === this.active) {
+          this.changes.changed(run, "pid", "same");
+        }
+      },
+      keyFramesBack: this.keyFrames.back,
+    };
+    const stuck = settings.stuck ?? DEFAULT_STUCK_LIMITS;
+    const openSource = options.openSource ?? readSource;
+    const cutTimes = { stallMs: stuck.fullOutputStallMs, segmentMs: settings.plan.segmentSeconds * 1000 };
+    this.feeds = new SourceFeeds(host, openSource, this.logger, this.now, cutTimes);
+    this.stuck = new StuckRuns(stuck, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
       full: new VirtualPlaylist(settings.plan.playlistSize),
@@ -102,14 +139,15 @@ export class Pipeline {
   }
 
   /**
-   * Points the pipeline at a (new) source. With `handover`, ffmpeg's input timeout (how long any
-   * read may wait, for the whole run) is at least the handover timeout, even when there is no
-   * picture left to keep: a new engine on a slow swarm can take longer than the usual input timeout
-   * to deliver its first data, and the controller waits the whole handover for it.
+   * Points the pipeline at a (new) source. With `handover`, the input timeout (how long the
+   * source's reader waits for data, at any time of the run) is at least the handover timeout, even
+   * when there is no picture left to keep: a new engine on a slow swarm can take longer than the
+   * usual input timeout to deliver its first data, and the controller waits the whole handover
+   * for it.
    *
-   * With `reopens`, ffmpeg opens the source again up to that many times when it fails before any
-   * video: an engine that has just lost another reader of the session may refuse a new one for a
-   * moment (it allows one reader per session).
+   * With `reopens`, the source is opened again up to that many times, each time by a new ffmpeg
+   * run, when a run fails before any video: an engine that has just lost another reader of the
+   * session may refuse a new one for a moment (it allows one reader per session).
    *
    * With `stat`, the session's stat URL, its output is only published while its live edge moves.
    */
@@ -134,6 +172,8 @@ export class Pipeline {
     if (previous !== undefined) {
       this.retire(previous);
     }
+    // Players get this source from here on: what the last one's layout did is not about it.
+    this.layoutChangedAt = undefined;
     this.replace("active", launched);
   }
 
@@ -152,28 +192,16 @@ export class Pipeline {
   status(): PipelineStatus {
     const generation = this.active;
     const pendingSource = this.pending?.source ?? null;
+    const layoutChangedAt = this.layoutChangedAt === undefined ? null : new Date(this.layoutChangedAt).toISOString();
     const restartedAt = this.restartedAt === undefined ? null : new Date(this.restartedAt).toISOString();
     if (generation === undefined) {
-      return {
-        id: this.id,
-        state: "exited",
-        source: "",
-        startedAt: new Date(this.now()).toISOString(),
-        lastFrameAt: null,
-        frames: 0,
-        fps: null,
-        videoCodec: null,
-        mode: "copy",
-        exitCode: null,
-        error: "not started",
-        pendingSource,
-        liveEdge: null,
-        restartedAt,
-      };
+      return statusWithoutRun(this.id, this.now(), { layoutChangedAt, pendingSource, restartedAt });
     }
+    const { layout } = generation;
+    const tableCodec = layout === undefined ? undefined : videoCodecOfLayout(layout);
     return {
       id: this.id,
-      // A run that failed before any video and opens its source again is still starting.
+      // A run that failed before any video, and whose source is opened again, is still starting.
       state: generation.willReopen() ? "starting" : generation.state,
       source: generation.source,
       startedAt: new Date(generation.startedAt).toISOString(),
@@ -182,8 +210,10 @@ export class Pipeline {
         generation.publishedFrameAt === undefined ? null : new Date(generation.publishedFrameAt).toISOString(),
       frames: generation.frames,
       fps: generation.frameRate(),
-      videoCodec: generation.videoCodec ?? null,
+      videoCodec: generation.videoCodec ?? tableCodec ?? null,
       mode: generation.mode,
+      layout: layout === undefined ? null : describeLayout(layout),
+      layoutChangedAt,
       exitCode: generation.exitCode,
       error: generation.error,
       pendingSource,
@@ -230,8 +260,9 @@ export class Pipeline {
    * Stops the stream's ffmpeg runs and removes all their files. ffmpeg is killed at once: let it
    * stop by itself and it writes out what it holds first, a whole segment or a stalled full
    * output's backlog, into a directory that is going. That goes for the runs that were retired
-   * moments ago and still stop. A file it writes while it dies can still land in a directory that
-   * `rm` has just emptied, which then fails to go (ENOTEMPTY): `rm` tries again for that.
+   * moments ago and still stop, and for the ones that still write out what they had when a
+   * layout change ended their input (see `SourceFeeds.drain`). The stop does not fail over files
+   * that could not be removed (see `removeStreamFiles`).
    */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -241,15 +272,17 @@ export class Pipeline {
     for (const generation of [this.active, this.pending, ...this.retiredRuns]) {
       generation?.stopNow();
     }
+    this.feeds.stop();
     this.active = undefined;
     this.pending = undefined;
-    await rm(this.root, { recursive: true, force: true, maxRetries: 3 });
+    await removeStreamFiles(this.root, this.logger);
   }
 
   /** Copies new segments into the virtual playlists and completes pending handovers. */
   async sync(): Promise<void> {
     await this.syncPending();
     this.expireOldSegments();
+    const draining = await this.feeds.drain();
     const active = this.active;
     if (active === undefined) {
       return;
@@ -262,19 +295,26 @@ export class Pipeline {
       this.reopen(active);
       return;
     }
-    if (this.fallBackToAllFrames(active) || !(await this.openGate(active)) || active !== this.active) {
+    // What a run that handed over still writes out comes first (see `SourceFeeds.drain`).
+    if (this.fallBackToAllFrames(active) || draining || !(await this.openGate(active))) {
       return;
     }
+    await this.publish(active, () => active === this.active);
+  }
+
+  /** Adds the segments the generation may publish to the playlists, while it is `still` the one to. */
+  private async publish(generation: Generation, still: () => boolean): Promise<void> {
     for (const variant of VARIANTS) {
-      const segments = await this.publishableSegments(active, variant);
-      if (segments.length > 0 && active === this.active) {
-        const prefix = `../g${String(active.number)}/${variant}/`;
-        const added = this.playlists[variant].append(active.number, segments, prefix, this.now());
-        if (variant === "full" && added > 0 && !active.published) {
-          // Its video counts from now on: players can get it. One that has no frame of its own yet
-          // leaves the last one of the run it replaced (see `swap`).
-          active.published = true;
-          active.publishedFrameAt = active.lastFrameAt ?? active.publishedFrameAt;
+      const segments = await this.publishableSegments(generation, variant);
+      if (segments.length > 0 && still()) {
+        const prefix = `../g${String(generation.number)}/${variant}/`;
+        const added = this.playlists[variant].append(generation.number, segments, prefix, this.now());
+        if (variant === "full" && added > 0 && !generation.published) {
+          // Its video counts from now on: players can get it. A run that has no frame of its own
+          // yet leaves the last one it carries, if any (see `swap`, and `Generation.takeOver`):
+          // a segment alone is no video, it may hold nothing but sound.
+          generation.published = true;
+          this.changes.shown(generation);
         }
       }
     }
@@ -332,7 +372,7 @@ export class Pipeline {
     generation.error = behind
       ? `stopped reading: the engine serves the broadcast more than ${seconds}s behind its live edge`
       : `stopped reading: the broadcast's live edge did not move for ${seconds}s`;
-    killProcess(generation.process);
+    generation.halt();
     this.logger.warn({ generation: generation.number, liveEdge }, "live edge stopped; stopped reading the source");
   }
 
@@ -346,7 +386,7 @@ export class Pipeline {
 
   /**
    * Starts ffmpeg again on the same source when its run goes on but is stuck (see `StuckRuns`), with
-   * the full stream re-encoded from then on when a copy can't be cut (`StuckRuns.copyFails`). The
+   * the full stream re-encoded from then on when a copy can't be cut (`SourceFeeds.copyFails`). The
    * old run is killed outright: as it stops, ffmpeg would write out all it holds. A full output
    * that stalled shows the broadcast's key frames are gone, which decoding key frames only needs
    * too: the stream's later runs decode every frame (see `KeyFrames`). Until the new run has video
@@ -360,6 +400,7 @@ export class Pipeline {
     }
     this.logger.warn({ generation: generation.number, ...stuck.details }, stuck.message);
     generation.process?.kill("SIGKILL");
+    this.feeds.copyFails ||= stuck.reencode;
     this.keyFrames.allFrames ||= stuck.reason === "full-output-stalled";
     this.restartedAt = this.now();
     const { source, inputTimeoutSeconds, stat } = generation;
@@ -429,9 +470,7 @@ export class Pipeline {
    * it was part of goes on with `next`. Nothing waits, so no other sync starts a second one.
    */
   private swap(generation: Generation, next: Generation, reason: string): void {
-    next.handoverSince = generation.handoverSince;
-    // The last frame players got of this source, until `next` has one (see `restartIfStuck`).
-    next.publishedFrameAt = generation.publishedFrameAt;
+    next.replaces(generation);
     this[generation === this.pending ? "pending" : "active"] = next;
     this.retire(generation);
     void this.run(next, reason).catch((error: unknown) => {
@@ -461,6 +500,8 @@ export class Pipeline {
     const previous = this.active;
     this.active = pending;
     this.pending = undefined;
+    // Players get another source from here on: what the old one's layout did is not about it.
+    this.layoutChangedAt = undefined;
     if (previous !== undefined) {
       this.retire(previous);
     }
@@ -487,25 +528,63 @@ export class Pipeline {
 
   /** A new generation for the source, not running yet. */
   private prepare(source: string, inputTimeoutSeconds: number, reopens: number, stat: string | undefined): Generation {
-    const number = this.nextNumber;
-    this.nextNumber += 1;
-    const directory = join(this.root, `g${String(number)}`);
-    const mode = this.forceTranscode || this.stuck.copyFails ? "transcode" : "copy";
-    const generation = new Generation({
-      number,
-      source,
-      stat,
-      directory,
-      mode,
-      allFrames: this.keyFrames.allFrames,
-      startedAt: this.now(),
-      inputTimeoutSeconds,
-    });
+    const generation = this.create({ source, stat, inputTimeoutSeconds, mode: this.feeds.startMode() });
     generation.reopens = reopens;
     if (stat !== undefined) {
       generation.watch = this.watchLiveEdge(stat, new LiveEdge(this.liveEdge, this.now, this.newestEdge()));
     }
     return generation;
+  }
+
+  private create(
+    plan: Pick<GenerationPlan, "source" | "stat" | "inputTimeoutSeconds" | "mode" | "midStream">,
+  ): Generation {
+    const number = this.nextNumber;
+    this.nextNumber += 1;
+    const directory = join(this.root, `g${String(number)}`);
+    return new Generation({ ...plan, number, directory, allFrames: this.keyFrames.allFrames, startedAt: this.now() });
+  }
+
+  /**
+   * `SourceFeeds` found that `old` can't go on with its source as it is: the stream's video needs
+   * the other mode, or the broadcast changed its layout mid-stream (ffmpeg stays on the streams it
+   * found at its start, so it would get no more video). Starts a run in its place that reads on
+   * from here, on the same connection: the reader ends the old run's input and gives the new one
+   * the stream's tables and everything after them. With `how.drain`, what the old run still writes
+   * out is published before the new run's output, so players get the old run to its last frame.
+   */
+  private succeed(old: Generation, how: Succession, reason: string): Generation | undefined {
+    const slot = [this.active, this.pending].indexOf(old);
+    if (slot === -1 || old.retired || this.stopped) {
+      return undefined;
+    }
+    const { source, stat, inputTimeoutSeconds } = old;
+    const next = this.create({ source, stat, inputTimeoutSeconds, mode: how.mode, midStream: how.midStream });
+    next.takeOver(old, how.layout);
+    this[slot === 0 ? "active" : "pending"] = next;
+    if (how.change !== undefined && slot === 0) {
+      this.changes.changed(next, how.change, "new");
+      // Players get no new video until the new run has some out: the controller allows for that
+      // (see `PipelineStatus.layoutChangedAt`), but only after a run that had video of its own.
+      // Tables that keep changing over a stream without video must not look like one that has it.
+      this.layoutChangedAt = old.frames > 0 ? this.now() : this.layoutChangedAt;
+    }
+    try {
+      makeRunDirectoryNow(next.directory);
+      this.spawn(next, reason);
+    } catch (error) {
+      next.state = "exited";
+      next.error = error instanceof Error ? error.message : String(error);
+      // Nothing takes the source's data.
+      next.halt();
+    }
+    // A source that waits to take over has published nothing yet: its new run starts that.
+    if (how.drain && slot === 0) {
+      this.feeds.drainLater(old);
+    } else {
+      this.retire(old);
+    }
+    return next;
   }
 
   /**
@@ -522,96 +601,61 @@ export class Pipeline {
 
   /** What the generation's ffmpeg does. */
   private planOf(generation: Generation): FfmpegPlan {
-    const { source, directory, mode: fullMode, allFrames, inputTimeoutSeconds } = generation;
-    return { ...this.settings.plan, source, directory, fullMode, allFrames, inputTimeoutSeconds };
+    const { directory, mode: fullMode, allFrames, midStream, inputTimeoutSeconds } = generation;
+    return { ...this.settings.plan, directory, fullMode, allFrames, midStream, inputTimeoutSeconds };
   }
 
-  /** Starts the generation's ffmpeg, unless it was retired or the pipeline stopped meanwhile. */
+  /** Starts the generation's ffmpeg on its source, unless it was retired or the pipeline stopped meanwhile. */
   private async run(generation: Generation, reason: string): Promise<void> {
-    const { number, directory, inputTimeoutSeconds } = generation;
-    await mkdir(join(directory, "full"), { recursive: true });
-    await mkdir(join(directory, "preview"), { recursive: true });
+    await makeRunDirectory(generation.directory);
     if (generation.retired || this.stopped) {
       generation.state = "exited";
       return;
     }
+    this.spawn(generation, reason);
+    this.feeds.open(generation);
+  }
+
+  private spawn(generation: Generation, reason: string): void {
+    const { number, mode, midStream, inputTimeoutSeconds } = generation;
     const args = buildFfmpegArgs(this.planOf(generation));
-    this.logger.info({ generation: number, mode: generation.mode, reason, inputTimeoutSeconds }, "starting ffmpeg");
+    this.logger.info({ generation: number, mode, reason, midStream, inputTimeoutSeconds }, "starting ffmpeg");
     this.events.generationStarted(this.id, reason);
-
-    const child = this.spawner(this.settings.ffmpegPath, args);
-    generation.process = child;
-    const progress = new ProgressParser();
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      for (const block of progress.push(chunk)) {
-        if (block.frame !== undefined && block.frame > generation.frames) {
-          generation.frames = block.frame;
-          this.keyFrames.progressed(block, this.planOf(generation));
-          generation.lastFrameAt = this.now();
-          if (generation.state !== "exited") {
-            // A block it printed as it ended can be read after its exit: its frames count, but
-            // it must not look like it runs again.
-            generation.state = "running";
-          }
-          if (generation.publishing() && generation.published) {
-            generation.publishedFrameAt = generation.lastFrameAt;
-          }
-        }
-        generation.fps = block.fps;
-      }
-    });
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
-      for (const line of chunk.split("\n")) {
-        this.onStderrLine(generation, line);
-      }
-    });
-    child.on("error", (error) => {
-      generation.state = "exited";
-      generation.error = error.message;
-    });
-    child.on("exit", (code, signal) => {
-      generation.state = "exited";
-      generation.exitCode = code;
-      generation.error ??= signal === null ? lastErrorLine(generation.stderrTail, code) : `killed by ${signal}`;
-      this.logger.info({ generation: generation.number, code, signal, error: generation.error }, "ffmpeg exited");
+    attachFfmpeg(generation, this.spawner(this.settings.ffmpegPath, args), {
+      now: this.now,
+      onFrames: (block) => {
+        this.keyFrames.progressed(block, this.planOf(generation));
+      },
+      onVideoCodec: (codec) => {
+        this.onVideoCodec(generation, codec);
+      },
+      onLayoutGap: (ms) => {
+        this.changes.waited(ms);
+      },
+      onExit: (code, signal) => {
+        this.logger.info({ generation: number, code, signal, error: generation.error }, "ffmpeg exited");
+      },
     });
   }
 
-  private onStderrLine(generation: Generation, line: string): void {
-    if (line.trim().length === 0) {
+  /**
+   * ffmpeg found the codec of the source's video. The run's mode is usually right by then (see
+   * `SourceFeeds`); where the source's tables didn't tell, a run in the wrong mode ends here, before
+   * it wrote anything, and one in the right mode opens the source again.
+   */
+  private onVideoCodec(generation: Generation, codec: string): void {
+    const current = generation === this.active || generation === this.pending;
+    if (!current || generation.retired || this.stopped) {
       return;
     }
-    generation.stderrTail.push(line.trim());
-    if (generation.stderrTail.length > 20) {
-      generation.stderrTail.shift();
-    }
-    const codec = generation.videoCodec === undefined ? parseInputVideoCodec(line) : undefined;
-    if (codec === undefined) {
+    const mode = this.feeds.found(generation, codec);
+    if (mode === generation.mode) {
       return;
     }
-    generation.videoCodec = codec;
-    if (generation.mode !== "copy" || COPYABLE_CODECS.has(codec) || this.stopped) {
-      return;
-    }
-
-    this.logger.info({ codec }, "source is not H.264; re-encoding the full stream");
-    this.forceTranscode = true;
-    void this.relaunchAsTranscode(generation);
-  }
-
-  private async relaunchAsTranscode(generation: Generation): Promise<void> {
-    const slot = generation === this.active ? "active" : generation === this.pending ? "pending" : undefined;
-    if (slot === undefined) {
-      return;
-    }
-    this.retire(generation);
-    const { source, inputTimeoutSeconds, stat } = generation;
-    const next = await this.launch(source, "transcode", inputTimeoutSeconds, 0, stat);
-    // As in `swap`: a run started again for being stuck may find its codec only now.
-    next.publishedFrameAt = generation.publishedFrameAt;
-    this[slot] = next;
+    const what = mode === "transcode" ? "source is not H.264; re-encoding" : "source is H.264; copying";
+    this.logger.info({ generation: generation.number, codec }, `${what} the full stream`);
+    const { source, inputTimeoutSeconds, reopens, stat } = generation;
+    this.swap(generation, this.prepare(source, inputTimeoutSeconds, reopens, stat), mode);
   }
 
   /**
@@ -624,7 +668,7 @@ export class Pipeline {
     this.keyFrames.ended(generation);
     this.lastEdge = this.newestEdge(generation);
     generation.watch?.stop();
-    killProcess(generation.process);
+    generation.halt();
     if (!this.stopped) {
       generation.removeLater(OLD_GENERATION_TTL_MS, this.retiredRuns);
     }

@@ -129,7 +129,9 @@ test("the arm64 engine keeps its stream cache in a folder under ENGINE_CACHE_DIR
   expect(engineCommandLines(engine!)).toContain(
     `--live-cache-type disk --disk-cache-limit ${String(CACHE_BYTES)} --cache-auto 0`,
   );
-  // And the engine uses the disk for the stream, which its log says (use_disk=0 is the memory cache).
+  // The engine's own log says so: its pick of the cache type, and the stream's cache (use_disk=0 is
+  // the memory cache, as the engine logs it).
+  await expect.poll(() => engineLog(engine!), { timeout: 120_000 }).toMatch(/set default live cache type: type=disk/);
   await expect.poll(() => engineLog(engine!), { timeout: 120_000 }).toContain("use_disk=1");
 
   // The engine's folder under the cache folder, which only root can change, with its data folder for

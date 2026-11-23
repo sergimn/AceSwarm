@@ -64,11 +64,53 @@ describe("VirtualPlaylist", () => {
     expect(text).toContain("#EXT-X-MEDIA-SEQUENCE:5\n");
   });
 
-  it("ignores an older generation after a newer one started", () => {
+  it("never goes back to a generation it went on from", () => {
     const playlist = new VirtualPlaylist(10);
+    playlist.append(1, segments(0, 0), "1/");
     playlist.append(2, segments(0, 0), "2/");
-    playlist.append(1, segments(5, 6), "1/");
-    expect(playlist.length).toBe(1);
+    expect(playlist.append(1, segments(0, 2), "1/")).toBe(0);
+    expect(playlist.length).toBe(2);
+    // Nor once the generation after it was left too.
+    playlist.append(3, segments(0, 0), "3/");
+    expect(playlist.append(1, segments(0, 2), "1/")).toBe(0);
+    expect(playlist.append(2, segments(0, 2), "2/")).toBe(0);
+    expect(playlist.append(3, segments(0, 1), "3/")).toBe(1);
+    expect(playlist.length).toBe(4);
+  });
+
+  it("takes the generations in the order they come, whatever their numbers", () => {
+    // A source that waited to take over (2) comes after a run the playing source started meanwhile (3).
+    const playlist = new VirtualPlaylist(10);
+    playlist.append(1, segments(0, 1), "1/");
+    expect(playlist.append(3, segments(0, 0), "3/")).toBe(1);
+    expect(playlist.append(2, segments(4, 5), "2/")).toBe(2);
+    expect(playlist.append(2, segments(4, 6), "2/")).toBe(1);
+    expect(playlist.append(3, segments(0, 1), "3/")).toBe(0);
+    const uris = playlist
+      .render()
+      ?.split("\n")
+      .filter((line) => line.endsWith(".ts") || line === "#EXT-X-DISCONTINUITY");
+    expect(uris).toEqual([
+      "1/seg_000000.ts",
+      "1/seg_000001.ts",
+      "#EXT-X-DISCONTINUITY",
+      "3/seg_000000.ts",
+      "#EXT-X-DISCONTINUITY",
+      "2/seg_000004.ts",
+      "2/seg_000005.ts",
+      "2/seg_000006.ts",
+    ]);
+  });
+
+  it("remembers the generations it went on from for longer than any could still write", () => {
+    const playlist = new VirtualPlaylist(4);
+    for (let generation = 1; generation <= 66; generation += 1) {
+      playlist.append(generation, segments(0, 0), `${String(generation)}/`);
+    }
+    // The last 64 it left are remembered; the one before them is long gone.
+    expect(playlist.append(2, segments(1, 1), "2/")).toBe(0);
+    expect(playlist.append(65, segments(1, 1), "65/")).toBe(0);
+    expect(playlist.append(1, segments(1, 1), "1/")).toBe(1);
   });
 
   it("drops segments older than a time, and keeps both sequences counting across the gap", () => {

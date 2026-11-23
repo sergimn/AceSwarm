@@ -173,7 +173,7 @@ export class SharedEngines {
           "the shared engine stopped answering",
         );
         this.deps.metrics.sharedEngineRestarts.inc({ path: instance.path, reason: "unresponsive" });
-        await this.remove(instance, "it stopped answering");
+        await this.remove(instance, "unresponsive", "it stopped answering");
       }
       return this.acquire(instance.path, streamId, role);
     }
@@ -212,7 +212,7 @@ export class SharedEngines {
       instance.idleSince = this.now();
     }
     if (instance.retiring && instance.users.size === 0) {
-      await this.remove(instance, "no streams left on it");
+      await this.remove(instance, "replaced", "no streams left on it");
     }
   }
 
@@ -229,7 +229,7 @@ export class SharedEngines {
       instance.idleSince = this.now();
     }
     if (instance.retiring) {
-      await this.remove(instance, "no streams left on it");
+      await this.remove(instance, "replaced", "no streams left on it");
     }
   }
 
@@ -309,7 +309,7 @@ export class SharedEngines {
     for (const instance of this.current.values()) {
       // Checked again for each: a stream may take an engine while the one before it is removed.
       if (this.current.get(instance.path) === instance && this.isIdle(instance, timeoutMs)) {
-        await this.remove(instance, "no stream uses it");
+        await this.remove(instance, "idle", "no stream uses it");
       }
     }
   }
@@ -340,7 +340,7 @@ export class SharedEngines {
         continue;
       }
       this.logger.info({ engine: handle.name }, "removing a shared engine no stream uses");
-      await this.deps.engines.remove(handle).catch((error: unknown) => {
+      await this.deps.engines.remove(handle, "leftover", "no stream took it over").catch((error: unknown) => {
         this.logger.warn({ err: error, engine: handle.name }, "could not remove a shared engine");
       });
     }
@@ -485,7 +485,7 @@ export class SharedEngines {
       this.generations.set(path, Math.max(this.generations.get(path) ?? 0, handle.generation));
     }
     for (const handle of older) {
-      await this.deps.engines.remove(handle);
+      await this.deps.engines.remove(handle, "leftover", "the path has a newer engine");
     }
     if (newest === undefined) {
       return undefined;
@@ -496,7 +496,7 @@ export class SharedEngines {
       return handle;
     } catch (error) {
       this.logger.warn({ err: error, engine: newest.name }, "could not take over a shared engine; starting a new one");
-      await this.deps.engines.remove(newest).catch(() => undefined);
+      await this.deps.engines.remove(newest, "leftover", "it could not be taken over").catch(() => undefined);
       return undefined;
     }
   }
@@ -547,16 +547,16 @@ export class SharedEngines {
     instance.retiring = true;
     this.retiring.add(instance);
     if (instance.users.size === 0) {
-      await this.remove(instance, "replaced");
+      await this.remove(instance, "replaced", "replaced");
       return;
     }
     instance.retireTimer = setTimeout(() => {
-      void this.remove(instance, "replaced, and its last streams did not leave in time");
+      void this.remove(instance, "replaced", "replaced, and its last streams did not leave in time");
     }, this.deps.settings.retireTimeoutMs);
     instance.retireTimer.unref();
   }
 
-  private async remove(instance: Instance, why: string): Promise<void> {
+  private async remove(instance: Instance, reason: "replaced" | "idle" | "unresponsive", why: string): Promise<void> {
     if (this.current.get(instance.path) === instance) {
       this.current.delete(instance.path);
     }
@@ -575,7 +575,7 @@ export class SharedEngines {
       return;
     }
     this.logger.info({ path: instance.path, engine: handle.name, reason: why }, "removing shared engine");
-    await this.deps.engines.remove(handle).catch((error: unknown) => {
+    await this.deps.engines.remove(handle, reason, why === reason ? undefined : why).catch((error: unknown) => {
       this.logger.warn({ err: error, engine: handle.name }, "could not remove a shared engine");
     });
   }

@@ -11,7 +11,7 @@ import {
 } from "../src/decode-check.ts";
 import type { LiveEdge } from "../src/live-edge.ts";
 import { StandbyReaders } from "../src/standby-readers.ts";
-import { noise, NULL_PID, tsPackets } from "./ts-fixtures.ts";
+import { concatBytes, noise, NULL_PID, tablePackets, tsPackets } from "./ts-fixtures.ts";
 
 const logger = createLogger("test", "silent");
 const settings = { idleTimeoutMs: 200, retryMs: 5 };
@@ -89,6 +89,49 @@ const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve,
 /** How many bytes a check got. */
 const fedBytes = (check: { fed: Uint8Array[] } | undefined): number =>
   (check?.fed ?? []).reduce((total, chunk) => total + chunk.length, 0);
+
+/** H.264 video on PID 256, and the same after it moved to PID 211. */
+const before = (counter = 0): Uint8Array =>
+  tablePackets(
+    [
+      { pid: 256, type: 0x1b },
+      { pid: 257, type: 0x0f },
+    ],
+    0x10_00,
+    counter,
+  );
+const after = (counter = 0): Uint8Array =>
+  tablePackets(
+    [
+      { pid: 211, type: 0x1b },
+      { pid: 221, type: 0x0f },
+    ],
+    0x10_00,
+    counter,
+  );
+
+async function reading() {
+  const engine = fakeEngine();
+  const fake = fakeDecoder();
+  const clock = { now: 1000 };
+  const readers = new StandbyReaders(logger, settings, engine.fetch, () => clock.now, undefined, fake.decoder);
+  readers.set(["http://e1/play"]);
+  await vi.waitFor(() => {
+    expect(engine.bodies).toHaveLength(1);
+  });
+  let fed = 0;
+  /** Feeds the stream, and waits until the reader took it. */
+  const feed = async (...parts: Uint8Array[]): Promise<void> => {
+    const bytes = concatBytes(...parts);
+    fed += bytes.length;
+    engine.bodies.at(-1)?.enqueue(bytes);
+    await vi.waitFor(() => {
+      expect(readers.status()[0]?.bytes).toBe(fed);
+    });
+    await settle();
+  };
+  return { engine, ...fake, clock, readers, feed };
+}
 
 describe("StandbyReaders", () => {
   test("only counts data that comes while the standby's live edge moves", async () => {
@@ -606,5 +649,117 @@ describe("StandbyReaders", () => {
       expect(readers.status()).toMatchObject([{ state: "waiting", error: "the engine answered 500" }]);
     });
     readers.closeAll();
+  });
+
+  describe("when the broadcast changes its layout mid-stream", () => {
+    test("ends a running check without an answer, and starts the next one at once", async () => {
+      const { checks, clock, readers, feed } = await reading();
+      await feed(before(), tsPackets(5, 256));
+      expect(checks).toHaveLength(1);
+
+      // ffmpeg stays on the streams it found: the check would get no more video, and fail a standby that is fine.
+      clock.now = 4000;
+      await feed(after(1), tsPackets(5, 211));
+      expect(checks[0]?.stopped).toBe(true);
+      expect(readers.status()[0]).toMatchObject({ error: null, lastDataAt: new Date(4000).toISOString() });
+
+      // Not ten seconds later, as after a check that went quiet.
+      clock.now = 4100;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(2);
+      expect(checks[1]?.priority).toBe(CHECK_PRIORITY.first);
+      expect(checks[1]?.stopped).toBe(false);
+
+      // And it does not count as a check that went quiet: the first that does waits ten seconds, not twenty.
+      checks[1]?.end("inconclusive");
+      await settle();
+      clock.now = 4100 + 9999;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(2);
+      clock.now = 4100 + 10_000;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(3);
+      readers.closeAll();
+    });
+
+    test("checks a standby again at once, as what the last check found may not hold for the new layout", async () => {
+      const { checks, clock, readers, feed } = await reading();
+      await feed(before(), tsPackets(5, 256));
+      checks[0]?.end("decoded");
+      await settle();
+      clock.now = 5000;
+      // The same tables again are no change: the next check is a minute away.
+      await feed(before(1), tsPackets(5, 256));
+      expect(checks).toHaveLength(1);
+
+      await feed(after(2), tsPackets(5, 211));
+      expect(checks).toHaveLength(2);
+      expect(checks[1]?.priority).toBe(CHECK_PRIORITY.routine);
+      // The new check gets the stream from the chunk that brought the change, tables first.
+      expect(fedBytes(checks[1])).toBe(7 * 188);
+      checks[1]?.end("no-video");
+      await settle();
+      await feed(tsPackets(5, 211));
+      expect(readers.status()[0]).toMatchObject({
+        error: "ffmpeg decoded no video from it",
+        lastDataAt: new Date(5000).toISOString(),
+      });
+      readers.closeAll();
+    });
+
+    test("starts no check at every change of tables that keep changing", async () => {
+      const { checks, clock, readers, feed } = await reading();
+      await feed(before(), tsPackets(5, 256));
+      checks[0]?.end("decoded");
+      await settle();
+      // The first change gets its check at once.
+      clock.now = 10_000;
+      await feed(after(1), tsPackets(5, 211));
+      expect(checks).toHaveLength(2);
+
+      // The tables flip on, twice a second. Each flip ends the check that runs, which would get no
+      // more video, but the next one waits: three seconds after the last one started.
+      for (let flip = 1; flip <= 5; flip += 1) {
+        clock.now = 10_000 + flip * 500;
+        await feed(flip % 2 === 1 ? before(1 + flip) : after(1 + flip), tsPackets(5, flip % 2 === 1 ? 256 : 211));
+      }
+      expect(checks[1]?.stopped).toBe(true);
+      expect(checks).toHaveLength(2);
+      clock.now = 12_999;
+      await feed(tsPackets(5, 256));
+      expect(checks).toHaveLength(2);
+      clock.now = 13_000;
+      await feed(tsPackets(5, 256));
+      expect(checks).toHaveLength(3);
+      expect(checks[2]?.stopped).toBe(false);
+
+      // And the one after that six seconds later, as the tables have not settled.
+      clock.now = 13_500;
+      await feed(after(7), tsPackets(5, 211));
+      expect(checks[2]?.stopped).toBe(true);
+      clock.now = 18_999;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(3);
+      clock.now = 19_000;
+      await feed(tsPackets(5, 211));
+      expect(checks).toHaveLength(4);
+      readers.closeAll();
+    });
+
+    test("takes the first tables of a new connection for no change", async () => {
+      const { engine, checks, clock, readers, feed } = await reading();
+      await feed(before(), tsPackets(5, 256));
+      checks[0]?.end("decoded");
+      await settle();
+      engine.bodies[0]?.close();
+      await vi.waitFor(() => {
+        expect(engine.bodies).toHaveLength(2);
+      });
+      clock.now = 5000;
+      // The broadcast changed while the reader was away: that is this connection's layout from its start.
+      await feed(after(), tsPackets(5, 211));
+      expect(checks).toHaveLength(1);
+      readers.closeAll();
+    });
   });
 });

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveEdge } from "../src/live-edge.ts";
 import { KEY_FRAMES_PATIENCE_MS } from "../src/key-frames.ts";
 import { Pipeline, type PipelineSettings } from "../src/pipeline.ts";
+import { fakeSources, type FakeSource } from "./fake-source.ts";
 
 const H264 = "  Stream #0:0[0x100]: Video: h264 (High), yuv420p(progressive), 1280x720, 25 fps\n";
 const MPEG2 = "  Stream #0:0[0x100]: Video: mpeg2video (Main), yuv420p(tv), 720x576, 25 fps\n";
@@ -48,11 +49,6 @@ function skipsFrames(args: string[] | undefined): boolean {
   return args?.includes("-skip_frame") === true;
 }
 
-/** How long a run waits for its source's data, as ffmpeg gets it (microseconds). */
-function inputTimeout(args: string[] = []): string | undefined {
-  return args[args.indexOf("-rw_timeout") + 1];
-}
-
 /** The filter of a run's preview output: the one whose scale is to the preview's height. */
 function previewFilter(args: string[] | undefined): string | undefined {
   return args?.find((arg) => arg.includes("scale=-2:270"));
@@ -66,6 +62,8 @@ describe("Pipeline decoding key frames only", () => {
   const children: ChildProcess[] = [];
   /** Why each run started. */
   const reasons: string[] = [];
+  /** The source each run opened, in the same order. */
+  let readers: FakeSource[] = [];
   /** The live edge each run follows, in order. */
   const edges: { edge: LiveEdge }[] = [];
   const clock = { now: 1_000_000 };
@@ -112,9 +110,13 @@ describe("Pipeline decoding key frames only", () => {
         reasons.push(reason);
       },
       handover: () => undefined,
+      layoutChanged: () => undefined,
+      layoutGap: () => undefined,
     };
     const logger = createLogger("test", "silent");
     vi.spyOn(logger, "child").mockReturnValue(streamLogger as never);
+    const sources = fakeSources();
+    readers = sources.opened;
     pipeline = new Pipeline("s1", settings, logger, events, {
       spawner: (_command, args) => {
         runs.push(args);
@@ -123,6 +125,7 @@ describe("Pipeline decoding key frames only", () => {
         return child;
       },
       now: () => clock.now,
+      openSource: sources.open,
       watchLiveEdge: (_url, edge) => {
         edges.push({ edge });
         return { edge, stop: () => undefined };
@@ -340,9 +343,7 @@ describe("Pipeline decoding key frames only", () => {
     expect(reasons).toEqual(["start", "handover", "all-frames"]);
     // The handover goes on with that run, and the time a handover has to get its data.
     expect(instance.status()).toMatchObject({ source: "http://e1/play", pendingSource: "http://e2/play" });
-    expect(inputTimeout(runs[0])).toBe("60000000");
-    expect(inputTimeout(runs[1])).toBe("120000000");
-    expect(inputTimeout(runs[2])).toBe("120000000");
+    expect(readers.map((reader) => reader.request.idleTimeoutMs)).toEqual([60_000, 120_000, 120_000]);
   });
 
   it("does not take a slow handover's source for a broadcast without key frames once frames came", async () => {
@@ -412,23 +413,23 @@ describe("Pipeline decoding key frames only", () => {
     expect(instance.status().pendingSource).toBeNull();
   });
 
-  it("decodes every frame of a re-encoded full stream too, whose frames key frames only starved", async () => {
+  it("decodes every frame of a re-encoded full stream, which key frames alone would make a slideshow of", async () => {
     const instance = start();
     await instance.start("http://e1/play", false);
+    expect(skipsFrames(runs[0])).toBe(true);
     await opened(0, MPEG2);
     await runsStarted(2);
     expect(runs[1]).toContain("libx264");
-    expect(skipsFrames(runs[1])).toBe(true);
+    expect(skipsFrames(runs[1])).toBe(false);
 
+    // Every frame is what the settings want for it: there is nothing to fall back from.
     await opened(1, MPEG2);
     await instance.sync();
-    clock.now += KEY_FRAMES_PATIENCE_MS;
+    clock.now += 10 * KEY_FRAMES_PATIENCE_MS;
     await instance.sync();
-    await runsStarted(3);
-    expect(runs[2]).toContain("libx264");
-    expect(skipsFrames(runs[2])).toBe(false);
-    expect(reasons).toEqual(["start", "transcode", "all-frames"]);
-    expect(instance.decoding()).toBe("all-frames-fallback");
+    await noMoreRuns(2);
+    expect(reasons).toEqual(["start", "transcode"]);
+    expect(instance.decoding()).toBe("all-frames");
   });
 
   it("waits the patience again when the data stops coming for a while", async () => {

@@ -345,7 +345,7 @@ share() {
 wait_file() {
   local role="$1" name="$2" ip silent=0
   ip="$(mesh_ip "$role")"
-  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3400}))
+  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-4000}))
   while ((SECONDS < deadline)); do
     if curl -sf -m 5 "http://$ip:$SHARE_PORT/$name"; then
       log "got $name from $role"
@@ -376,7 +376,7 @@ wait_all() {
     fi
   done
   local -A silent=()
-  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-3400}))
+  local deadline=$((SECONDS + ${MESH_FILE_WAIT_SECONDS:-4000}))
   while ((${#pending[@]} > 0 && SECONDS < deadline)); do
     local still=()
     for role in "${pending[@]}"; do

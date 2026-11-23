@@ -304,8 +304,27 @@ export interface PipelineStatus {
   frames: number;
   /** The frame rate ffmpeg last reported (its average since it started); null while no ffmpeg runs. */
   fps: number | null;
+  /** The codec of the source's video: what ffmpeg found, or until then what the source's tables say. */
   videoCodec: string | null;
+  /** What the full output does with the video: H.264 is copied, anything else is re-encoded. */
   mode: "copy" | "transcode";
+  /**
+   * What the source's program tables say it carries now, as `program 1 [256:h264 257:0x0f]` (per
+   * stream its PID and codec or stream type); null until they came, and for a source that has none.
+   */
+  layout: string | null;
+  /**
+   * When the source players get last changed its layout mid-stream (its video moved to another
+   * PID or codec, or the like); null if it never did, and for a source that was started in
+   * another one's place. A new ffmpeg run takes over right at the change, so `state` is `starting`
+   * and `lastFrameAt` stands still for a few seconds after it; a run that reads on over a move to
+   * other PIDs waits for a picture to go on from, for less. A change that leaves the streams
+   * ffmpeg reads where they are doesn't count.
+   * Only a change after a run that showed video counts here (for a run that reads on over moves:
+   * video since its last one): changes over a stream that has no video move nothing, so they
+   * can't keep it from being taken for stalled. A transcoder older than this field doesn't send it.
+   */
+  layoutChangedAt?: string | null;
   exitCode: number | null;
   error: string | null;
   /** Source waiting to take over (make-before-break handover), if any. */

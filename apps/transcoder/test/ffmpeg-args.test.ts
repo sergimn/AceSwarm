@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { buildFfmpegArgs, decodesKeyFramesOnly, type FfmpegPlan } from "../src/ffmpeg-args.ts";
 
 const PLAN: FfmpegPlan = {
-  source: "http://172.31.250.130:6878/ace/r/abc",
   directory: "/hls/s1/3",
   fullMode: "copy",
   previewMode: "video",
@@ -35,10 +34,10 @@ function formats(args: string[]): string[] {
 }
 
 describe("buildFfmpegArgs", () => {
-  it("reads the source once and writes full, preview and thumbnail outputs", () => {
+  it("reads the source once, from its standard input, and writes full, preview and thumbnail outputs", () => {
     const args = buildFfmpegArgs(PLAN);
     expect(args.filter((arg) => arg === "-i")).toHaveLength(1);
-    expect(valueAfter(args, "-i")).toBe(PLAN.source);
+    expect(valueAfter(args, "-i")).toBe("pipe:0");
     expect(args).toContain("/hls/s1/3/full/index.m3u8");
     expect(args).toContain("/hls/s1/3/preview/index.m3u8");
     expect(args.at(-1)).toBe("/hls/s1/3/thumbnail.jpg");
@@ -67,8 +66,13 @@ describe("buildFfmpegArgs", () => {
     expect(args).not.toContain("-skip_frame");
   });
 
-  it("waits for slow engines before giving up on the input", () => {
-    expect(valueAfter(buildFfmpegArgs(PLAN), "-rw_timeout")).toBe("60000000");
+  it("leaves the input timeout to the source's reader: ffmpeg's own does not apply to a pipe", () => {
+    expect(buildFfmpegArgs(PLAN)).not.toContain("-rw_timeout");
+  });
+
+  it("looks at one second of a stream it takes over in the middle, and five of one it opens", () => {
+    expect(valueAfter(buildFfmpegArgs(PLAN), "-analyzeduration")).toBe("5000000");
+    expect(valueAfter(buildFfmpegArgs({ ...PLAN, midStream: true }), "-analyzeduration")).toBe("1000000");
   });
 
   it("copies H.264 and transcodes everything else", () => {
@@ -134,6 +138,17 @@ describe("buildFfmpegArgs", () => {
     expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes" })).toBe(true);
     expect(decodesKeyFramesOnly({ ...PLAN, previewMode: "keyframes", allFrames: true })).toBe(false);
     expect(decodesKeyFramesOnly(PLAN)).toBe(false);
+  });
+
+  it("decodes every frame in keyframes mode for a full stream that is re-encoded, which key frames alone make a slideshow of", () => {
+    const args = buildFfmpegArgs({ ...PLAN, fullMode: "transcode", previewMode: "keyframes" });
+    expect(args).not.toContain("-skip_frame");
+    expect(args).toContain("libx264");
+    // Every frame is decoded, so the preview thins them out as in video mode.
+    expect(args).toEqual(buildFfmpegArgs({ ...PLAN, fullMode: "transcode", previewMode: "video" }));
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "transcode", previewMode: "keyframes" })).toBe(false);
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "transcode", previewMode: "thumbnails" })).toBe(false);
+    expect(decodesKeyFramesOnly({ ...PLAN, fullMode: "copy", previewMode: "thumbnails" })).toBe(true);
   });
 
   it("writes the first thumbnail with the first frame and one every interval, from one encoder thread", () => {
