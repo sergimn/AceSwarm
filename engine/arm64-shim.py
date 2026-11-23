@@ -6,7 +6,7 @@
 # 1. The engine asks its Android bridge (app_bridge.py, in the engine's folder) for the free space of
 #    its cache folder through getAvailableBlocks, getBlockSize and getBlockCount, which the image's
 #    bridge does not answer. This file answers those three calls from the file system, and passes
-#    every other call on to the bridge (install_disk_calls).
+#    every other call on to the bridge (install_disk_calls). This is done in the disk mode only.
 #
 # 2. The engine picks its stream cache type from the machine's memory when it starts, and the option
 #    --live-cache-type disk does not change that pick: on a machine the size of a Raspberry Pi it
@@ -125,9 +125,11 @@ def option_value(argv, name):
 def main():
     # Imports and file names resolve as when the engine runs from its own folder.
     sys.path[0] = ENGINE_DIR
-    install_disk_calls()
     argv = sys.argv[1:]
     if option_value(argv, '--live-cache-type') == 'disk':
+        # Only the disk mode changes anything here: in the memory mode the engine runs as it did
+        # without this file, with the bridge answering its calls as before.
+        install_disk_calls()
         # Before the engine starts: the pick of its cache type happens when it starts.
         show_capped_meminfo(DISK_MODE_RAM_KB)
         sys.stderr.write('arm64-shim: showing the engine %d MB of memory for its cache type\n'

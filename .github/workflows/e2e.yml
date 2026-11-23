@@ -1,8 +1,8 @@
 # End-to-end tests across five GitHub-hosted runners, with real Acestream engines (no mocks):
 #
 #   wg            a throwaway WireGuard server; generates one client profile per stack runner
-#   source        six dummy live broadcasts from real Acestream engines, plus the tracker players
-#                 use: bc1-bc3 for one stack runner, bc4-bc6 for the other
+#   source        eight dummy live broadcasts from real Acestream engines, plus the tracker players
+#                 use: bc1-bc3 for one stack runner, bc4-bc6 for the other, bc7-bc8 for the arm64 one
 #   stack         AceSwarm on Docker with real engines, and the Playwright tests
 #   stack-podman  the same on rootless Podman, set up like a host that runs `docker compose up` on
 #                 Podman (e2e/podman.sh)
@@ -159,7 +159,7 @@ jobs:
       - name: Start the broadcasts
         timeout-minutes: 10
         run: |
-          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 7
+          e2e/broadcast.sh start "$(e2e/mesh.sh ip source)" 8
           e2e/broadcast.sh wait > "$RUNNER_TEMP/broadcasts.json"
           e2e/mesh.sh share "$RUNNER_TEMP/broadcasts.json"
       - name: Serve until the tests are done
@@ -182,7 +182,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
-      # Each stack runner tests on its own: once both have joined the mesh, one failing must not
+      # Each stack runner tests on its own: once all stacks have joined the mesh, one failing must not
       # cancel the other. A failure up to the join cancels the whole run on purpose.
       fail-fast: false
       matrix:
@@ -207,10 +207,10 @@ jobs:
             arch: arm64
             label: " (arm64)"
             os: ubuntu-24.04-arm
-            broadcasts: bc7
+            broadcasts: bc7,bc8
     env:
       MESH_ROLE: ${{ matrix.role }}
-      # Its own broadcasts: the tests tell the paths apart by who announced to the tracker, and both
+      # Its own broadcasts: the tests tell the paths apart by who announced to the tracker, and all
       # stack runners' VPN traffic leaves from the WireGuard server's runner.
       E2E_BROADCASTS: ${{ matrix.broadcasts }}
     steps:
