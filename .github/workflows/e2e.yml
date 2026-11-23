@@ -245,10 +245,10 @@ jobs:
           # Only this step reads the other runners' artifacts.
           GH_TOKEN: ${{ github.token }}
       - name: Cancel the run if this runner couldn't join the mesh
-        # The other stack could still run without this one (wg and source take the stacks as
+        # The other stacks could still run without this one (wg and source take the stacks as
         # optional peers), but a run with a stack missing can't validate a change, so cancel it
         # for a fast red result instead. Only a failure up to here cancels: after the mesh is up,
-        # a stack job's failure must not cancel the other's tests.
+        # a stack job's failure must not cancel the others' tests.
         if: failure()
         timeout-minutes: 2
         run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"

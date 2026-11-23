@@ -359,12 +359,12 @@ flowchart TD
 
 ## Tests
 
-| Kind         | Where                            | What                                                                                                      |
-| ------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Unit         | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers                         |
-| End to end   | `e2e/`                           | Playwright on three CI runners: real engines, real dummy broadcasts and a real WireGuard server, no mocks |
-| Real streams | by hand                          | the full stack with real engines and real streams, on Docker and Podman                                   |
-| Real ffmpeg  | `apps/transcoder/test`           | the image's ffmpeg on streams with gaps, in a CI job of its own (skipped without `FFMPEG_BIN`)            |
+| Kind         | Where                            | What                                                                                                     |
+| ------------ | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Unit         | `apps/*/test`, `packages/*/test` | Vitest: parsing, health, recovery, path selection, routing, playlists, UI helpers                        |
+| End to end   | `e2e/`                           | Playwright on five CI runners: real engines, real dummy broadcasts and a real WireGuard server, no mocks |
+| Real streams | by hand                          | the full stack with real engines and real streams, on Docker and Podman                                  |
+| Real ffmpeg  | `apps/transcoder/test`           | the image's ffmpeg on streams with gaps, in a CI job of its own (skipped without `FFMPEG_BIN`)           |
 
 The end-to-end tests make failures for real instead of faking them:
 
