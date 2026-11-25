@@ -36,6 +36,8 @@ export interface StreamFailoverHost {
   /** Engine sharing is on. */
   sharing: () => boolean;
   playing: () => PlayingStream;
+  /** The state the stream shows. */
+  state: () => StreamState;
   /** The stream waits for its broadcast, which sends nothing new (see `StreamSupervisor`). */
   sourceStale: () => boolean;
   setState: (state: StreamState, message: string | null) => void;
@@ -94,6 +96,7 @@ export class StreamFailover {
       known,
       current,
       candidates: paths.standbyCandidates(current),
+      favourite: this.favourite(current),
       usable: (path) => paths.allowed(path) && paths.exists(path),
       up: (path) => !paths.isDown(path),
       // While the broadcast sends nothing new, standbys would only load the same old window: they
@@ -155,6 +158,38 @@ export class StreamFailover {
   }
 
   /**
+   * Moves the stream to the favourite path once its standby there is stable (see
+   * `StreamStandbys.takeStable`), make-before-break like a failover. This is no recovery, and it
+   * does not wait for `PATH_MIN_DWELL_SECONDS`: the stream may play fine where it is, so it keeps
+   * the state it shows while it moves. A move that fails leaves it where it was, and the standby has
+   * to be stable again, after a wait. Returns true when it tried.
+   */
+  async moveToFavourite(): Promise<boolean> {
+    const { engine, path } = this.host.playing();
+    const favourite = this.favourite(path);
+    if (engine === undefined || favourite === undefined || !this.host.enabled()) {
+      return false;
+    }
+    const standby = this.engines.standbys.takeStable(favourite);
+    if (standby === undefined) {
+      return false;
+    }
+    this.host.logger.info({ from: path, to: favourite }, "the favourite path is stable; moving the stream to it");
+    try {
+      await this.handOver(engine, standby, this.host.state(), "moving to the favourite path");
+    } catch (error) {
+      this.host.logger.warn({ err: error, path: favourite }, "could not move the stream to the favourite path");
+    }
+    return true;
+  }
+
+  /** The favourite path while a stream on `current` is to move there: it is another path it may use, and up. */
+  private favourite(current: string | null): string | undefined {
+    const favourite = this.paths.favourite();
+    return favourite === current ? undefined : favourite;
+  }
+
+  /**
    * A standby for a path move: a hot one on any path the stream may use, or else the one on
    * `target`, hot or not. Undefined when hot standby is off or there is none.
    */
@@ -172,8 +207,17 @@ export class StreamFailover {
    * a short handover; one still warming up gets the usual one.
    */
   async moveTo(engine: EngineHandle, standby: TakenStandby, reason: string): Promise<void> {
+    await this.handOver(engine, standby, this.host.sourceStale() ? "stale-source" : "switching", reason);
+  }
+
+  /** Hands the stream over to a standby, showing `state` and why meanwhile. */
+  private async handOver(
+    engine: EngineHandle,
+    standby: TakenStandby,
+    state: StreamState,
+    reason: string,
+  ): Promise<void> {
     const { path, session } = this.host.playing();
-    const state = this.host.sourceStale() ? "stale-source" : "switching";
     this.host.setState(state, `${reason}; moving from ${path ?? "none"} to ${standby.path}`);
     const { handoverTimeoutMs, tickMs } = this.host.settings;
     const timeoutMs = standby.hot ? Math.min(handoverTimeoutMs, HOT_HANDOVER_TIMEOUT_MS) : handoverTimeoutMs;

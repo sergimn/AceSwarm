@@ -10,6 +10,8 @@ export interface StreamPathsDeps {
   pathAllowed?: ((path: string) => boolean) | undefined;
   /** Number of running streams per path. */
   pathLoad: () => ReadonlyMap<string, number>;
+  /** The favourite path from the settings, or null for none. */
+  favouritePath?: (() => string | null) | undefined;
   strategy: PathStrategyName;
   logger: Logger;
 }
@@ -77,13 +79,24 @@ export class StreamPaths {
   }
 
   /**
+   * The favourite path, while the stream may move to it: the gateway has it, the policy allows it
+   * and it is up. Undefined otherwise, and with no favourite.
+   */
+  favourite(): string | undefined {
+    const favourite = this.deps.favouritePath?.() ?? null;
+    return this.usable().find((path) => path.up && path.id === favourite)?.id;
+  }
+
+  /**
    * The paths a stream on `current` keeps standbys on: the other ones it may use that are up, best
-   * first (the gateway's probes and the stream's own history on each, as for a path switch).
+   * first (the gateway's probes and the stream's own history on each, as for a path switch). The
+   * favourite path comes before the others, whatever its score: the stream is to move there.
    */
   standbyCandidates(current: string | null): string[] {
+    const favourite = this.favourite();
     return this.usable()
       .filter((path) => path.up && path.id !== current)
-      .map((path) => ({ id: path.id, score: pathScore(path, this.memory) }))
+      .map((path) => ({ id: path.id, score: path.id === favourite ? Infinity : pathScore(path, this.memory) }))
       .toSorted((a, b) => b.score - a.score)
       .map(({ id }) => id);
   }
@@ -115,6 +128,7 @@ export class StreamPaths {
       memory: this.memory,
       load: this.deps.pathLoad(),
       remembered,
+      favourite: this.favourite(),
     });
     if (preferred === undefined || failures < 2 || failures % 2 !== 0) {
       return preferred;

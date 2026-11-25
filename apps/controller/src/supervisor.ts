@@ -66,13 +66,7 @@ export class StreamSupervisor {
     this.engines = new StreamEngines(stream.id, deps);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
     this.record = new StreamRecord(stream, { ...deps, logger: this.logger, gateway: this.engines.gateway });
-    this.paths = new StreamPaths({
-      paths: deps.paths,
-      pathAllowed: deps.pathAllowed,
-      pathLoad: deps.pathLoad,
-      strategy: deps.settings.pathStrategy,
-      logger: this.logger,
-    });
+    this.paths = new StreamPaths({ ...deps, strategy: deps.settings.pathStrategy, logger: this.logger });
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? sleep;
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
@@ -94,6 +88,7 @@ export class StreamSupervisor {
       enabled: () => deps.hotStandby?.() === true,
       sharing: () => this.sharing,
       playing: () => this.playing(),
+      state: () => this.state,
       sourceStale: () => this.sourceWait.waiting,
       setState: this.setState,
       steps: this.steps,
@@ -228,7 +223,7 @@ export class StreamSupervisor {
       await this.leaveDisallowedPath(this.engine);
       return;
     }
-    if (await this.moveToWantedEngine(this.engine)) {
+    if ((await this.moveToWantedEngine(this.engine)) || (await this.failover.moveToFavourite())) {
       return;
     }
     await this.check(this.engine);

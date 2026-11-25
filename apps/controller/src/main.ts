@@ -124,6 +124,7 @@ const orchestrator: Orchestrator = new Orchestrator({
   standby: {
     maxPaths: config.STANDBY_MAX_PATHS,
     failoverAfterMs: config.STANDBY_FAILOVER_SECONDS * 1000,
+    favouriteAfterMs: config.FAVOURITE_PATH_STABLE_SECONDS * 1000,
     // A standby gets as long as a starting stream to deliver its first data.
     warmupMs: config.STARTUP_GRACE_SECONDS * 1000,
     hotWithinMs: 10_000,

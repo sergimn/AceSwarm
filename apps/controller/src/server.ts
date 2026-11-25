@@ -10,7 +10,7 @@ import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
-import { NetworkPolicyError, type Orchestrator } from "./orchestrator.ts";
+import { NetworkPolicyError, UnknownPathError, type Orchestrator } from "./orchestrator.ts";
 import { DuplicateStreamError, type NewStream } from "./stream-store.ts";
 import { describeDevice } from "./viewers.ts";
 import { InvalidProfileError } from "./wireguard-store.ts";
@@ -44,7 +44,13 @@ const profileSchema = z.object({
 
 const networkSchema = z.object({ wireguardOnly: z.boolean() }).strict();
 
-const settingsSchema = z.object({ sharedEngines: z.boolean().optional(), hotStandby: z.boolean().optional() }).strict();
+const settingsSchema = z
+  .object({
+    sharedEngines: z.boolean().optional(),
+    hotStandby: z.boolean().optional(),
+    favouritePath: z.string().min(1).max(64).nullable().optional(),
+  })
+  .strict();
 
 const streamIdSchema = z.string().regex(/^[a-z0-9]{6,32}$/);
 const viewerSchema = z.object({ stream: streamIdSchema.nullable() }).strict();
@@ -220,7 +226,7 @@ export async function registerRoutes(
   app.patch("/api/settings", async (request, reply) => {
     const parsed = settingsSchema.safeParse(request.body);
     if (!parsed.success) {
-      return badRequest(reply, "expected { sharedEngines?, hotStandby? }");
+      return badRequest(reply, "expected { sharedEngines?, hotStandby?, favouritePath? }");
     }
     const patch: Partial<Settings> = {};
     if (parsed.data.sharedEngines !== undefined) {
@@ -229,7 +235,20 @@ export async function registerRoutes(
     if (parsed.data.hotStandby !== undefined) {
       patch.hotStandby = parsed.data.hotStandby;
     }
-    return Object.keys(patch).length === 0 ? orchestrator.getSettings() : orchestrator.updateSettings(patch);
+    if (parsed.data.favouritePath !== undefined) {
+      patch.favouritePath = parsed.data.favouritePath;
+    }
+    if (Object.keys(patch).length === 0) {
+      return orchestrator.getSettings();
+    }
+    try {
+      return await orchestrator.updateSettings(patch);
+    } catch (error) {
+      if (error instanceof UnknownPathError) {
+        return badRequest(reply, error.message);
+      }
+      throw error;
+    }
   });
 
   // Players report the stream they show full screen about once a minute, and `null` once they

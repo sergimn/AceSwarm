@@ -9,6 +9,7 @@ import {
   openApp,
   openNetwork,
   resetStack,
+  snapshot,
   streamById,
   waitForPlaying,
 } from "./helpers.ts";
@@ -182,6 +183,34 @@ test("streams wait instead of going direct while no WireGuard path is up", async
     await openApp(page);
     await expect(page.locator("#summary")).toContainText("0/1 network paths up", { timeout: 60_000 });
     await expectOutage();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toBeHidden();
+
+    // No stream can move to either path now, so Settings shows both in grey as the favourite path's
+    // choices. One can be chosen all the same, and "None" takes it back.
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    const favourite = settings.getByRole("group", { name: "Favourite path" });
+    const none = favourite.getByRole("button", { name: "None", exact: true });
+    const down = favourite.getByRole("button", { name: `${PROFILE} (down)`, exact: true });
+    const off = favourite.getByRole("button", { name: "Direct (off)", exact: true });
+    await expect(none).toHaveAttribute("aria-pressed", "true");
+    await expect(none).not.toHaveClass(/unavailable/);
+    for (const greyed of [down, off]) {
+      await expect(greyed).toHaveClass(/unavailable/);
+      await expect(greyed).toHaveCSS("opacity", "0.5");
+      await expect(greyed).toHaveAttribute("aria-pressed", "false");
+    }
+    await down.click();
+    await expect(down).toHaveAttribute("aria-pressed", "true");
+    await expect(none).toHaveAttribute("aria-pressed", "false");
+    await expect(settings.locator("#favourite-path-hint")).toContainText(`${PROFILE} is down`);
+    expect((await snapshot(request)).favouritePath.path).toBe(VPN_PATH);
+    await none.click();
+    await expect(none).toHaveAttribute("aria-pressed", "true");
+    expect((await snapshot(request)).favouritePath.path).toBeNull();
+    await settings.getByRole("button", { name: "Close" }).click();
+    await expect(settings).toBeHidden();
 
     // The stream stalls once the engine's buffer runs out, and tries to recover where it is. With
     // WireGuard only off, its first recovery would move it to the direct path, which is up and

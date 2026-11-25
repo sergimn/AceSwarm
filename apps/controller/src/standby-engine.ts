@@ -24,6 +24,12 @@ export interface StandbyEngineDeps {
 export type OpenSession = (baseUrl: string) => Promise<EngineSession>;
 
 /**
+ * How old the last data of a stable standby may be when the stream moves to it (see `isStable`).
+ * Less than a hot standby's may be: a standby stays hot for a while after its data stopped.
+ */
+const STABLE_FRESH_MS = 4000;
+
+/**
  * One hot standby of a stream: an engine of the stream's own on another network path, or with
  * engine sharing on, a session on that path's shared engine. `StreamStandbys` decides when it
  * starts, starts again and goes; this does the work.
@@ -39,6 +45,11 @@ export class StandbyEngine {
   openedAt: number | undefined;
   /** When the transcoder's reader last got data from its session. */
   lastDataAt: number | undefined;
+  /**
+   * Since when it is hot without a break, as the checks saw it: it was hot at each of them from
+   * then on (see `StreamStandbys.takeStable`). Undefined while it is not hot.
+   */
+  hotSince: number | undefined;
   /** It received data since its session opened. */
   played = false;
   /** Starting, opening its session or starting again, in the background. */
@@ -83,6 +94,29 @@ export class StandbyEngine {
   isHot(hotWithinMs: number): boolean {
     return (
       this.session !== undefined && this.lastDataAt !== undefined && this.deps.now() - this.lastDataAt <= hotWithinMs
+    );
+  }
+
+  /** Notes, on a check, whether it is hot: `hotSince` goes on while it is, and starts over once it is not. */
+  noteHot(hotWithinMs: number): void {
+    if (this.isHot(hotWithinMs)) {
+      this.hotSince ??= this.deps.now();
+    } else {
+      this.hotSince = undefined;
+    }
+  }
+
+  /**
+   * Whether the stream may move to it for good, as to its favourite path: it was hot at every check
+   * for `favouriteAfterMs`, and its last data is at most `STABLE_FRESH_MS` old.
+   */
+  isStable(settings: { hotWithinMs: number; favouriteAfterMs: number }): boolean {
+    const now = this.deps.now();
+    return (
+      this.isHot(settings.hotWithinMs) &&
+      this.hotSince !== undefined &&
+      now - this.hotSince >= settings.favouriteAfterMs &&
+      now - (this.lastDataAt ?? 0) <= STABLE_FRESH_MS
     );
   }
 
@@ -137,6 +171,7 @@ export class StandbyEngine {
     }
     this.openedAt = this.deps.now();
     this.lastDataAt = undefined;
+    this.hotSince = undefined;
     this.readerNote = undefined;
     this.played = false;
     this.deps.logger.info({ path: this.path, engine: engine.name }, "standby session open; waiting for data");

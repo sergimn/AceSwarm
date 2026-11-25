@@ -39,14 +39,23 @@ export interface InitialPathInput {
   load: ReadonlyMap<string, number>;
   /** Path stored from a previous run; reused when still available (sticky across restarts). */
   remembered: string | null;
+  /** The favourite path, which a stream without a remembered path that is up starts on when it is up. */
+  favourite?: string | undefined;
 }
 
-/** Picks the path for a stream that is starting. */
+/**
+ * Picks the path for a stream that is starting. The remembered path comes before the favourite: an
+ * engine taken over from a previous run plays through it, and would lose its peers on another.
+ */
 export function initialPath(input: InitialPathInput): string | undefined {
   const up = input.paths.filter((path) => path.up);
   const remembered = up.find((path) => path.id === input.remembered);
   if (remembered !== undefined) {
     return remembered.id;
+  }
+  const favourite = up.find((path) => path.id === input.favourite);
+  if (favourite !== undefined) {
+    return favourite.id;
   }
   if (input.strategy === "round-robin") {
     const sorted = up.toSorted((a, b) => (input.load.get(a.id) ?? 0) - (input.load.get(b.id) ?? 0));

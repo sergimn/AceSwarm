@@ -1,8 +1,9 @@
 import type { HotStandbyView, Settings, Snapshot } from "@aceswarm/shared/api-types";
 import { api } from "./api.ts";
 import { dialogShell, errorMessage, h, setText, switchSetting, toast, type SwitchSetting } from "./dom.ts";
-import { sharedEnginesHint } from "./hints.ts";
+import { favouritePathHint, sharedEnginesHint } from "./hints.ts";
 import type { Navigator } from "./navigation.ts";
+import { favouriteOptions, type FavouriteOption } from "./paths.ts";
 import { effectivePreviewMode, THUMBNAILS_ONLY_TIP, type PreviewMode } from "./preview-mode.ts";
 
 const PREVIEW_LABELS: Record<PreviewMode, string> = { video: "Live video", thumbnails: "Thumbnails only" };
@@ -83,10 +84,131 @@ async function saveSetting<K extends keyof Settings>(key: K, value: Settings[K])
   return settings[key];
 }
 
+/** What a snapshot says about the favourite path and the paths to choose from. */
+type FavouriteSnapshot = Pick<
+  Snapshot,
+  "paths" | "wireguardOnly" | "gatewayReachable" | "favouritePath" | "hotStandby"
+>;
+
+/** A choice's button: its label, and in brackets why no stream can move to its path now. */
+function favouriteLabel(option: FavouriteOption): string {
+  return option.unavailable === null ? option.label : `${option.label} (${option.unavailable})`;
+}
+
+/**
+ * The "Favourite path" setting: a choice for no favourite and one for each network path. A path
+ * that is down or off shows in grey, and can be chosen all the same: streams move to it once they
+ * can. The choices follow the snapshot, and a button stays the same element while its path is
+ * listed, so a remote keeps its focus.
+ */
+class FavouritePathSetting {
+  readonly element: HTMLElement;
+  private readonly choices: HTMLElement;
+  private readonly hint: HTMLElement;
+  /** The buttons by their path's id; the choice of no favourite is under "". */
+  private readonly buttons = new Map<string, HTMLButtonElement>();
+  /** The paths' labels, as the buttons show them without what is in brackets. */
+  private readonly labels = new Map<string, string>();
+  private last: FavouriteSnapshot | undefined;
+  private saving = false;
+
+  constructor() {
+    this.hint = h("p", {
+      className: "muted small",
+      text: favouritePathHint(undefined, 0, false).text,
+      attrs: { id: "favourite-path-hint" },
+    });
+    this.choices = h("div", {
+      className: "segments wrap",
+      attrs: { role: "group", "aria-labelledby": "favourite-path-label", "aria-describedby": "favourite-path-hint" },
+    });
+    this.element = h("div", { className: "setting" }, [
+      h("div", { className: "setting-text" }, [
+        h("span", { className: "row-title", text: "Favourite path", attrs: { id: "favourite-path-label" } }),
+        this.hint,
+      ]),
+      this.choices,
+    ]);
+    this.show([{ id: null, label: "None", selected: true, unavailable: null }]);
+  }
+
+  render(snapshot: FavouriteSnapshot): void {
+    this.last = snapshot;
+    if (this.saving) {
+      return;
+    }
+    const options = favouriteOptions(snapshot);
+    this.show(options);
+    const chosen = options.find((option) => option.selected);
+    const hint = favouritePathHint(chosen, snapshot.favouritePath.stableSeconds, snapshot.hotStandby.enabled);
+    setText(this.hint, hint.text);
+    this.hint.classList.toggle("caution", hint.caution);
+  }
+
+  private show(options: readonly FavouriteOption[]): void {
+    const keys = options.map((option) => option.id ?? "");
+    for (const [key, button] of this.buttons) {
+      if (!keys.includes(key)) {
+        // Its path is gone. Focus goes to the first choice rather than nowhere.
+        const focused = document.activeElement === button;
+        button.remove();
+        this.buttons.delete(key);
+        this.labels.delete(key);
+        if (focused) {
+          this.buttons.get("")?.focus();
+        }
+      }
+    }
+    for (const option of options) {
+      const button = this.buttons.get(option.id ?? "") ?? this.add(option.id);
+      this.labels.set(option.id ?? "", option.label);
+      setText(button, favouriteLabel(option));
+      button.setAttribute("aria-pressed", String(option.selected));
+      button.classList.toggle("unavailable", option.unavailable !== null);
+    }
+    // Only when the order changed: moving a button takes its focus away.
+    const shown = [...this.choices.children];
+    const wanted = keys.map((key) => this.buttons.get(key));
+    if (shown.length !== wanted.length || shown.some((button, index) => button !== wanted[index])) {
+      this.choices.replaceChildren(...wanted.filter((button) => button !== undefined));
+    }
+  }
+
+  private add(id: string | null): HTMLButtonElement {
+    const button = h("button", { className: "segment", attrs: { type: "button", "data-path": id ?? "" } });
+    button.addEventListener("click", () => {
+      void this.choose(id, button, this.labels.get(id ?? "") ?? "");
+    });
+    this.buttons.set(id ?? "", button);
+    return button;
+  }
+
+  private async choose(id: string | null, button: HTMLButtonElement, label: string): Promise<void> {
+    if (this.saving || button.getAttribute("aria-pressed") === "true") {
+      return;
+    }
+    this.saving = true;
+    this.choices.setAttribute("aria-busy", "true");
+    try {
+      const saved = await saveSetting("favouritePath", id);
+      toast(saved === null ? "No favourite path now" : `${label} is the favourite path now`);
+      this.saving = false;
+      if (this.last !== undefined) {
+        this.render({ ...this.last, favouritePath: { ...this.last.favouritePath, path: saved } });
+      }
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      this.saving = false;
+      this.choices.removeAttribute("aria-busy");
+    }
+  }
+}
+
 /**
  * The Settings at the bottom of the rail: how the tiles show their previews, which only this
- * browser keeps, and the engine sharing and hot standby settings, which the controller keeps for
- * every screen.
+ * browser keeps, and the engine sharing, hot standby and favourite path settings, which the
+ * controller keeps for every screen.
  */
 export class SettingsDialog {
   private readonly navigator: Navigator;
@@ -96,6 +218,7 @@ export class SettingsDialog {
   private readonly thumbnailsOnlyTip: HTMLElement;
   private readonly sharedEngines: SettingSwitch;
   private readonly hotStandby: SettingSwitch;
+  private readonly favouritePath = new FavouritePathSetting();
   /** This browser's choice. */
   private previewChoice: PreviewMode;
   /** The admin allows thumbnails only, as the last snapshot said. */
@@ -162,6 +285,7 @@ export class SettingsDialog {
       h("div", { className: "setting" }, [previewText, previewChoices]),
       this.sharedEngines.element,
       this.hotStandby.element,
+      this.favouritePath.element,
     );
   }
 
@@ -190,6 +314,7 @@ export class SettingsDialog {
       snapshot.hotStandby.enabled,
       hotStandbyHint(snapshot.hotStandby, snapshot.sharedEngines.enabled),
     );
+    this.favouritePath.render(snapshot);
   }
 
   /** Presses what the tiles show, and greys out Live video while the admin allows thumbnails only. */

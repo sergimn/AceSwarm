@@ -1,5 +1,5 @@
 import type { PathStatus, Snapshot, StreamView } from "@aceswarm/shared/api-types";
-import { formatDisabledCount, shownState } from "./format.ts";
+import { formatDisabledCount, pathLabel, shownState } from "./format.ts";
 
 /**
  * The direct path while WireGuard only is on. The gateway still probes it, and so it can report it
@@ -40,6 +40,60 @@ export function formatSummary(
   ]
     .filter((part) => part !== undefined)
     .join(" · ");
+}
+
+/**
+ * Why no stream can move to a path right now: it is "off" (the direct path with WireGuard only),
+ * "down", or "unknown" (the gateway doesn't answer, or doesn't list the path).
+ */
+export type PathUnavailable = "off" | "down" | "unknown";
+
+/** One choice of the "Favourite path" setting. */
+export interface FavouriteOption {
+  /** The path's id; null for the choice of no favourite. */
+  id: string | null;
+  label: string;
+  selected: boolean;
+  /** Null while streams can move to the path. One that is unavailable shows in grey, and can still be chosen. */
+  unavailable: PathUnavailable | null;
+}
+
+/**
+ * The choices of the "Favourite path" setting: none, then every path of the gateway in its order.
+ * The favourite is always among them, also while the gateway doesn't list it (it never answered
+ * yet, or the path's profile was only just added).
+ */
+export function favouriteOptions(
+  snapshot: Pick<Snapshot, "paths" | "wireguardOnly" | "gatewayReachable" | "favouritePath">,
+): FavouriteOption[] {
+  const favourite = snapshot.favouritePath.path;
+  const unavailable = (path: PathStatus): PathUnavailable | null => {
+    if (isPathOff(path, snapshot.wireguardOnly)) {
+      return "off";
+    }
+    if (!snapshot.gatewayReachable) {
+      return "unknown";
+    }
+    return path.up ? null : "down";
+  };
+  const options: FavouriteOption[] = [
+    { id: null, label: "None", selected: favourite === null, unavailable: null },
+    ...snapshot.paths.map((path) => ({
+      id: path.id,
+      label: path.label,
+      selected: path.id === favourite,
+      unavailable: unavailable(path),
+    })),
+  ];
+  if (favourite !== null && snapshot.paths.every((path) => path.id !== favourite)) {
+    options.push({
+      id: favourite,
+      label: pathLabel(favourite, snapshot.paths),
+      selected: true,
+      unavailable: "unknown",
+    });
+  }
+  return options;
 }
 
 /** What runs through one path right now. */

@@ -9,7 +9,7 @@ import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineManager } from "../src/engines.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 import { NetworkPolicyStore } from "../src/network-policy-store.ts";
-import { NetworkPolicyError, Orchestrator } from "../src/orchestrator.ts";
+import { NetworkPolicyError, Orchestrator, UnknownPathError } from "../src/orchestrator.ts";
 import { SettingsStore } from "../src/settings-store.ts";
 import { SharedEngines } from "../src/shared-engines.ts";
 import { StreamStore } from "../src/stream-store.ts";
@@ -169,5 +169,54 @@ describe("WireGuard only", () => {
     const store = new NetworkPolicyStore(directory);
     expect(await store.load()).toContain("not valid JSON");
     expect(store.get()).toEqual({ wireguardOnly: true });
+  });
+});
+
+describe("the favourite path", () => {
+  it("is the direct path or a profile's, and every screen is told with how long it has to be stable", async () => {
+    const { orchestrator } = await setup();
+    expect(orchestrator.snapshot().favouritePath).toEqual({ path: null, stableSeconds: 20 });
+    await orchestrator.saveProfile("vpn", PROFILE);
+
+    expect(await orchestrator.updateSettings({ favouritePath: "wg:vpn" })).toMatchObject({ favouritePath: "wg:vpn" });
+    expect(orchestrator.snapshot().favouritePath).toEqual({ path: "wg:vpn", stableSeconds: 20 });
+    expect(await orchestrator.updateSettings({ favouritePath: "direct" })).toMatchObject({ favouritePath: "direct" });
+    // The other settings leave it alone.
+    expect(await orchestrator.updateSettings({ hotStandby: false })).toMatchObject({ favouritePath: "direct" });
+    expect(await orchestrator.updateSettings({ favouritePath: null })).toMatchObject({ favouritePath: null });
+  });
+
+  it("can be the direct path while WireGuard only has it off", async () => {
+    const { orchestrator } = await setup();
+    await orchestrator.saveProfile("vpn", PROFILE);
+    await orchestrator.setNetworkPolicy({ wireguardOnly: true });
+    expect(await orchestrator.updateSettings({ favouritePath: "direct" })).toMatchObject({ favouritePath: "direct" });
+  });
+
+  it("can't be a path that no profile has", async () => {
+    const { orchestrator } = await setup();
+    await orchestrator.saveProfile("vpn", PROFILE);
+    await orchestrator.updateSettings({ favouritePath: "wg:vpn" });
+    for (const path of ["wg:other", "vpn", "wg:", "Direct"]) {
+      await expect(orchestrator.updateSettings({ favouritePath: path, hotStandby: false })).rejects.toThrow(
+        UnknownPathError,
+      );
+    }
+    // Nothing of a refused change is saved.
+    expect(orchestrator.getSettings()).toEqual({ sharedEngines: false, hotStandby: true, favouritePath: "wg:vpn" });
+  });
+
+  it("is none once its profile is removed, also when a profile of that name is added later", async () => {
+    const { orchestrator } = await setup();
+    await orchestrator.saveProfile("vpn-a", PROFILE);
+    await orchestrator.saveProfile("vpn-b", PROFILE);
+    await orchestrator.updateSettings({ favouritePath: "wg:vpn-a" });
+
+    expect(await orchestrator.removeProfile("vpn-b")).toBe(true);
+    expect(orchestrator.getSettings().favouritePath).toBe("wg:vpn-a");
+    expect(await orchestrator.removeProfile("vpn-a")).toBe(true);
+    expect(orchestrator.getSettings().favouritePath).toBeNull();
+    await orchestrator.saveProfile("vpn-a", PROFILE);
+    expect(orchestrator.snapshot().favouritePath.path).toBeNull();
   });
 });

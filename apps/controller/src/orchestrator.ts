@@ -8,7 +8,7 @@ import type {
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import { isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
+import { DIRECT_PATH_ID, isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
 import type { AcestreamClient } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { KeptEngine } from "./engine-places.ts";
@@ -33,6 +33,19 @@ export class NetworkPolicyError extends Error {
     super(message);
     this.name = "NetworkPolicyError";
   }
+}
+
+/** A favourite path that is neither the direct path nor a WireGuard profile's. */
+export class UnknownPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnknownPathError";
+  }
+}
+
+/** The id of a WireGuard profile's path, as the gateway names it. */
+function wireguardPath(profile: string): string {
+  return `wg:${profile}`;
 }
 
 export interface OrchestratorDeps {
@@ -200,6 +213,10 @@ export class Orchestrator {
         maxPaths: this.standby.maxPaths,
         failoverSeconds: Math.round(this.standby.failoverAfterMs / 1000),
       },
+      favouritePath: {
+        path: this.deps.settingsStore.get().favouritePath,
+        stableSeconds: Math.round(this.standby.favouriteAfterMs / 1000),
+      },
       tilePreviews: { thumbnailsOnly: this.deps.thumbnailsOnly === true },
       viewerPingSeconds: Math.round(this.deps.viewers.pingMs / 1000),
     };
@@ -212,9 +229,26 @@ export class Orchestrator {
   /**
    * Changes settings. Turning engine sharing on or off takes effect on every stream's next check:
    * each one moves to the kind of engine the setting asks for without losing its picture. Turning
-   * hot standby on or off starts or removes every stream's standbys on its next check.
+   * hot standby on or off starts or removes every stream's standbys on its next check. A favourite
+   * path has to be the direct path or a WireGuard profile's; it may be down, or off: streams move
+   * to it once they may and it is stable (see `StreamFailover.moveToFavourite`).
    */
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
+    const favourite = patch.favouritePath;
+    if (favourite === undefined || favourite === null || favourite === DIRECT_PATH_ID) {
+      return this.saveSettings(patch);
+    }
+    // With the profile changes: a profile removed meanwhile would leave its path the favourite.
+    return this.networkChanges.run(async () => {
+      const profiles = await this.deps.wireguard.list();
+      if (profiles.every((profile) => wireguardPath(profile.name) !== favourite)) {
+        throw new UnknownPathError(`There is no network path "${favourite}".`);
+      }
+      return this.saveSettings(patch);
+    });
+  }
+
+  private async saveSettings(patch: Partial<Settings>): Promise<Settings> {
     const before = this.deps.settingsStore.get();
     const after = await this.deps.settingsStore.update(patch);
     if (after.sharedEngines !== before.sharedEngines) {
@@ -222,6 +256,9 @@ export class Orchestrator {
     }
     if (after.hotStandby !== before.hotStandby) {
       this.logger.info({ hotStandby: after.hotStandby }, "hot standby changed");
+    }
+    if (after.favouritePath !== before.favouritePath) {
+      this.logger.info({ favouritePath: after.favouritePath }, "favourite path changed");
     }
     return after;
   }
@@ -382,6 +419,10 @@ export class Orchestrator {
       }
       const removed = await this.deps.wireguard.remove(name);
       if (removed) {
+        if (this.deps.settingsStore.get().favouritePath === wireguardPath(name)) {
+          // Its path is gone with it: a profile added under the same name later is another VPN.
+          await this.saveSettings({ favouritePath: null });
+        }
         await this.reloadGateway();
       }
       return removed;
@@ -496,6 +537,7 @@ export class Orchestrator {
       shared: this.deps.shared,
       sharedEngines: () => this.deps.settingsStore.get().sharedEngines,
       hotStandby: () => this.deps.settingsStore.get().hotStandby,
+      favouritePath: () => this.deps.settingsStore.get().favouritePath,
       viewers: () => this.deps.viewers.count(stream.id),
     });
     this.supervisors.set(stream.id, supervisor);

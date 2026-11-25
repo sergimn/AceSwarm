@@ -1,10 +1,10 @@
 import { get } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { BulkAddResponse } from "@aceswarm/shared/api-types";
+import type { BulkAddResponse, Settings } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService } from "@aceswarm/shared/service";
 import { expect, onTestFinished, test } from "vitest";
-import type { Orchestrator } from "../src/orchestrator.ts";
+import { UnknownPathError, type Orchestrator } from "../src/orchestrator.ts";
 import { registerRoutes } from "../src/server.ts";
 import { DuplicateStreamError, type NewStream } from "../src/stream-store.ts";
 
@@ -267,4 +267,53 @@ test("a single stream is still read from every text it was read from before list
     [{ aceId: ID_C, aceIdKind: "infohash", name: undefined }],
     [{ aceId: other, aceIdKind: "infohash", name: undefined }],
   ]);
+});
+
+test("settings change one at a time, and a favourite path is a path's id or null for none", async () => {
+  const service = createService({ name: "controller", logger: createLogger("test", "silent") });
+  let settings: Settings = { sharedEngines: false, hotStandby: true, favouritePath: null };
+  const patches: Partial<Settings>[] = [];
+  const orchestrator = {
+    getSettings: () => settings,
+    updateSettings: (patch: Partial<Settings>) => {
+      patches.push(patch);
+      if (patch.favouritePath === "wg:gone") {
+        return Promise.reject(new UnknownPathError('There is no network path "wg:gone".'));
+      }
+      settings = { ...settings, ...patch };
+      return Promise.resolve(settings);
+    },
+  } as unknown as Orchestrator;
+  await registerRoutes(service, orchestrator, { uiDir: "/nonexistent", transcoderUrl: "http://127.0.0.1:9" });
+  onTestFinished(async () => {
+    await service.app.close();
+  });
+  const patch = async (payload: object) => service.app.inject({ method: "PATCH", url: "/api/settings", payload });
+
+  const chosen = await patch({ favouritePath: "wg:vpn" });
+  expect(chosen.statusCode).toBe(200);
+  expect(chosen.json()).toEqual({ sharedEngines: false, hotStandby: true, favouritePath: "wg:vpn" });
+  // Another setting leaves it as it is, and null takes it away.
+  expect((await patch({ sharedEngines: true })).json()).toMatchObject({ favouritePath: "wg:vpn" });
+  expect((await patch({ favouritePath: null })).json()).toMatchObject({ sharedEngines: true, favouritePath: null });
+  expect(patches).toEqual([{ favouritePath: "wg:vpn" }, { sharedEngines: true }, { favouritePath: null }]);
+
+  // Nothing to change changes nothing.
+  expect((await patch({})).json()).toEqual(settings);
+  expect(patches).toHaveLength(3);
+
+  for (const payload of [
+    { favouritePath: "" },
+    { favouritePath: 1 },
+    { favouritePath: "x".repeat(65) },
+    { path: "direct" },
+  ]) {
+    const refused = await patch(payload);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toEqual({ error: "expected { sharedEngines?, hotStandby?, favouritePath? }" });
+  }
+  const unknown = await patch({ favouritePath: "wg:gone" });
+  expect(unknown.statusCode).toBe(400);
+  expect(unknown.json()).toEqual({ error: 'There is no network path "wg:gone".' });
+  expect(settings.favouritePath).toBeNull();
 });

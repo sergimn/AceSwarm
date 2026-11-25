@@ -246,12 +246,15 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
   const sharing = dialog.getByRole("switch", { name: "One engine per path" });
   const standby = dialog.getByRole("switch", { name: "Hot standby on other paths" });
+  const favourite = dialog.getByRole("group", { name: "Favourite path" });
   await expect(dialog).toBeVisible();
   await expect(video).toHaveAttribute("aria-pressed", "true");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "false");
-  // `resetStack` turned both off.
+  // `resetStack` turned both off, and left no favourite path.
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(favourite.getByRole("button", { name: "Direct", exact: true })).toHaveAttribute("aria-pressed", "false");
   const saved: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "PATCH") {
@@ -269,8 +272,12 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await expect(sharing).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(standby).toBeFocused();
+  // The choices for the favourite path are under it.
+  await page.keyboard.press("ArrowDown");
+  await expect(favourite.locator(".segment:focus")).toHaveCount(1);
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toHaveAttribute("aria-pressed", "true");
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();

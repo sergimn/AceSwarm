@@ -516,9 +516,25 @@ a {
   gap: 6px;
 }
 
+/* More choices than fit in a row, such as one for each network path. */
+.segments.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
 .segment[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* A choice that does nothing for now, such as a network path that is down. It can still be chosen. */
+.segment.unavailable {
+  opacity: 0.5;
+}
+
+.segments[aria-busy="true"] .segment {
+  cursor: progress;
 }
 
 /* A choice the admin doesn't allow. It stays focusable, so remotes can reach it and show its tip. */
