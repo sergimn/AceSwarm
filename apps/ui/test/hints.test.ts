@@ -54,7 +54,21 @@ describe("favouritePathHint", () => {
     const unknown = favouritePathHint({ ...vpn, unavailable: "unknown" }, 20, true);
     expect(unknown.caution).toBe(true);
     expect(unknown.text).toContain("gateway doesn't report vpn");
-    // Why the path can't be used comes before hot standby being off.
-    expect(favouritePathHint({ ...vpn, unavailable: "down" }, 20, false).text).toContain("vpn is down");
+  });
+
+  it("doesn't promise a move to a path that comes back while hot standby is off", () => {
+    const off = "Hot standby is off, so none moves to it by itself.";
+    expect(favouritePathHint({ ...vpn, unavailable: "down" }, 20, false)).toEqual({
+      text: `vpn is down: streams stay where they are. ${off}`,
+      caution: true,
+    });
+    expect(favouritePathHint({ ...vpn, unavailable: "unknown" }, 20, false)).toEqual({
+      text: `The network gateway doesn't report vpn: streams stay where they are. ${off}`,
+      caution: true,
+    });
+    expect(favouritePathHint({ id: "direct", label: "Direct", unavailable: "off" }, 20, false)).toEqual({
+      text: `Direct is off while WireGuard only is on: streams stay where they are. ${off}`,
+      caution: true,
+    });
   });
 });

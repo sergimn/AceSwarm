@@ -320,7 +320,8 @@ export class StreamStandbys {
 
   /**
    * The favourite path has no standby and would get one now (see `startMissing`). Not while it waits
-   * for its next try, or was given up: the others' standbys would go for nothing.
+   * for its next try, was given up, or no start slot is free: the others' standbys would go for
+   * nothing, or long before the favourite's can start.
    */
   private favouriteMissing(context: StandbyContext): boolean {
     const { favourite } = context;
@@ -328,7 +329,8 @@ export class StreamStandbys {
       favourite !== undefined &&
       !this.standbys.has(favourite) &&
       favourite !== context.sparePath &&
-      this.deps.now() >= (this.pathRetries.get(favourite)?.retryAt ?? 0)
+      this.deps.now() >= (this.pathRetries.get(favourite)?.retryAt ?? 0) &&
+      this.deps.startSlots?.available !== false
     );
   }
 

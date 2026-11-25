@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Registry } from "@prometheus-io/client";
 import { createLogger } from "@aceswarm/shared/logger";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AcestreamClient } from "../src/acestream.ts";
 import type { NetgwClient, TranscoderClient } from "../src/clients.ts";
 import type { EngineManager } from "../src/engines.ts";
@@ -218,5 +218,20 @@ describe("the favourite path", () => {
     expect(orchestrator.getSettings().favouritePath).toBeNull();
     await orchestrator.saveProfile("vpn-a", PROFILE);
     expect(orchestrator.snapshot().favouritePath.path).toBeNull();
+  });
+
+  it("still has the gateway drop a removed profile's tunnel when the settings can't be saved", async () => {
+    const { orchestrator, gateway } = await setup();
+    await orchestrator.saveProfile("vpn", PROFILE);
+    await orchestrator.updateSettings({ favouritePath: "wg:vpn" });
+    const reloads = gateway.reloads;
+    const update = vi.spyOn(SettingsStore.prototype, "update").mockRejectedValueOnce(new Error("disk full"));
+    onTestFinished(() => {
+      update.mockRestore();
+    });
+
+    await expect(orchestrator.removeProfile("vpn")).rejects.toThrow("disk full");
+    expect(await orchestrator.listProfiles()).toEqual([]);
+    expect(gateway.reloads).toBe(reloads + 1);
   });
 });

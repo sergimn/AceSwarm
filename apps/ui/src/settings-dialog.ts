@@ -166,12 +166,15 @@ class FavouritePathSetting {
       button.setAttribute("aria-pressed", String(option.selected));
       button.classList.toggle("unavailable", option.unavailable !== null);
     }
-    // Only when the order changed: moving a button takes its focus away.
+    // Only when the order changed: moving a button takes its focus away, so it gets it back.
     const shown = [...this.choices.children];
-    const wanted = keys.map((key) => this.buttons.get(key));
-    if (shown.length !== wanted.length || shown.some((button, index) => button !== wanted[index])) {
-      this.choices.replaceChildren(...wanted.filter((button) => button !== undefined));
+    const wanted = keys.map((key) => this.buttons.get(key)).filter((button) => button !== undefined);
+    if (shown.length === wanted.length && shown.every((button, index) => button === wanted[index])) {
+      return;
     }
+    const focused = wanted.find((button) => button === document.activeElement);
+    this.choices.replaceChildren(...wanted);
+    focused?.focus();
   }
 
   private add(id: string | null): HTMLButtonElement {

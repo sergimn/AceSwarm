@@ -8,7 +8,7 @@ import type {
 } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import { DIRECT_PATH_ID, isPathAllowed, type NetworkPolicy } from "@aceswarm/shared/network-policy";
+import { DIRECT_PATH_ID, isPathAllowed, wireguardPathId, type NetworkPolicy } from "@aceswarm/shared/network-policy";
 import type { AcestreamClient } from "./acestream.ts";
 import type { NetgwClient, TranscoderClient } from "./clients.ts";
 import type { KeptEngine } from "./engine-places.ts";
@@ -41,11 +41,6 @@ export class UnknownPathError extends Error {
     super(message);
     this.name = "UnknownPathError";
   }
-}
-
-/** The id of a WireGuard profile's path, as the gateway names it. */
-function wireguardPath(profile: string): string {
-  return `wg:${profile}`;
 }
 
 export interface OrchestratorDeps {
@@ -241,7 +236,7 @@ export class Orchestrator {
     // With the profile changes: a profile removed meanwhile would leave its path the favourite.
     return this.networkChanges.run(async () => {
       const profiles = await this.deps.wireguard.list();
-      if (profiles.every((profile) => wireguardPath(profile.name) !== favourite)) {
+      if (profiles.every((profile) => wireguardPathId(profile.name) !== favourite)) {
         throw new UnknownPathError(`There is no network path "${favourite}".`);
       }
       return this.saveSettings(patch);
@@ -419,11 +414,15 @@ export class Orchestrator {
       }
       const removed = await this.deps.wireguard.remove(name);
       if (removed) {
-        if (this.deps.settingsStore.get().favouritePath === wireguardPath(name)) {
-          // Its path is gone with it: a profile added under the same name later is another VPN.
-          await this.saveSettings({ favouritePath: null });
+        try {
+          if (this.deps.settingsStore.get().favouritePath === wireguardPathId(name)) {
+            // Its path is gone with it: a profile added under the same name later is another VPN.
+            await this.saveSettings({ favouritePath: null });
+          }
+        } finally {
+          // Also when the settings could not be saved: the gateway still runs the profile's tunnel.
+          await this.reloadGateway();
         }
-        await this.reloadGateway();
       }
       return removed;
     });

@@ -519,7 +519,6 @@ a {
 /* More choices than fit in a row, such as one for each network path. */
 .segments.wrap {
   flex-wrap: wrap;
-  justify-content: flex-end;
   max-width: 100%;
 }
 

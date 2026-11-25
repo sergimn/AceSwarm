@@ -39,14 +39,15 @@ export function favouritePathHint(
     return { text: "None: a stream stays on its path until that fails.", caution: false };
   }
   const { label, unavailable } = chosen;
-  if (unavailable === "off") {
-    return { text: `${label} is off while WireGuard only is on: streams stay where they are.`, caution: true };
-  }
-  if (unavailable === "down") {
-    return { text: `${label} is down: streams stay where they are, and move to it once it is back.`, caution: true };
-  }
-  if (unavailable === "unknown") {
-    const text = `The network gateway doesn't report ${label}: streams stay where they are until it does.`;
+  if (unavailable !== null) {
+    // With hot standby off, no stream moves once the path is there again either.
+    const texts = {
+      off: [`${label} is off while WireGuard only is on: streams stay where they are`, ""],
+      down: [`${label} is down: streams stay where they are`, ", and move to it once it is back"],
+      unknown: [`The network gateway doesn't report ${label}: streams stay where they are`, " until it does"],
+    } as const;
+    const [stays, until] = texts[unavailable];
+    const text = hotStandby ? `${stays}${until}.` : `${stays}. Hot standby is off, so none moves to it by itself.`;
     return { text, caution: true };
   }
   if (!hotStandby) {

@@ -207,6 +207,8 @@ test("moves to the favourite path once its standby there is stable, without a re
   page,
   request,
 }) => {
+  // Two moves, each after a standby got hot and stayed so for 20 s, then a third standby to get hot.
+  test.setTimeout(900_000);
   const before = await waitForSteadyPlaying(request, run.streamId);
   expect(before.path).toBe(VPN_PATH);
   const standbyEngine = before.standbys[0]?.engine?.name;
@@ -231,9 +233,8 @@ test("moves to the favourite path once its standby there is stable, without a re
   await expect(none).toHaveAttribute("aria-pressed", "false");
   expect((await snapshot(request)).favouritePath).toEqual({ path: "direct", stableSeconds: 20 });
   const states = await statesUntilOn(request, "direct");
-  // It played, so it is no recovery, and it never showed as moving or recovering.
-  expect(states.has("switching")).toBe(false);
-  expect(states.has("recovering")).toBe(false);
+  // It played all along, so it is no recovery, and it never showed anything but playing.
+  expect([...states]).toEqual(["playing"]);
   const onDirect = await stream(request);
   expect(onDirect.engine?.name).toBe(standbyEngine);
   expect(onDirect.recoveries).toBe(before.recoveries);
