@@ -58,6 +58,10 @@ export class Player {
   /** Hands the stream to an external player; in its place while it is handed over, `resumeButton`. */
   private readonly externalButton: HTMLButtonElement;
   private readonly resumeButton: HTMLButtonElement;
+  /**
+   * Copies the stream's address. It is there before the stream is handed over too: a browser that
+   * can't hand it over may not come back from trying.
+   */
   private readonly copyButton: HTMLButtonElement;
   /** Whether the page hears nothing from the controller: the overlay then stays up to say so. */
   private stale = false;
@@ -149,10 +153,7 @@ export class Player {
     this.resumeButton.addEventListener("click", () => {
       this.watchHere();
     });
-    this.copyButton = h("button", { className: "button", attrs: { type: "button", hidden: true } }, [
-      icon("copy"),
-      "Copy link",
-    ]);
+    this.copyButton = h("button", { className: "button", attrs: { type: "button" } }, [icon("copy"), "Copy link"]);
     this.copyButton.addEventListener("click", () => {
       this.copyLink();
     });
@@ -260,8 +261,8 @@ export class Player {
 
   /**
    * Says why the page shows no picture, while it shows none, and offers the buttons that fit. A
-   * disabled stream says so first: it has nothing to hand over. A stream that plays in an external
-   * player says that, whatever its state, which the stats window gives.
+   * disabled stream says so first: it has nothing to hand over, and no address to copy. A stream
+   * that plays in an external player says that, whatever its state, which the stats window gives.
    */
   private showNoPicture(): void {
     this.root.classList.toggle("waiting-for-source", this.staleSource !== undefined);
@@ -278,7 +279,7 @@ export class Player {
     const focused = document.activeElement;
     this.externalButton.hidden = this.disabled || handedOver;
     this.resumeButton.hidden = !handedOver;
-    this.copyButton.hidden = !handedOver;
+    this.copyButton.hidden = this.disabled;
     // A button that just went (the stream was disabled under it) can't keep the focus.
     if (focused instanceof HTMLButtonElement && focused.hidden && this.actions.contains(focused)) {
       this.backButton.focus();
@@ -290,7 +291,8 @@ export class Player {
       return { title: "This stream is disabled", reason: "Enable it to watch it." };
     }
     if (this.handOff !== undefined) {
-      return handOffMessage(this.handOff, document.fullscreenElement !== null);
+      // Compared with the player, not with null: a browser without full screen has `undefined` there.
+      return handOffMessage(this.handOff, document.fullscreenElement === this.root);
     }
     if (this.staleSource !== undefined) {
       return { title: "Waiting for the live broadcast", reason: this.staleSource };
@@ -460,8 +462,13 @@ export class Player {
   private onKey(event: KeyboardEvent): boolean {
     const hidden = !this.root.classList.contains("show-overlay");
     this.showOverlay();
+    const enter = event.key === "Enter";
+    // A held key repeats, and each repeat of Enter (OK on a remote) would press the button with the
+    // focus again. The button that hands the stream over gives its place and the focus to the one
+    // that takes it back, so holding it would hand over, take back, hand over... One press, one go.
+    const held = enter && event.repeat;
     // While the overlay is hidden, the first key only reveals it (so Enter cannot restart by accident).
-    return hidden && (event.key === "Enter" || event.key.startsWith("Arrow"));
+    return held || (hidden && (enter || event.key.startsWith("Arrow")));
   }
 
   private showOverlay(): void {
@@ -484,7 +491,7 @@ export class Player {
     if (stream?.enabled !== true) {
       return;
     }
-    const handOff = handOffFor(stream.name, absoluteUrl(stream.hls.full, location.href), navigator.userAgent);
+    const handOff = handOffFor(stream.name, externalAddress(stream), navigator.userAgent);
     openExternally(handOff, this.root);
     this.handOff = handOff;
     this.showHandOff(stream, this.resumeButton);
@@ -508,16 +515,19 @@ export class Player {
     button.focus();
   }
 
-  /** Copies the address of the stream that was handed over, for a player that didn't get it. */
+  /** Copies the stream's address, for a player that the browser can't hand the stream to. */
   private copyLink(): void {
-    if (this.handOff === undefined) {
+    const stream = this.stream;
+    if (stream?.enabled !== true) {
       return;
     }
-    void copyText(this.handOff.url, this.root).then((copied) => {
+    const address = externalAddress(stream);
+    void copyText(address, this.root).then((copied) => {
       if (copied) {
         toast("Link copied");
       } else {
-        toast("This browser doesn't let the page copy. The address is on the screen.", "error");
+        // The address itself, to type it by hand: the player only shows it once it handed over.
+        toast(`This browser doesn't let the page copy. The address is ${address}`, "error");
       }
     });
   }
@@ -538,6 +548,11 @@ export class Player {
         toast(errorMessage(error), "error");
       });
   }
+}
+
+/** The address an external player gets for a stream: its full-quality playlist, with this server's origin. */
+function externalAddress(stream: StreamView): string {
+  return absoluteUrl(stream.hls.full, location.href);
 }
 
 /** Sets a length in pixels on an element's style, leaving it alone when it already has it. */

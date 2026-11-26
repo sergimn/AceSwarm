@@ -166,8 +166,8 @@ The player tells Ace Swarm which stream it shows full screen, right away and the
 - **On Android** (phones, tablets and TVs) the browser asks the system to open the stream, and Android offers the installed players that take it.
 - **Elsewhere** the browser downloads a small `.m3u` file named after the stream. Open it from the browser's downloads. A browser in full screen doesn't show them, so the player names the file and says where it is; leave full screen to get to it.
 - **The page stops its own video at once**, so that only one player decodes the stream and plays its sound. **Watch here again** plays it in the page again.
-- **Copy link** copies the stream's address, for a browser that can't hand the stream over: open the address in the player as a network stream. The player shows the address too.
-- **For now, an external player is on its own.** It doesn't count under [Who is watching](#who-is-watching). It also ends where the page's player waits: when the stream brings no new video for a while (10 to 16 seconds for mpv and other players built on ffmpeg; VLC waits longer), when the stream waits for its broadcast, and when Ace Swarm itself restarts. In VLC, turn **Loop** on and it opens the stream again by itself.
+- **Copy link**, next to it, copies the stream's address, for a browser that can't hand the stream over: open the address in the player as a network stream. Once the stream is handed over, the player shows the address too.
+- **For now, an external player is on its own.** It doesn't count under [Who is watching](#who-is-watching). It also ends where the page's player waits: when the stream brings no new video for a while (from about 10 seconds for mpv and other players built on ffmpeg, depending on their version; VLC waits longer), when the stream waits for its broadcast, and when Ace Swarm itself restarts. In VLC, turn **Loop** on and it opens the stream again by itself.
 
 ## Hot standby
 

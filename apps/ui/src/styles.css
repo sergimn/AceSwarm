@@ -972,6 +972,11 @@ p.form-error {
   .player-stats {
     font-size: 1.125em;
   }
+
+  /* The longest reason, a stream handed to an external player, takes several lines there. */
+  .player-waiting-reason {
+    font-size: 0.875em;
+  }
 }
 
 .player-stats dl {
@@ -1068,8 +1073,10 @@ p.form-error {
   gap: 8px;
 }
 
+/* A toast can hold an address, which has no place to break. */
 .toast {
   max-width: 28em;
+  overflow-wrap: anywhere;
   padding: 10px 16px;
   border-radius: 8px;
   background: var(--surface-2);

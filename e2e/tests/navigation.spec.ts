@@ -198,10 +198,46 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   await expect.poll(viewers).toBe(1);
   await expect.poll(videoSource).not.toBeNull();
 
-  // The controls fade after a few seconds, and the first key would then only show them: moving
-  // the mouse shows them too.
+  // Copy link is there from the start, for a browser that can't hand the stream over, and the page
+  // plays on. A home network serves the app over plain HTTP, where browsers have no clipboard API
+  // (here they have one, at 127.0.0.1): without it, the page copies the old way.
+  const copy = player.getByRole("button", { name: "Copy link" });
+  const toast = player.locator(".toast");
+  await page.evaluate(`(() => {
+    window.clipboardApi = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  })()`);
+  // The controls fade after a few seconds, and a click doesn't reach them then: moving the mouse
+  // shows them.
   await player.hover();
-  const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+  await copy.click();
+  await expect(toast).toHaveText("Link copied");
+  expect(await page.evaluate<string>("window.clipboardApi.readText()")).toBe(address);
+  await expect(copy).toBeFocused();
+  expect(await videoSource()).not.toBeNull();
+  // With the clipboard API again, and something else in the clipboard, for the copy further down.
+  await page.evaluate(`(async () => {
+    delete navigator.clipboard;
+    await navigator.clipboard.writeText("something else");
+  })()`);
+
+  // OK held down on the remote repeats the key. Only the first press counts: the button gives its
+  // place and the focus to the one that takes the stream back, which a repeat would press.
+  let downloads = 0;
+  page.on("download", () => {
+    downloads += 1;
+  });
+  await open.focus();
+  await player.hover();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    (async () => {
+      await page.keyboard.down("Enter");
+      await page.keyboard.down("Enter");
+      await page.keyboard.down("Enter");
+      await page.keyboard.up("Enter");
+    })(),
+  ]);
   // A desktop browser downloads a playlist file with the stream in it, at an address that plays.
   expect(download.suggestedFilename()).toBe("Channel 12.m3u");
   expect(await readFile(await download.path(), "utf8")).toBe(`#EXTM3U\n#EXTINF:-1,Channel 12\n${address}\n`);
@@ -224,11 +260,14 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   await expect(open).toBeHidden();
   const resume = player.getByRole("button", { name: "Watch here again" });
   await expect(resume).toBeFocused();
+  expect(downloads).toBe(1);
 
-  // For a player that didn't get the stream: its address, copied.
+  // Copy link stays, for a player that didn't get the stream. The first toast is gone by now, or
+  // goes within its five seconds.
+  await expect(toast).toHaveCount(0);
   await player.hover();
-  await player.getByRole("button", { name: "Copy link" }).click();
-  await expect(player.locator(".toast")).toHaveText("Link copied");
+  await copy.click();
+  await expect(toast).toHaveText("Link copied");
   expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe(address);
 
   // And back: the page plays the stream again, and counts as its viewer.
@@ -243,6 +282,7 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   await page.keyboard.press("Escape");
   await expect(player).toBeHidden();
   await expect.poll(viewers).toBe(0);
+  expect(downloads).toBe(1);
 });
 
 test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {
@@ -532,4 +572,56 @@ test("serves previews and thumbnails for the grid", async ({ request }) => {
   await expect
     .poll(async () => (await request.get(first.hls.thumbnail)).headers()["content-type"], { timeout: 15_000 })
     .toContain("image/jpeg");
+});
+
+test("ends the hand-over when the stream is disabled, and plays it in the page once it is enabled", async ({
+  page,
+  request,
+}) => {
+  await openApp(page);
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 13");
+  expect(stream).toBeDefined();
+  const enabled = async (value: boolean): Promise<void> => {
+    const response = await request.patch(`/api/streams/${stream!.id}`, { data: { enabled: value } });
+    expect(response.ok(), await response.text()).toBe(true);
+  };
+  const videoSource = (): Promise<string | null> =>
+    page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
+
+  await page.locator(".tile", { hasText: "Channel 13" }).click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  const open = player.getByRole("button", { name: "Open in external player" });
+  const resume = player.getByRole("button", { name: "Watch here again" });
+  const copy = player.getByRole("button", { name: "Copy link" });
+  const message = player.locator(".player-waiting");
+  await player.hover();
+  await Promise.all([page.waitForEvent("download"), open.click()]);
+  await expect(message).toContainText("Sent to an external player");
+  await expect(resume).toBeFocused();
+  // Long enough for the controls to fade: the focus must not get lost behind them either.
+  await page.waitForTimeout(5000);
+
+  try {
+    // Disabled under the external player, which lost its playlist: the page says so, the buttons for
+    // a stream that has an output go, and the focus moves from the one that went to Back.
+    await enabled(false);
+    await expect(message).toContainText("This stream is disabled");
+    await expect(player.getByRole("button", { name: "Enable stream" })).toBeVisible();
+    await expect(open).toBeHidden();
+    await expect(resume).toBeHidden();
+    await expect(copy).toBeHidden();
+    await expect(player.getByRole("button", { name: "Back" })).toBeFocused();
+    expect(await videoSource()).toBeNull();
+  } finally {
+    await enabled(true);
+  }
+  // Enabled again, the page plays it by itself: the hand-over ended with the stream.
+  await expect(message).not.toContainText("This stream is disabled");
+  await expect(message).not.toContainText("Sent to an external player");
+  await expect(open).toBeVisible();
+  await expect(copy).toBeVisible();
+  await expect(resume).toBeHidden();
+  await expect.poll(videoSource).not.toBeNull();
+  await waitForPlaying(request, stream!.id);
 });
