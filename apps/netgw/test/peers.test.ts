@@ -236,6 +236,124 @@ describe("PeerTracker", () => {
   });
 });
 
+/** A flow from one of the engine's ports to a peer, with the bytes the engine sent and received on it. */
+function flow(remote: string, port: number, sent: number, received: number): string {
+  return `udp      17 29 src=${ENGINE} dst=${remote} sport=${String(port)} dport=8621 packets=10 bytes=${String(sent)} src=${remote} dst=198.51.100.2 sport=8621 dport=${String(port)} packets=12 bytes=${String(received)} mark=0 use=1`;
+}
+
+/** A tracker on a clock the test moves, and its one engine's peers. */
+function trafficSetup(ignoredPorts: number[] = []) {
+  const clock = { now: 0 };
+  const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", ignoredPorts, () => clock.now);
+  const sample = (seconds: number, lines: string[]): void => {
+    clock.now = seconds * 1000;
+    tracker.update(parseConntrack(lines.join("\n")));
+  };
+  const peers = () => tracker.traffic().find(({ ip }) => ip === ENGINE)?.peers;
+  return { tracker, sample, peers };
+}
+
+describe("PeerTracker.traffic", () => {
+  it("adds up what the engine exchanged with each peer that answered, over all its flows, and how fast since the previous sample", () => {
+    const { tracker, sample, peers } = trafficSetup();
+    sample(0, [
+      flow("1.1.1.1", 1000, 1000, 50_000),
+      flow("1.1.1.1", 1001, 200, 10_000),
+      // Never answered: no peer, however much the engine sent it.
+      flow("8.8.8.8", 1002, 300, 0),
+      flow("5.5.5.5", 1003, 100, 400),
+    ]);
+    // A flow seen for the first time counts with all it moved so far, but that says nothing of how
+    // fast it moves now: after a gateway restart, every flow is new.
+    expect(tracker.traffic()).toEqual([
+      {
+        ip: ENGINE,
+        peers: [
+          {
+            ip: "1.1.1.1",
+            country: "AU",
+            downBytes: 60_000,
+            upBytes: 1200,
+            downBytesPerSecond: 0,
+            upBytesPerSecond: 0,
+          },
+          { ip: "5.5.5.5", country: null, downBytes: 400, upBytes: 100, downBytesPerSecond: 0, upBytesPerSecond: 0 },
+        ],
+        updatedAt: "1970-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    sample(5, [
+      // 100 000 bytes more from the peer and 2000 more to it, in 5 seconds.
+      flow("1.1.1.1", 1000, 3000, 150_000),
+      flow("1.1.1.1", 1001, 200, 10_000),
+      // A new flow of the same peer: in its totals, not in its speeds.
+      flow("1.1.1.1", 1004, 50, 5000),
+      // It answered: everything the engine sent it counts from here on.
+      flow("8.8.8.8", 1002, 600, 500),
+      flow("5.5.5.5", 1003, 100, 400),
+    ]);
+    // Most traffic first.
+    expect(peers()).toEqual([
+      {
+        ip: "1.1.1.1",
+        country: "AU",
+        downBytes: 165_000,
+        upBytes: 3250,
+        downBytesPerSecond: 20_000,
+        upBytesPerSecond: 400,
+      },
+      { ip: "8.8.8.8", country: "US", downBytes: 500, upBytes: 600, downBytesPerSecond: 100, upBytesPerSecond: 60 },
+      { ip: "5.5.5.5", country: null, downBytes: 400, upBytes: 100, downBytesPerSecond: 0, upBytesPerSecond: 0 },
+    ]);
+    expect(tracker.traffic()[0]?.updatedAt).toBe("1970-01-01T00:00:05.000Z");
+  });
+
+  it("keeps a peer's totals for as long as it has a flow in the table, and starts over once it had none", () => {
+    const { sample, peers } = trafficSetup();
+    const other = flow("9.9.9.9", 2000, 100, 100);
+    sample(0, [flow("1.1.1.1", 1000, 1000, 50_000), other]);
+    expect(peers()?.[0]).toMatchObject({ ip: "1.1.1.1", downBytes: 50_000, upBytes: 1000 });
+
+    // Its flow went and another one came: the peer's totals go on.
+    sample(5, [flow("1.1.1.1", 1001, 100, 2000), other]);
+    expect(peers()?.[0]).toMatchObject({ ip: "1.1.1.1", downBytes: 52_000, upBytes: 1100 });
+
+    // Lower counters between the same two ports are a new connection: what it moved is added, all
+    // of it since the previous sample.
+    sample(10, [flow("1.1.1.1", 1001, 50, 500), other]);
+    expect(peers()?.[0]).toEqual({
+      ip: "1.1.1.1",
+      country: "AU",
+      downBytes: 52_500,
+      upBytes: 1150,
+      downBytesPerSecond: 100,
+      upBytesPerSecond: 10,
+    });
+
+    // No flow of the peer is left: it is gone, and comes back from nothing.
+    sample(15, [other]);
+    expect(peers()?.map(({ ip }) => ip)).toEqual(["9.9.9.9"]);
+    sample(20, [flow("1.1.1.1", 1002, 70, 900), other]);
+    expect(peers()?.find(({ ip }) => ip === "1.1.1.1")).toMatchObject({ downBytes: 900, upBytes: 70 });
+  });
+
+  it("has no peers without conntrack accounting, and none that the peer counts leave out", () => {
+    const unaccounted = trafficSetup();
+    unaccounted.sample(0, [flow("1.1.1.1", 1000, 1000, 50_000).replaceAll(/ packets=\d+ bytes=\d+/g, "")]);
+    expect(unaccounted.tracker.traffic()).toEqual([{ ip: ENGINE, peers: [], updatedAt: "1970-01-01T00:00:00.000Z" }]);
+
+    // A private remote, an ignored port and a source that is no engine.
+    const { tracker, sample } = trafficSetup([53]);
+    sample(0, [
+      flow("192.168.1.10", 1000, 1000, 50_000),
+      udp("1.1.1.1", 50_000, 53),
+      flow("8.8.8.8", 1001, 1000, 50_000).replace(`src=${ENGINE}`, "src=172.31.1.5"),
+    ]);
+    expect(tracker.traffic()).toEqual([]);
+  });
+});
+
 describe("StaticGeoLookup", () => {
   it("answers fixed entries first and falls back to the database", () => {
     const entries = StaticGeoLookup.parse(["198.51.100.10=es", "bad", "203.0.113.10 = SE", "1.2.3.4=USA"]);

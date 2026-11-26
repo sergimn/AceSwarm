@@ -1519,6 +1519,160 @@
       "options": {}
     },
     {
+      "type": "bargauge",
+      "title": "Traffic with each peer in range",
+      "id": 56,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The data our engines exchanged with each peer in the dashboard's range (aceswarm_engine_peer_bytes_total), by the peer's address and country, with a bar for each direction: down (green) is what the peer sent us, up (blue) what we sent it. The 50 largest, each summed over every engine the peer was a peer of. From the gateway's connection table, so headers and acknowledgements count too, and only the engines' traffic with the internet: a peer on the engines' own network, such as a hot standby, is not there. With streams chosen above: the peers of those streams' own engines (the one each plays from, its standbys and the engines kept after a failed move), and of the shared engine of every path they use, which are the peers of all its streams. Prometheus counts a peer from the second time it sees it, so the first seconds with a new peer are left out, and a peer it saw only once has no bar.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 123
+      },
+      "targets": [
+        {
+          "expr": "topk(50, sum by (peer, country, direction) (increase(aceswarm_engine_peer_bytes_total{stream=~\"$stream\",role!=\"shared\"}[$__range]) or increase(aceswarm_engine_peer_bytes_total{role=\"shared\"}[$__range]) * on (path) group_left () max by (path) (max_over_time(aceswarm_stream_path{stream=~\"$stream\"}[$__range]) or max_over_time(aceswarm_stream_standby{stream=~\"$stream\"}[$__range]))) > 0)",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{direction}} {{peer}} {{country}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^up /"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "valueMode": "color",
+        "namePlacement": "left",
+        "showUnfilled": true,
+        "sizing": "manual",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 22,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Speed with each peer",
+      "id": 57,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How fast our engines exchange data with each peer (aceswarm_engine_peer_speed_bytes), by the peer's address and country: the 20 fastest each way at each moment, each summed over the engines it is a peer of. It is what the gateway counted between its last two looks at its connection table (5 seconds by default) at the moment Prometheus collects, so a snapshot and not an average. Above zero: from the peer to us. Below zero: from us to the peer. A peer has no line while nothing moves. From the gateway's connection table, so headers and acknowledgements count too, and only the engines' traffic with the internet: a peer on the engines' own network, such as a hot standby, is not there. With streams chosen above: the peers of those streams' own engines (the one each plays from, its standbys and the engines kept after a failed move), and of the shared engine of every path they use, which are the peers of all its streams.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 123
+      },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (peer, country) (aceswarm_engine_peer_speed_bytes{stream=~\"$stream\",role!=\"shared\",direction=\"down\"} or aceswarm_engine_peer_speed_bytes{role=\"shared\",direction=\"down\"} * on (path) group_left () max by (path) (aceswarm_stream_path{stream=~\"$stream\"} or aceswarm_stream_standby{stream=~\"$stream\"})))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "down {{peer}} {{country}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "topk(20, sum by (peer, country) (aceswarm_engine_peer_speed_bytes{stream=~\"$stream\",role!=\"shared\",direction=\"up\"} or aceswarm_engine_peer_speed_bytes{role=\"shared\",direction=\"up\"} * on (path) group_left () max by (path) (aceswarm_stream_path{stream=~\"$stream\"} or aceswarm_stream_standby{stream=~\"$stream\"})))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "up {{peer}} {{country}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Engines",
       "id": 27,
@@ -1527,7 +1681,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 123
+        "y": 133
       },
       "panels": []
     },
@@ -1544,7 +1698,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 124
+        "y": 134
       },
       "targets": [
         {
@@ -1628,7 +1782,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 124
+        "y": 134
       },
       "targets": [
         {
@@ -1699,7 +1853,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 124
+        "y": 134
       },
       "targets": [
         {
@@ -1758,7 +1912,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 132
+        "y": 142
       },
       "targets": [
         {
@@ -1796,7 +1950,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 132
+        "y": 142
       },
       "targets": [
         {
@@ -1833,7 +1987,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 140
+        "y": 150
       },
       "targets": [
         {
@@ -1918,7 +2072,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 140
+        "y": 150
       },
       "targets": [
         {
@@ -1967,7 +2121,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 148
+        "y": 158
       },
       "targets": [
         {
@@ -2004,7 +2158,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 148
+        "y": 158
       },
       "targets": [
         {
@@ -2138,7 +2292,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 156
+        "y": 166
       },
       "targets": [
         {
@@ -2334,7 +2488,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 164
+        "y": 174
       },
       "panels": []
     },
@@ -2350,7 +2504,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 165
+        "y": 175
       },
       "targets": [
         {
@@ -2405,7 +2559,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 171
+        "y": 181
       },
       "targets": [
         {
@@ -2440,7 +2594,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 171
+        "y": 181
       },
       "targets": [
         {
@@ -2475,7 +2629,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 171
+        "y": 181
       },
       "targets": [
         {
@@ -2512,7 +2666,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 179
+        "y": 189
       },
       "targets": [
         {
@@ -2553,7 +2707,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 179
+        "y": 189
       },
       "targets": [
         {
@@ -2589,7 +2743,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 187
+        "y": 197
       },
       "panels": []
     },
@@ -2605,7 +2759,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 188
+        "y": 198
       },
       "targets": [
         {
@@ -2639,7 +2793,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 198
+        "y": 208
       },
       "targets": [
         {

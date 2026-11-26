@@ -1,5 +1,5 @@
 import { Registry } from "@prometheus-io/client";
-import type { StreamView, ViewerView } from "@aceswarm/shared/api-types";
+import type { PeerTraffic, StreamView, ViewerView } from "@aceswarm/shared/api-types";
 import { expect, test } from "vitest";
 import type { EngineCount, EngineMemory } from "../src/engine-resources.ts";
 import { EnginePlaces } from "../src/engine-places.ts";
@@ -73,6 +73,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
         stream: "s1",
         engine: "e1",
         sharedPath: null,
+        ip: "172.31.250.130",
         usedBytes: 300,
         limitBytes: 512,
         cacheLimitBytes: 128,
@@ -82,6 +83,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
         stream: "",
         engine: "e2",
         sharedPath: "wg:a",
+        ip: "172.31.250.131",
         usedBytes: 900,
         limitBytes: 0,
         cacheLimitBytes: null,
@@ -104,10 +106,11 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
 });
 
 /** A reading of an engine of stream s1. */
-const sample = (engine: string): EngineMemory => ({
+const sample = (engine: string, ip = "172.31.250.130"): EngineMemory => ({
   stream: "s1",
   engine,
   sharedPath: null,
+  ip,
   usedBytes: 300,
   limitBytes: 512,
   cacheLimitBytes: null,
@@ -138,6 +141,74 @@ test("an engine that replaces another keeps its place's labels, and the one that
   expect(scrape).not.toContain("aceswarm-engine-s1-1");
 });
 
+/** The series of the engines' traffic with their peers in a scrape. */
+const peerSeries = (scrape: string): string[] =>
+  scrape.split("\n").filter((line) => line.startsWith("aceswarm_engine_peer_"));
+
+test("exports each engine's traffic with its peers under the engine's place, and only what is above zero", async () => {
+  const registry = new Registry();
+  const stream: StreamView = {
+    ...streamOnSharedEngine("s1"),
+    engine: { name: "e1", shared: false },
+    standbys: [{ path: "wg:a", state: "hot", engine: { name: "e2", shared: false }, reason: null }],
+  };
+  const peer = (ip: string, country: string | null, bytes: [number, number], speed: [number, number]): PeerTraffic => ({
+    ip,
+    country,
+    downBytes: bytes[0],
+    upBytes: bytes[1],
+    downBytesPerSecond: speed[0],
+    upBytesPerSecond: speed[1],
+  });
+  let traffic: Record<string, PeerTraffic[]> = {
+    "172.31.250.130": [peer("1.1.1.1", "AU", [165_000, 3250], [20_000, 0])],
+    "172.31.250.131": [peer("1.1.1.1", "AU", [900, 0], [0, 0])],
+    "172.31.250.132": [peer("5.5.5.5", null, [400, 100], [0, 60])],
+    // An engine the sampler has not seen yet has no place to show its peers under.
+    "172.31.250.133": [peer("9.9.9.9", "CH", [1, 1], [1, 1])],
+  };
+  const places = new EnginePlaces(() => []);
+  new ControllerMetrics(
+    registry,
+    () => ({ streams: [stream], paths: [] }),
+    () => [
+      sample("e1"),
+      sample("e2", "172.31.250.131"),
+      { ...sample("e3", "172.31.250.132"), stream: "", sharedPath: "wg:b" },
+      // No address on the engines network: the gateway knows no peers of it.
+      sample("e4", ""),
+    ],
+    {
+      enginePlaces: (engines, streams) => places.resolve(engines, streams),
+      peerTraffic: (ip) => traffic[ip] ?? [],
+    },
+  );
+  const playing = 'stream="s1",engine="e1",role="playing",path="direct",peer="1.1.1.1",country="AU"';
+  const standby = 'stream="s1",engine="e2",role="standby",path="wg:a",peer="1.1.1.1",country="AU"';
+  const shared = 'stream="",engine="e3",role="shared",path="wg:b",peer="5.5.5.5",country=""';
+  const expected = [
+    `aceswarm_engine_peer_bytes_total{${playing},direction="down"} 165000`,
+    `aceswarm_engine_peer_bytes_total{${playing},direction="up"} 3250`,
+    // The same peer of the stream's standby is another series: its place tells them apart.
+    `aceswarm_engine_peer_bytes_total{${standby},direction="down"} 900`,
+    `aceswarm_engine_peer_bytes_total{${shared},direction="down"} 400`,
+    `aceswarm_engine_peer_bytes_total{${shared},direction="up"} 100`,
+    `aceswarm_engine_peer_speed_bytes{${playing},direction="down"} 20000`,
+    `aceswarm_engine_peer_speed_bytes{${shared},direction="up"} 60`,
+  ];
+  const first = await registry.metrics();
+  expect(peerSeries(first)).toEqual(expected);
+  // The totals are the gateway's, so Prometheus gets them as a counter.
+  expect(first).toContain("# TYPE aceswarm_engine_peer_bytes_total counter");
+  expect(first).toContain("# TYPE aceswarm_engine_peer_speed_bytes gauge");
+  // A scrape shows the totals as they are, not on top of the scrape's before it.
+  expect(peerSeries(await registry.metrics())).toEqual(expected);
+
+  // The peers went, or the gateway stopped answering: their series go at the next scrape.
+  traffic = {};
+  expect(peerSeries(await registry.metrics())).toEqual([]);
+});
+
 test("without a source for the engines' places, their role and path are empty", async () => {
   const registry = new Registry();
   new ControllerMetrics(
@@ -148,6 +219,7 @@ test("without a source for the engines' places, their role and path are empty", 
         stream: "s1",
         engine: "e1",
         sharedPath: null,
+        ip: "",
         usedBytes: 300,
         limitBytes: 512,
         cacheLimitBytes: null,

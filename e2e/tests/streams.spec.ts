@@ -14,7 +14,7 @@ import {
   streamById,
   waitForPlaying,
 } from "./helpers.ts";
-import { broadcasts, type Broadcast } from "./mesh.ts";
+import { broadcasts, MESH, type Broadcast } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -162,6 +162,46 @@ test("exports the engine's place, its memory cache cap and estimated use, and th
     expect(count, `sample ${String(sample)}`).toBe(0);
     expect((await streamById(request, stream!.id))?.uploadKBps, `sample ${String(sample)}`).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+});
+
+test("exports what the engine exchanged with the broadcast runner, by its address, under the engine's place", async ({
+  request,
+}) => {
+  const stream = (await snapshot(request)).streams.find((candidate) => candidate.aceId === bc[0]!.contentId);
+  expect(stream).toBeDefined();
+  // The broadcast runner is the engine's peer, placed in Spain (GEOIP_STATIC in e2e/compose.e2e.yaml).
+  // Its series carry the labels of the engine the stream plays from.
+  const peer = [
+    `stream="${stream!.id}"`,
+    'engine="[^"]+"',
+    'role="playing"',
+    'path="[^"]+"',
+    `peer="${MESH.source.replaceAll(".", String.raw`\.`)}"`,
+    'country="ES"',
+    'direction="down"',
+  ].join(",");
+  const value = async (name: string): Promise<number | undefined> =>
+    metricValue(await (await request.get("/metrics")).text(), name, peer);
+  const attachFlows = async (): Promise<void> => {
+    await test
+      .info()
+      .attach("gateway flows of the engine", { body: engineFlows(stream!.id), contentType: "text/plain" });
+  };
+
+  // What the peer sent the engine so far: the stream plays, so it is megabytes.
+  try {
+    await expect
+      .poll(() => value("aceswarm_engine_peer_bytes_total"), { timeout: 60_000 })
+      .toBeGreaterThan(1024 * 1024);
+    // It goes on: the gateway counts every few seconds, and the controller asks it as often.
+    const before = await value("aceswarm_engine_peer_bytes_total");
+    await expect.poll(() => value("aceswarm_engine_peer_bytes_total"), { timeout: 60_000 }).not.toBe(before);
+    // And how fast, between the gateway's last two samples: there is no value while nothing moves.
+    await expect.poll(() => value("aceswarm_engine_peer_speed_bytes"), { timeout: 60_000 }).toBeGreaterThan(0);
+  } catch (error) {
+    await attachFlows();
+    throw error;
   }
 });
 

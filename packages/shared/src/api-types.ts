@@ -384,6 +384,35 @@ export interface PeerStats {
   updatedAt: string;
 }
 
+/** What one engine exchanged with one of its peers, as the gateway's connection tracking counts it. */
+export interface PeerTraffic {
+  /** The peer's address. */
+  ip: string;
+  /** ISO 3166-1 alpha-2 code, upper case; null when the address is in no country the gateway knows. */
+  country: string | null;
+  /**
+   * Bytes the peer sent the engine since the gateway first saw it with that engine, headers
+   * included. It starts over when the peer comes back after its connections left the table, and
+   * when the gateway restarts.
+   */
+  downBytes: number;
+  /** Bytes the engine sent the peer since then, headers included. */
+  upBytes: number;
+  /** Bytes per second the peer sent the engine between the gateway's last two samples. */
+  downBytesPerSecond: number;
+  /** Bytes per second the engine sent the peer between them. */
+  upBytesPerSecond: number;
+}
+
+/** The peers of one engine that answered it, with their traffic (`GET /peer-traffic`). */
+export interface EnginePeerTraffic {
+  /** The engine's address. */
+  ip: string;
+  /** Most traffic first. None without conntrack accounting. */
+  peers: PeerTraffic[];
+  updatedAt: string;
+}
+
 export interface PathAssignment {
   ip: string;
   path: string;

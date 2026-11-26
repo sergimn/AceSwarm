@@ -183,9 +183,11 @@ The stream's tile and the player's overlay show its standbys and whether they ar
 Grafana has two dashboards, each with a link to the other at the top:
 
 - **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
-- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken, its traffic with each peer and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
 
 Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
+
+Both dashboards show the traffic with each peer, by its address: how much data went each way in the time range, and how fast it goes. The overview adds up every engine a peer is a peer of, for all streams or the ones you choose. A stream's row says which of its engines each peer is a peer of (the one it plays from, a standby, its path's shared engine). The gateway counts this for every peer that answered an engine, so Prometheus stores a series for each address: lower `PROMETHEUS_RETENTION` if they take too much room.
 
 Both dashboards also list every engine that was removed, restarted or that exited: when, why, what it was for and how long it had run. The list comes from the controller's log, so it needs the `logs` profile. The overview counts these by reason and shows how long engines last, which needs only the `metrics` profile.
 
@@ -227,6 +229,7 @@ flowchart LR
   - Like any device on your network, an engine can still reach the host's published ports (the UI and, when enabled, the monitoring ports), which have no login.
   - Blocking engine-to-host traffic with a host firewall rule is a possible follow-up.
 - **No authentication.** Keep the UI on a trusted network. The same goes for the monitoring ports: Prometheus, Loki and Grafana are published on every interface, and Grafana's admin password comes from `GRAFANA_ADMIN_PASSWORD`.
+- **Peer addresses.** The controller's `/metrics` lists the address of every peer its engines exchange data with, and Prometheus keeps them for as long as it keeps everything else (`PROMETHEUS_RETENTION`, 90 days). The UI and its API show countries only.
 
 ## Development
 
