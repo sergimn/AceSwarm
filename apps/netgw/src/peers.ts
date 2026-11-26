@@ -131,8 +131,9 @@ function topCountries(ips: Iterable<string>, geo: GeoLookup, limit: number): Cou
  * connection in the table.
  *
  * A sample whose `conntrack` failed says nothing about the connections. It leaves the totals and
- * what they are counted from as they were, so the next sample goes on from the last good one, and
- * there are no counts and no speeds until then.
+ * what they are counted from as they were, so the next sample goes on from the last good one. Until
+ * then the statistics are those of an engine without a sample (no peer connected, the active and
+ * uploading ones unknown), and the speed with each peer is zero.
  */
 export class PeerTracker {
   private readonly runner: CommandRunner;

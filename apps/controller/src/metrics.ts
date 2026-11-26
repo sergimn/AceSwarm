@@ -438,11 +438,12 @@ export class ControllerMetrics {
     const peerBytes = new Counter({
       name: "aceswarm_engine_peer_bytes_total",
       help:
-        "Bytes each engine exchanged with each of its peers while the engine had this role and path, since the " +
-        "controller first saw the peer with it there, headers included (direction down: from the peer, up: to " +
-        "the peer). Counted at every scrape from the totals of the gateway's connection table. It starts at zero, " +
-        "and again when a peer comes back after its connections ended and when the controller restarts. A peer has " +
-        "a series once it exchanged 16 KiB with the engine. A shared engine's peers are those of all its streams",
+        "Bytes each engine exchanged with each of its peers while the engine had this role and path and the peer " +
+        "this country, since the scrape that first saw them so, headers included (direction down: from the peer, " +
+        "up: to the peer). Counted at every scrape from the totals of the gateway's connection table. It starts at " +
+        "zero, and again when a peer comes back after its connections ended and when the controller restarts. A " +
+        "peer has a series once it exchanged 16 KiB with the engine. A shared engine's peers are those of all its " +
+        "streams",
       labelNames: PEER_LABELS,
       registers,
     });

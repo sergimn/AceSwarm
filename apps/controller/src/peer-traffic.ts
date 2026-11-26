@@ -59,20 +59,24 @@ export interface PeerBytes {
   bytes: number;
 }
 
-/** What an engine exchanged with one peer, one way. */
-interface Counted {
-  /** The gateway's total at the last scrape. */
-  seen: number;
-  /** What moved while the engine had each of its places, by the place's key. */
-  places: Map<string, { role: string; path: string; bytes: number }>;
+/** What moved under one set of the labels that change while a peer is listed. */
+interface Counts {
+  role: string;
+  path: string;
+  country: string;
+  down: number;
+  up: number;
 }
 
-/** An engine whose peers are being counted. */
-interface Followed {
-  /** The key of the place the engine had at the last scrape: what moved since then counts for it. */
-  place: string;
-  /** By the direction and the peer's address. */
-  peers: Map<string, Counted>;
+/** What an engine exchanged with one peer. */
+interface Counted {
+  /** The gateway's totals at the last scrape. */
+  seenDown: number;
+  seenUp: number;
+  /** The key of the labels the peer's series had at the last scrape: what moved since then counts for them. */
+  last: string;
+  /** What moved under each set of labels the peer had with the engine while it was listed, by their key. */
+  series: Map<string, Counts>;
 }
 
 /**
@@ -82,19 +86,22 @@ interface Followed {
  * again. The gateway's total goes on through all of that, so exporting it under the place of the
  * moment would make a series that comes back jump by everything the other series counted meanwhile,
  * and Prometheus would count that twice. A controller restart would do the same to every series.
+ * So would the peer's country, which is a label too: it is unknown until the gateway has its
+ * country database, and a newer database can name another.
  *
- * So this counts by itself, from one scrape to the next: what the gateway's total grew by since the
- * previous scrape is added to the place the engine had then. Every series starts at zero, with the
- * scrape that first sees the peer with the engine in that place, and Prometheus counts what follows.
- * A series whose place the engine left stays where it is for as long as the peer is listed, and
- * goes on from there when the engine comes back to that place.
+ * So this counts by itself, from one scrape to the next: what the gateway's totals grew by since
+ * the previous scrape is added to the labels the peer's series had then. Every series starts at
+ * zero, with the scrape that first sees the peer with the engine in that place and with that
+ * country, and Prometheus counts what follows. A series whose labels no longer hold stays where it
+ * is for as long as the peer is listed, and goes on from there when they hold again.
  *
  * It leaves out what the peers that an engine is first seen with moved until then: the first
- * seconds of a new engine, and after a controller restart everything before it.
+ * seconds of a new engine, and after a controller restart everything before it. An engine that a
+ * scrape leaves out is forgotten, so one that is back at the next scrape starts over the same way.
  */
 export class PeerBytesByPlace {
-  /** By the engine's address, stream and container. */
-  private engines = new Map<string, Followed>();
+  /** Each engine's peers by their address; the engines by their address, stream and container. */
+  private engines = new Map<string, Map<string, Counted>>();
 
   /**
    * One scrape: the counter's values for these engines, which have to be all the engines there are,
@@ -102,7 +109,7 @@ export class PeerBytesByPlace {
    * values, and keeps what is counted for it: it goes on from there with the next answer.
    */
   collect(engines: readonly EnginePeers[]): PeerBytes[] {
-    const followed = new Map<string, Followed>();
+    const followed = new Map<string, Map<string, Counted>>();
     const values: PeerBytes[] = [];
     for (const { ip, labels, peers } of engines) {
       // A new container that got the address of one that went is another engine: its peers start
@@ -115,36 +122,43 @@ export class PeerBytesByPlace {
         }
         continue;
       }
-      const place = JSON.stringify([labels.role, labels.path]);
       const counted = new Map<string, Counted>();
       for (const peer of peers) {
-        const totals = [
-          ["down", peer.downBytes],
-          ["up", peer.upBytes],
-        ] as const;
-        for (const [direction, total] of totals) {
-          const key = `${direction} ${peer.ip}`;
-          const entry: Counted = before?.peers.get(key) ?? { seen: total, places: new Map() };
-          let current = entry.places.get(place);
-          if (current === undefined) {
-            current = { role: labels.role, path: labels.path, bytes: 0 };
-            entry.places.set(place, current);
-          }
-          // A total that is lower than before started over (the peer came back after its
-          // connections left the gateway's table, or the gateway restarted) and counts whole.
-          const grew = total >= entry.seen ? total - entry.seen : total;
-          (entry.places.get(before?.place ?? place) ?? current).bytes += grew;
-          entry.seen = total;
-          counted.set(key, entry);
-          for (const { role, path, bytes } of entry.places.values()) {
-            values.push({
-              labels: { ...labels, role, path, peer: peer.ip, country: peer.country ?? "", direction },
-              bytes,
-            });
-          }
+        const country = peer.country ?? "";
+        const key = JSON.stringify([labels.role, labels.path, country]);
+        const entry: Counted = before?.get(peer.ip) ?? {
+          seenDown: peer.downBytes,
+          seenUp: peer.upBytes,
+          last: key,
+          series: new Map(),
+        };
+        let current = entry.series.get(key);
+        if (current === undefined) {
+          current = { role: labels.role, path: labels.path, country, down: 0, up: 0 };
+          entry.series.set(key, current);
+        }
+        // A total that is lower than before started over: the peer came back after its connections
+        // left the gateway's table, or the gateway restarted, whose table starts empty with its
+        // container. Both totals started over then, also the one that is not lower, and both count
+        // whole.
+        const whole = peer.downBytes < entry.seenDown || peer.upBytes < entry.seenUp;
+        const earlier = entry.series.get(entry.last) ?? current;
+        earlier.down += whole ? peer.downBytes : peer.downBytes - entry.seenDown;
+        earlier.up += whole ? peer.upBytes : peer.upBytes - entry.seenUp;
+        entry.seenDown = peer.downBytes;
+        entry.seenUp = peer.upBytes;
+        entry.last = key;
+        counted.set(peer.ip, entry);
+        for (const { role, path, country: of, down, up } of entry.series.values()) {
+          // In the order of the speeds' labels: a scrape writes them in the order it gets them.
+          const series = { ...labels, role, path, peer: peer.ip, country: of };
+          values.push(
+            { labels: { ...series, direction: "down" }, bytes: down },
+            { labels: { ...series, direction: "up" }, bytes: up },
+          );
         }
       }
-      followed.set(id, { place, peers: counted });
+      followed.set(id, counted);
     }
     this.engines = followed;
     return values;
