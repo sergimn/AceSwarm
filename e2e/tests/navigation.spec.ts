@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import type { Snapshot } from "../../packages/shared/src/api-types.ts";
-import { addStreamList, openApp, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
+import { addStreamList, openApp, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -172,6 +173,76 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
   // With the remote, the tile it is on shows its details.
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
+});
+
+test("hands a stream to an external player, and plays it here again", async ({ page, context, request, baseURL }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openApp(page);
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
+  expect(stream).toBeDefined();
+  const address = new URL(stream!.hls.full, baseURL).href;
+  const viewers = async (): Promise<number | undefined> => (await streamById(request, stream!.id))?.viewers;
+  const videoSource = (): Promise<string | null> =>
+    page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
+
+  await page.locator(".tile", { hasText: "Channel 12" }).focus();
+  await page.keyboard.press("Enter");
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  // With the remote: Back has the focus, and the button comes after Restart.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  const open = player.getByRole("button", { name: "Open in external player" });
+  await expect(open).toBeFocused();
+  await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  await expect.poll(viewers).toBe(1);
+  await expect.poll(videoSource).not.toBeNull();
+
+  // The controls fade after a few seconds, and the first key would then only show them: moving
+  // the mouse shows them too.
+  await player.hover();
+  const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+  // A desktop browser downloads a playlist file with the stream in it, at an address that plays.
+  expect(download.suggestedFilename()).toBe("Channel 12.m3u");
+  expect(await readFile(await download.path(), "utf8")).toBe(`#EXTM3U\n#EXTINF:-1,Channel 12\n${address}\n`);
+  const playlist = await request.get(address);
+  expect(playlist.ok(), await playlist.text()).toBe(true);
+  expect(await playlist.text()).toContain("#EXTINF");
+
+  // The player says what to do, where its picture was, while it is still full screen: the browser
+  // shows nothing of the download there.
+  const message = player.locator(".player-waiting");
+  await expect(message).toContainText("Sent to an external player");
+  await expect(message).toContainText(
+    `Open "Channel 12.m3u" from your browser's downloads to start it. Leave full screen to see them.`,
+  );
+  await expect(message).toContainText(address);
+  expect(await page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  // The page stopped its own video, and nobody watches here.
+  await expect.poll(videoSource).toBeNull();
+  await expect.poll(viewers).toBe(0);
+  await expect(open).toBeHidden();
+  const resume = player.getByRole("button", { name: "Watch here again" });
+  await expect(resume).toBeFocused();
+
+  // For a player that didn't get the stream: its address, copied.
+  await player.hover();
+  await player.getByRole("button", { name: "Copy link" }).click();
+  await expect(player.locator(".toast")).toHaveText("Link copied");
+  expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe(address);
+
+  // And back: the page plays the stream again, and counts as its viewer.
+  await player.hover();
+  await resume.click();
+  await expect(message).toBeHidden();
+  await expect(open).toBeFocused();
+  await expect(resume).toBeHidden();
+  await expect.poll(videoSource).not.toBeNull();
+  await expect.poll(viewers).toBe(1);
+
+  await page.keyboard.press("Escape");
+  await expect(player).toBeHidden();
+  await expect.poll(viewers).toBe(0);
 });
 
 test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {

@@ -192,6 +192,16 @@ The player reports the stream it shows full screen (`POST /api/viewers/<viewer>`
 - **The device** is a rough guess from the User-Agent, such as "Chrome on TV".
 - **Metrics.** `aceswarm_viewer_watching{viewer, device, stream}` and `aceswarm_stream_viewers{stream}` feed the dashboard's "Viewers" row.
 
+### External players
+
+**Open in external player**, in the full screen player, hands out the address of the stream's `full` playlist, made absolute with the page's own origin (`apps/ui/src/external-player.ts`). Nothing changes on the server: an external player fetches the same playlist and segments as the page.
+
+- **Android** (the User-Agent says "Android"): the page follows an intent link, `intent://<host>/<path>#Intent;scheme=<http or https>;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end`. It names no package, so the system offers every installed player that takes HLS.
+- **Elsewhere**: the page downloads an `.m3u` file with one entry, the playlist's address under the stream's name. The file is named after the stream, without the characters file systems refuse.
+- **The page then plays nothing**: it drops its hls.js player and reports `{ "stream": null }`, as a closed player does (see [Viewers](#viewers)), and says what to do next where the picture was. **Watch here again** starts it again. Disabling the stream ends the hand-off: the external player lost its playlist too, and the page plays again once the stream is enabled.
+- **Copy link** uses the clipboard API, which browsers only offer on HTTPS and on localhost, and falls back to `document.execCommand("copy")` on plain HTTP.
+- **External players get no special treatment yet.** They aren't counted as viewers, a playlist that stops growing ends players built on ffmpeg after 10 to 16 seconds, and a failed playlist request (the 404 of [HLS continuity](#hls-continuity), or a restart of the controller or the transcoder) ends them all, where the page's player retries.
+
 ### HLS continuity
 
 Every ffmpeg run writes its segments into a new "generation" directory, which is emptied first. The transcoder serves one playlist per stream that joins the generations with `#EXT-X-DISCONTINUITY` and keeps the media sequence counting up, so players continue across restarts and path moves. The generations come in the order the pipeline publishes them, which is not always the order of their numbers: a source that waited to take over has a lower number than a run the playing source started meanwhile (for a [layout change](#layout-changes), say). Once the playlist went on to another generation, the one before it never adds a segment again. Segments leave the playlist once they are older than `STALE_SOURCE_SECONDS`, so after a long gap the playlist is empty (404) until new video comes, and its sequence goes on from there. Stopping a stream's pipeline (when the stream is disabled or removed) kills its ffmpeg runs before it removes the stream's files, so none of them writes a last segment into a directory that is going. Files that can't be removed get a warning in the log, not an error, and a start of the same stream waits for the stop to end, so a new pipeline never publishes what an old one left.
