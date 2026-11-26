@@ -240,7 +240,7 @@ pipx install pre-commit && pre-commit install
 
 - **End-to-end tests use real engines, no mocks.** They run on three GitHub runners: AceSwarm with real Acestream engines, real broadcasts of dummy streams, and a real WireGuard server. They run on every pull request, and on any branch with "Run workflow" in the E2E workflow. They don't run on one machine. See [e2e/README.md](e2e/README.md), which also has diagrams.
 - **Unit tests use small fakes** (Docker client, iptables, clock) to test logic without Docker.
-- **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions.
+- **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions. npm is the one that comes with Node.js: `packageManager` in package.json names it, and CI fails when a Node.js update brings another npm until the field is set to it in the same pull request.
 
 ## Credits
 

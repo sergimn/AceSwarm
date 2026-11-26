@@ -28,6 +28,17 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      # Nothing installs npm from packageManager: CI and the images run the npm that comes with
+      # Node.js. Keep the field equal to it, so Renovate writes lock files with that npm too.
+      - name: Check that packageManager names the npm that comes with Node.js
+        run: |
+          declared=$(node -p 'require("./package.json").packageManager')
+          shipped="npm@$(npm --version)"
+          if [ "$declared" != "$shipped" ]; then
+            problem="packageManager is $declared, but Node.js $(node --version) comes with $shipped."
+            echo "::error file=package.json::$problem Set \"packageManager\": \"$shipped\" in package.json."
+            exit 1
+          fi
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
