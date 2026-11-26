@@ -152,7 +152,7 @@ function stream(over: Partial<StreamView>): StreamView {
     path: "direct",
     recoveries: 0,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: null,
     standbys: [],
     ...over,

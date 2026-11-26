@@ -614,9 +614,9 @@ export class Player {
   }
 }
 
-/** The address an external player gets for a stream: its full-quality playlist, with this server's origin. */
+/** The address an external player gets for a stream: the playlist kept for such players, with this server's origin. */
 function externalAddress(stream: StreamView): string {
-  return absoluteUrl(stream.hls.full, location.href);
+  return absoluteUrl(stream.hls.external, location.href);
 }
 
 /** Sets a length in pixels on an element's style, leaving it alone when it already has it. */
