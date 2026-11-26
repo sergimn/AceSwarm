@@ -53,7 +53,7 @@ export interface EnginePeers {
   peers: readonly PeerTraffic[] | undefined;
 }
 
-/** A value of the byte counter: what an engine exchanged with one peer, one way, in one of its places. */
+/** A value of the byte counter: what an engine exchanged with one peer, one way, while the two had these labels. */
 export interface PeerBytes {
   labels: EngineLabels & Record<"peer" | "country" | "direction", string>;
   bytes: number;
@@ -140,7 +140,8 @@ export class PeerBytesByPlace {
         // A total that is lower than before started over: the peer came back after its connections
         // left the gateway's table, or the gateway restarted, whose table starts empty with its
         // container. Both totals started over then, also the one that is not lower, and both count
-        // whole.
+        // whole. Totals that started over and are both above the old ones again pass for growth,
+        // which counts too little.
         const whole = peer.downBytes < entry.seenDown || peer.upBytes < entry.seenUp;
         const earlier = entry.series.get(entry.last) ?? current;
         earlier.down += whole ? peer.downBytes : peer.downBytes - entry.seenDown;

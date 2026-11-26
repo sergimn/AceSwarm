@@ -119,7 +119,7 @@ const PEER_LABELS = [...ENGINE_LABELS, "peer", "country", "direction"] as const;
 interface PeerMetrics {
   bytes: Counter<(typeof PEER_LABELS)[number]>;
   speed: Gauge<(typeof PEER_LABELS)[number]>;
-  /** What the byte counter says: the gateway's totals, counted by the engines' places. */
+  /** What the byte counter says: the gateway's totals, counted by the engines' places and the peers' countries. */
   counted: PeerBytesByPlace;
 }
 
