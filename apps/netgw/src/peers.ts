@@ -49,13 +49,11 @@ interface PeerCounters {
 }
 
 /**
- * How much a flow's byte counter grew since the previous sample: all of it for a flow seen for the
- * first time, and for one whose counter is lower than before, which is a new connection between the
- * same two ports.
+ * What an engine and an address must have exchanged in all, both ways, for the address to be listed
+ * as a peer with its traffic: one 16 KiB block. Trackers, DHT nodes and peers that only shook hands
+ * stay under it, and they are most of the addresses an engine talks to.
  */
-function grown(current: number, previous: number | undefined): number {
-  return previous === undefined || current < previous ? current : current - previous;
-}
+export const PEER_MIN_BYTES = DATA_MIN_BYTES;
 
 /** Parses `conntrack -L` output (default format, with or without accounting counters). */
 export function parseConntrack(output: string): Flow[] {
@@ -131,6 +129,10 @@ function topCountries(ips: Iterable<string>, geo: GeoLookup, limit: number): Cou
  * It also adds up what each engine exchanged with each of its peers (`traffic`): every byte the
  * table counts either way, headers and acknowledgements included, for as long as the peer has a
  * connection in the table.
+ *
+ * A sample whose `conntrack` failed says nothing about the connections. It leaves the totals and
+ * what they are counted from as they were, so the next sample goes on from the last good one, and
+ * there are no counts and no speeds until then.
  */
 export class PeerTracker {
   private readonly runner: CommandRunner;
@@ -178,19 +180,21 @@ export class PeerTracker {
   }
 
   /**
-   * The traffic of every engine with each peer that answered it, most traffic first. An address
-   * that never sent the engine a byte is no peer, however often the engine tried it.
+   * The traffic of every engine with each of its peers, most traffic first: the addresses that
+   * answered it and exchanged at least PEER_MIN_BYTES with it. An address that never sent the engine
+   * a byte is no peer, however much the engine sent it.
    */
   traffic(): EnginePeerTraffic[] {
-    return this.stats
-      .values()
-      .map(({ ip, updatedAt }) => ({ ip, peers: this.trafficOf(ip), updatedAt }))
+    const updatedAt = new Date(this.sampledAt ?? this.now()).toISOString();
+    return this.peerTraffic
+      .entries()
+      .map(([ip, peers]) => ({ ip, peers: this.listed(peers), updatedAt }))
       .toArray();
   }
 
-  private trafficOf(engine: string): PeerTraffic[] {
-    return [...(this.peerTraffic.get(engine) ?? [])]
-      .filter(([, peer]) => peer.down > 0)
+  private listed(peers: ReadonlyMap<string, PeerCounters>): PeerTraffic[] {
+    return [...peers]
+      .filter(([, peer]) => peer.down > 0 && peer.down + peer.up >= PEER_MIN_BYTES)
       .map(([ip, peer]) => ({
         ip,
         country: this.geo.country(ip) ?? null,
@@ -204,7 +208,25 @@ export class PeerTracker {
 
   async poll(): Promise<void> {
     const result = await this.runner.run("conntrack", ["-L", "-f", "ipv4"], { allowFailure: true });
+    if (result.code !== 0) {
+      this.unknown();
+      return;
+    }
     this.update(parseConntrack(result.stdout));
+  }
+
+  /**
+   * The table could not be read: nothing is known of the peers now. Taking it for an empty table
+   * would end every peer's total, and the next sample would count every connection whole again.
+   */
+  private unknown(): void {
+    this.stats = new Map();
+    for (const peers of this.peerTraffic.values()) {
+      for (const peer of peers.values()) {
+        peer.downRate = 0;
+        peer.upRate = 0;
+      }
+    }
   }
 
   update(flows: Flow[]): void {
@@ -294,11 +316,18 @@ export class PeerTracker {
       peer = { down: before?.down ?? 0, up: before?.up ?? 0, downRate: 0, upRate: 0 };
       peers.set(flow.remote, peer);
     }
-    const down = grown(receivedBytes, this.previousBytes.get(flow.key));
-    const up = grown(flow.sentBytes ?? 0, this.previousSent.get(flow.key));
+    const sentBytes = flow.sentBytes ?? 0;
+    const receivedBefore = this.previousBytes.get(flow.key);
+    const sentBefore = this.previousSent.get(flow.key) ?? 0;
+    // A flow seen for the first time, or a new connection between the same two ports, which shows
+    // as a counter that is lower than before: both its counters count whole, also the one that is
+    // not lower.
+    const whole = receivedBefore === undefined || receivedBytes < receivedBefore || sentBytes < sentBefore;
+    const down = whole ? receivedBytes : receivedBytes - receivedBefore;
+    const up = whole ? sentBytes : sentBytes - sentBefore;
     peer.down += down;
     peer.up += up;
-    if (seconds <= 0 || !this.previousBytes.has(flow.key)) {
+    if (seconds <= 0 || receivedBefore === undefined) {
       return;
     }
     peer.downRate += down / seconds;

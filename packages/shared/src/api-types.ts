@@ -404,12 +404,17 @@ export interface PeerTraffic {
   upBytesPerSecond: number;
 }
 
-/** The peers of one engine that answered it, with their traffic (`GET /peer-traffic`). */
+/**
+ * The peers of one engine with their traffic (`GET /peer-traffic`): the addresses that answered it
+ * and exchanged at least 16 KiB with it in all. An engine is listed while the gateway's connection
+ * table counts the bytes of a connection of it, so none is without conntrack accounting.
+ */
 export interface EnginePeerTraffic {
   /** The engine's address. */
   ip: string;
-  /** Most traffic first. None without conntrack accounting. */
+  /** Most traffic first. */
   peers: PeerTraffic[];
+  /** When the gateway last read its connection table. */
   updatedAt: string;
 }
 

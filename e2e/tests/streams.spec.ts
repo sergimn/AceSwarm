@@ -189,14 +189,17 @@ test("exports what the engine exchanged with the broadcast runner, by its addres
       .attach("gateway flows of the engine", { body: engineFlows(stream!.id), contentType: "text/plain" });
   };
 
-  // What the peer sent the engine so far: the stream plays, so it is megabytes.
+  // What the peer sent the engine since the controller first saw the two together, which a scrape
+  // does, this one at the latest: the count starts at zero then, and the stream plays, so it is
+  // megabytes within seconds.
   try {
     await expect
       .poll(() => value("aceswarm_engine_peer_bytes_total"), { timeout: 60_000 })
       .toBeGreaterThan(1024 * 1024);
-    // It goes on: the gateway counts every few seconds, and the controller asks it as often.
+    // It goes on, and only up: the gateway counts every few seconds, and the controller asks it as often.
     const before = await value("aceswarm_engine_peer_bytes_total");
-    await expect.poll(() => value("aceswarm_engine_peer_bytes_total"), { timeout: 60_000 }).not.toBe(before);
+    expect(before).toBeDefined();
+    await expect.poll(() => value("aceswarm_engine_peer_bytes_total"), { timeout: 60_000 }).toBeGreaterThan(before!);
     // And how fast, between the gateway's last two samples: there is no value while nothing moves.
     await expect.poll(() => value("aceswarm_engine_peer_speed_bytes"), { timeout: 60_000 }).toBeGreaterThan(0);
   } catch (error) {

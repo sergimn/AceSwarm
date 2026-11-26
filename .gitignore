@@ -8,3 +8,5 @@ apps/controller/public/
 .env
 .DS_Store
 e2e-stack.log
+__pycache__/
+*.pyc

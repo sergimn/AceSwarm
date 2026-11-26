@@ -9,6 +9,7 @@ import { Counter, Gauge, Histogram, type Registry } from "@prometheus-io/client"
 import type { EngineCount, EngineMemory } from "./engine-resources.ts";
 import type { EnginePlace } from "./engine-places.ts";
 import { ENGINE_END_REASONS } from "./engine-runs.ts";
+import { PeerBytesByPlace, type EnginePeers } from "./peer-traffic.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
@@ -26,9 +27,10 @@ export interface MetricSources {
   enginePlaces?: (engines: readonly EngineMemory[], streams: readonly StreamView[]) => EnginePlace[];
   /**
    * What the engine with this address exchanged with each of its peers, as the gateway last
-   * counted it (see `PeerTrafficMonitor`). Without it, there are no peer series.
+   * counted it; undefined while the gateway has no answer (see `PeerTrafficMonitor.of`). Without
+   * it, there are no peer series.
    */
-  peerTraffic?: (engineIp: string) => readonly PeerTraffic[];
+  peerTraffic?: (engineIp: string) => readonly PeerTraffic[] | undefined;
 }
 
 /** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
@@ -117,26 +119,29 @@ const PEER_LABELS = [...ENGINE_LABELS, "peer", "country", "direction"] as const;
 interface PeerMetrics {
   bytes: Counter<(typeof PEER_LABELS)[number]>;
   speed: Gauge<(typeof PEER_LABELS)[number]>;
+  /** What the byte counter says: the gateway's totals, counted by the engines' places. */
+  counted: PeerBytesByPlace;
 }
 
-/** An engine's traffic with its peers. Only what is above zero has a series: most peers are idle. */
-function setPeerTraffic(
-  metrics: PeerMetrics,
-  engine: Record<(typeof ENGINE_LABELS)[number], string>,
-  peers: readonly PeerTraffic[],
-): void {
-  for (const peer of peers) {
-    const labels = { ...engine, peer: peer.ip, country: peer.country ?? "" };
-    const directions = [
-      ["down", peer.downBytes, peer.downBytesPerSecond],
-      ["up", peer.upBytes, peer.upBytesPerSecond],
-    ] as const;
-    for (const [direction, bytes, bytesPerSecond] of directions) {
-      if (bytes > 0) {
-        metrics.bytes.inc({ ...labels, direction }, bytes);
+/**
+ * The engines' traffic with their peers. The bytes are counted from one scrape to the next (see
+ * `PeerBytesByPlace`), so a peer has a value from the first scrape that sees it, zero at first. The
+ * speeds are the gateway's, under the place the engine has now, and only those above zero have a
+ * series: most peers are idle most of the time.
+ */
+function setPeerTraffic(metrics: PeerMetrics, engines: readonly EnginePeers[]): void {
+  const counted = metrics.counted.collect(engines);
+  for (const { labels, bytes } of counted) {
+    metrics.bytes.inc(labels, bytes);
+  }
+  for (const { labels: engine, peers = [] } of engines) {
+    for (const peer of peers) {
+      const labels = { ...engine, peer: peer.ip, country: peer.country ?? "" };
+      if (peer.downBytesPerSecond > 0) {
+        metrics.speed.set({ ...labels, direction: "down" }, peer.downBytesPerSecond);
       }
-      if (bytesPerSecond > 0) {
-        metrics.speed.set({ ...labels, direction }, bytesPerSecond);
+      if (peer.upBytesPerSecond > 0) {
+        metrics.speed.set({ ...labels, direction: "up" }, peer.upBytesPerSecond);
       }
     }
   }
@@ -150,6 +155,7 @@ function setEngineGauges(
   sources: MetricSources,
 ): void {
   const places = sources.enginePlaces?.(engines, streams) ?? [];
+  const traffic: EnginePeers[] = [];
   for (const [index, engine] of engines.entries()) {
     const place = places[index];
     const labels = { stream: engine.stream, engine: engine.engine, role: place?.role ?? "", path: place?.path ?? "" };
@@ -159,10 +165,12 @@ function setEngineGauges(
     if (engine.cacheLimitBytes !== null) {
       gauges.cacheLimit.set(labels, engine.cacheLimitBytes);
     }
-    if (engine.ip !== "") {
-      setPeerTraffic(peers, labels, sources.peerTraffic?.(engine.ip) ?? []);
+    // An engine without an address on the engines network is none the gateway knows peers of.
+    if (engine.ip !== "" && sources.peerTraffic !== undefined) {
+      traffic.push({ ip: engine.ip, labels, peers: sources.peerTraffic(engine.ip) });
     }
   }
+  setPeerTraffic(peers, traffic);
 }
 
 /**
@@ -310,7 +318,7 @@ export class ControllerMetrics {
         }
         setEngineGauges(
           { memory, memoryLimit, cache, cacheLimit },
-          { bytes: peerBytes, speed: peerSpeed },
+          { bytes: peerBytes, speed: peerSpeed, counted: peerBytesByPlace },
           engineMemory(),
           current.streams,
           sources,
@@ -424,15 +432,17 @@ export class ControllerMetrics {
       labelNames: ENGINE_LABELS,
       registers,
     });
-    // A counter that is filled anew at every scrape, like the gauges: the gateway does the counting,
-    // and a peer that left takes its series with it.
+    // A counter that is filled anew at every scrape, like the gauges, so a peer that left takes its
+    // series with it. What it says is counted in `PeerBytesByPlace`, from the gateway's totals.
+    const peerBytesByPlace = new PeerBytesByPlace();
     const peerBytes = new Counter({
       name: "aceswarm_engine_peer_bytes_total",
       help:
-        "Bytes each engine exchanged with each of its peers since the gateway first saw the peer with it, headers " +
-        "included (direction down: from the peer, up: to the peer). From the gateway's connection table, every " +
-        "few seconds. It starts over when a peer comes back after its connections ended, and when the gateway " +
-        "restarts. role and path: what the engine is for. A shared engine's peers are those of all its streams",
+        "Bytes each engine exchanged with each of its peers while the engine had this role and path, since the " +
+        "controller first saw the peer with it there, headers included (direction down: from the peer, up: to " +
+        "the peer). Counted at every scrape from the totals of the gateway's connection table. It starts at zero, " +
+        "and again when a peer comes back after its connections ended and when the controller restarts. A peer has " +
+        "a series once it exchanged 16 KiB with the engine. A shared engine's peers are those of all its streams",
       labelNames: PEER_LABELS,
       registers,
     });

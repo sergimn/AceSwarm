@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/exec.ts";
 import { StaticGeoLookup, type GeoLookup } from "../src/geoip.ts";
-import { DATA_MIN_BYTES, parseConntrack, PeerTracker, REPLY_SHARE } from "../src/peers.ts";
+import { DATA_MIN_BYTES, parseConntrack, PEER_MIN_BYTES, PeerTracker, REPLY_SHARE } from "../src/peers.ts";
 
 const ENGINE = "172.31.250.130";
 
@@ -244,13 +244,23 @@ function flow(remote: string, port: number, sent: number, received: number): str
 /** A tracker on a clock the test moves, and its one engine's peers. */
 function trafficSetup(ignoredPorts: number[] = []) {
   const clock = { now: 0 };
-  const tracker = new PeerTracker(runner, geo, "172.31.250.0/24", ignoredPorts, () => clock.now);
+  /** What `conntrack -L` prints at the next poll, and its exit code. */
+  const table = { stdout: "", code: 0 };
+  const listing: CommandRunner = { run: () => Promise.resolve({ ...table, stderr: "" }) };
+  const tracker = new PeerTracker(listing, geo, "172.31.250.0/24", ignoredPorts, () => clock.now);
   const sample = (seconds: number, lines: string[]): void => {
     clock.now = seconds * 1000;
     tracker.update(parseConntrack(lines.join("\n")));
   };
+  /** A sample as the gateway takes it, through the command; `failed` is one whose command exited with an error. */
+  const poll = async (seconds: number, lines: string[], failed = false): Promise<void> => {
+    clock.now = seconds * 1000;
+    table.stdout = lines.join("\n");
+    table.code = failed ? 1 : 0;
+    await tracker.poll();
+  };
   const peers = () => tracker.traffic().find(({ ip }) => ip === ENGINE)?.peers;
-  return { tracker, sample, peers };
+  return { tracker, sample, poll, peers };
 }
 
 describe("PeerTracker.traffic", () => {
@@ -260,8 +270,8 @@ describe("PeerTracker.traffic", () => {
       flow("1.1.1.1", 1000, 1000, 50_000),
       flow("1.1.1.1", 1001, 200, 10_000),
       // Never answered: no peer, however much the engine sent it.
-      flow("8.8.8.8", 1002, 300, 0),
-      flow("5.5.5.5", 1003, 100, 400),
+      flow("8.8.8.8", 1002, 30_000, 0),
+      flow("5.5.5.5", 1003, 100, 20_000),
     ]);
     // A flow seen for the first time counts with all it moved so far, but that says nothing of how
     // fast it moves now: after a gateway restart, every flow is new.
@@ -277,7 +287,14 @@ describe("PeerTracker.traffic", () => {
             downBytesPerSecond: 0,
             upBytesPerSecond: 0,
           },
-          { ip: "5.5.5.5", country: null, downBytes: 400, upBytes: 100, downBytesPerSecond: 0, upBytesPerSecond: 0 },
+          {
+            ip: "5.5.5.5",
+            country: null,
+            downBytes: 20_000,
+            upBytes: 100,
+            downBytesPerSecond: 0,
+            upBytesPerSecond: 0,
+          },
         ],
         updatedAt: "1970-01-01T00:00:00.000Z",
       },
@@ -290,8 +307,8 @@ describe("PeerTracker.traffic", () => {
       // A new flow of the same peer: in its totals, not in its speeds.
       flow("1.1.1.1", 1004, 50, 5000),
       // It answered: everything the engine sent it counts from here on.
-      flow("8.8.8.8", 1002, 600, 500),
-      flow("5.5.5.5", 1003, 100, 400),
+      flow("8.8.8.8", 1002, 30_600, 500),
+      flow("5.5.5.5", 1003, 100, 20_000),
     ]);
     // Most traffic first.
     expect(peers()).toEqual([
@@ -303,15 +320,43 @@ describe("PeerTracker.traffic", () => {
         downBytesPerSecond: 20_000,
         upBytesPerSecond: 400,
       },
-      { ip: "8.8.8.8", country: "US", downBytes: 500, upBytes: 600, downBytesPerSecond: 100, upBytesPerSecond: 60 },
-      { ip: "5.5.5.5", country: null, downBytes: 400, upBytes: 100, downBytesPerSecond: 0, upBytesPerSecond: 0 },
+      {
+        ip: "8.8.8.8",
+        country: "US",
+        downBytes: 500,
+        upBytes: 30_600,
+        downBytesPerSecond: 100,
+        upBytesPerSecond: 120,
+      },
+      { ip: "5.5.5.5", country: null, downBytes: 20_000, upBytes: 100, downBytesPerSecond: 0, upBytesPerSecond: 0 },
     ]);
     expect(tracker.traffic()[0]?.updatedAt).toBe("1970-01-01T00:00:05.000Z");
   });
 
+  it("lists a peer only once it and the engine exchanged a block, both ways taken together", () => {
+    const { tracker, sample, peers } = trafficSetup();
+    // The short answers of a tracker or a DHT node, and a peer that only shook hands.
+    sample(0, [flow("9.9.9.9", 2000, 300, 400), flow("1.1.1.1", 1000, 6000, PEER_MIN_BYTES - 6001)]);
+    // The engine is listed: the table counts its connections.
+    expect(tracker.traffic()).toEqual([{ ip: ENGINE, peers: [], updatedAt: "1970-01-01T00:00:00.000Z" }]);
+
+    // One byte more, and it is a peer, with all that it moved before.
+    sample(5, [flow("9.9.9.9", 2000, 300, 400), flow("1.1.1.1", 1000, 6000, PEER_MIN_BYTES - 6000)]);
+    expect(peers()).toEqual([
+      {
+        ip: "1.1.1.1",
+        country: "AU",
+        downBytes: PEER_MIN_BYTES - 6000,
+        upBytes: 6000,
+        downBytesPerSecond: 0,
+        upBytesPerSecond: 0,
+      },
+    ]);
+  });
+
   it("keeps a peer's totals for as long as it has a flow in the table, and starts over once it had none", () => {
     const { sample, peers } = trafficSetup();
-    const other = flow("9.9.9.9", 2000, 100, 100);
+    const other = flow("9.9.9.9", 2000, 100, 20_000);
     sample(0, [flow("1.1.1.1", 1000, 1000, 50_000), other]);
     expect(peers()?.[0]).toMatchObject({ ip: "1.1.1.1", downBytes: 50_000, upBytes: 1000 });
 
@@ -331,17 +376,68 @@ describe("PeerTracker.traffic", () => {
       upBytesPerSecond: 10,
     });
 
+    // One lower counter is enough to tell a new connection, and the other one counts whole too:
+    // the engine sent it 60 bytes, not the 10 more than it had sent on the connection before.
+    sample(15, [flow("1.1.1.1", 1001, 60, 300), other]);
+    expect(peers()?.[0]).toMatchObject({ ip: "1.1.1.1", downBytes: 52_800, upBytes: 1210 });
+
     // No flow of the peer is left: it is gone, and comes back from nothing.
-    sample(15, [other]);
+    sample(20, [other]);
     expect(peers()?.map(({ ip }) => ip)).toEqual(["9.9.9.9"]);
-    sample(20, [flow("1.1.1.1", 1002, 70, 900), other]);
-    expect(peers()?.find(({ ip }) => ip === "1.1.1.1")).toMatchObject({ downBytes: 900, upBytes: 70 });
+    sample(25, [flow("1.1.1.1", 1002, 70, 30_000), other]);
+    expect(peers()?.find(({ ip }) => ip === "1.1.1.1")).toMatchObject({ downBytes: 30_000, upBytes: 70 });
   });
 
-  it("has no peers without conntrack accounting, and none that the peer counts leave out", () => {
+  it("keeps the totals through a sample whose conntrack failed, and goes on from the last good one", async () => {
+    const { tracker, poll, peers } = trafficSetup();
+    const table = (sent: number, received: number): string[] => [flow("1.1.1.1", 1000, sent, received)];
+    // With a second connection, which ends before the next sample: its bytes stay in the peer's total.
+    await poll(0, [...table(1000, 50_000), flow("1.1.1.1", 1001, 500, 8000)]);
+    await poll(5, table(2000, 150_000));
+    expect(peers()?.[0]).toMatchObject({ downBytes: 158_000, upBytes: 2500, downBytesPerSecond: 20_000 });
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 1, active: 1 });
+
+    // The command fails, and prints a part of the table or nothing: no counts and no speeds, since
+    // nothing is known of the peers now, but what they moved so far stands.
+    await poll(10, [], true);
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 0, active: null });
+    expect(tracker.traffic()).toEqual([
+      {
+        ip: ENGINE,
+        peers: [
+          {
+            ip: "1.1.1.1",
+            country: "AU",
+            downBytes: 158_000,
+            upBytes: 2500,
+            downBytesPerSecond: 0,
+            upBytesPerSecond: 0,
+          },
+        ],
+        updatedAt: "1970-01-01T00:00:05.000Z",
+      },
+    ]);
+
+    // The next sample counts what the connection moved since the last good one, 10 seconds ago. A
+    // failed sample taken for an empty table would have ended the peer's total, and this one would
+    // start it over with the whole connection: 250 000 bytes, less than the peer sent in all.
+    await poll(15, table(3000, 250_000));
+    expect(peers()?.[0]).toEqual({
+      ip: "1.1.1.1",
+      country: "AU",
+      downBytes: 258_000,
+      upBytes: 3500,
+      downBytesPerSecond: 10_000,
+      upBytesPerSecond: 100,
+    });
+    expect(tracker.get(ENGINE)).toMatchObject({ connected: 1, active: 1 });
+  });
+
+  it("lists no engine without conntrack accounting, and none that the peer counts leave out", () => {
     const unaccounted = trafficSetup();
     unaccounted.sample(0, [flow("1.1.1.1", 1000, 1000, 50_000).replaceAll(/ packets=\d+ bytes=\d+/g, "")]);
-    expect(unaccounted.tracker.traffic()).toEqual([{ ip: ENGINE, peers: [], updatedAt: "1970-01-01T00:00:00.000Z" }]);
+    expect(unaccounted.tracker.get(ENGINE)).toMatchObject({ connected: 1, active: null });
+    expect(unaccounted.tracker.traffic()).toEqual([]);
 
     // A private remote, an ignored port and a source that is no engine.
     const { tracker, sample } = trafficSetup([53]);
