@@ -494,6 +494,9 @@ test("disables a stream, says how long ago it had video, and plays it again once
   await expect(playerStat("last-frame")).toHaveText(/^\d+[sm] ago$/);
   await expect(player.locator(".player-stat:visible")).toHaveCount(2);
   await expect(player.getByRole("button", { name: "Enable stream" })).toBeVisible();
+  // It has no output to hand to an external player, and no address to copy.
+  await expect(player.getByRole("button", { name: "Open in external player" })).toBeHidden();
+  await expect(player.getByRole("button", { name: "Copy link" })).toBeHidden();
   expect((await streamById(request, id))?.viewers).toBe(0);
   await page.keyboard.press("Escape");
   await expect(player).toBeHidden();
