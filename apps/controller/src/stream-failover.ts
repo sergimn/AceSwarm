@@ -36,8 +36,6 @@ export interface StreamFailoverHost {
   /** Engine sharing is on. */
   sharing: () => boolean;
   playing: () => PlayingStream;
-  /** The state the stream shows. */
-  state: () => StreamState;
   /** The stream waits for its broadcast, which sends nothing new (see `StreamSupervisor`). */
   sourceStale: () => boolean;
   setState: (state: StreamState, message: string | null) => void;
@@ -158,11 +156,12 @@ export class StreamFailover {
   }
 
   /**
-   * Moves the stream to the favourite path once its standby there is stable (see
+   * Moves a stream that plays to the favourite path once its standby there is stable (see
    * `StreamStandbys.takeStable`), make-before-break like a failover. This is no recovery, and it
-   * does not wait for `PATH_MIN_DWELL_SECONDS`: the stream may play fine where it is, so it keeps
-   * the state it shows while it moves. A move that fails leaves it where it was, and the standby has
-   * to be stable again, after a wait. Returns true when it tried.
+   * does not wait for `PATH_MIN_DWELL_SECONDS`: the stream plays where it is, and shows as playing
+   * while it moves. A stream that gets no video is left to its failover and its recovery, which
+   * count as such and try the favourite path's standby first. A move that fails leaves the stream
+   * where it was, and the standby has to be stable again, after a wait. Returns true when it tried.
    */
   async moveToFavourite(): Promise<boolean> {
     const { engine, path } = this.host.playing();
@@ -176,7 +175,7 @@ export class StreamFailover {
     }
     this.host.logger.info({ from: path, to: favourite }, "the favourite path is stable; moving the stream to it");
     try {
-      await this.handOver(engine, standby, this.host.state(), "moving to the favourite path");
+      await this.handOver(engine, standby, "playing", "moving to the favourite path");
     } catch (error) {
       this.host.logger.warn({ err: error, path: favourite }, "could not move the stream to the favourite path");
     }

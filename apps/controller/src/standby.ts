@@ -284,9 +284,7 @@ export class StreamStandbys {
       .filter((standby) => context.candidates.includes(standby.path))
       .toArray()
       .toSorted((a, b) => context.candidates.indexOf(a.path) - context.candidates.indexOf(b.path));
-    // The favourite path gets its standby even when the others fill the limit: the last of them goes.
-    const room = this.limit() - (this.favouriteMissing(context) ? 1 : 0);
-    const extra = new Set(kept.slice(Math.max(room, 0)).map((standby) => standby.path));
+    const extra = new Set(kept.slice(this.limit()).map((standby) => standby.path));
     for (const standby of this.standbys.values()) {
       const why = this.dropReason(standby, context, extra);
       if (why !== undefined) {
@@ -316,22 +314,6 @@ export class StreamStandbys {
     }
     standby.downSince = undefined;
     return extra.has(standby.path) ? "more standbys than STANDBY_MAX_PATHS" : undefined;
-  }
-
-  /**
-   * The favourite path has no standby and would get one now (see `startMissing`). Not while it waits
-   * for its next try, was given up, or no start slot is free: the others' standbys would go for
-   * nothing, or long before the favourite's can start.
-   */
-  private favouriteMissing(context: StandbyContext): boolean {
-    const { favourite } = context;
-    return (
-      favourite !== undefined &&
-      !this.standbys.has(favourite) &&
-      favourite !== context.sparePath &&
-      this.deps.now() >= (this.pathRetries.get(favourite)?.retryAt ?? 0) &&
-      this.deps.startSlots?.available !== false
-    );
   }
 
   /**
@@ -383,26 +365,43 @@ export class StreamStandbys {
     return standby.busy || standby.dropped || taken || now < standby.retryAt || !context.up(standby.path);
   }
 
-  /** A new standby on the best path that has none, one per check, while a start slot is free. */
+  /**
+   * A new standby on the best path that has none, one per check, while a start slot is free. With
+   * as many standbys as `STANDBY_MAX_PATHS` allows, only the favourite path still gets one: the
+   * standby the stream needs least goes for it, once the favourite's has its start slot, so that
+   * the stream is never left without one while it waits for a slot.
+   */
   private startMissing(context: StandbyContext): void {
-    if (this.standbys.size >= this.limit()) {
-      return;
-    }
     const now = this.deps.now();
-    const path = context.candidates.find(
-      (candidate) =>
-        !this.standbys.has(candidate) &&
-        candidate !== context.sparePath &&
-        now >= (this.pathRetries.get(candidate)?.retryAt ?? 0),
-    );
+    const missing = (candidate: string): boolean =>
+      !this.standbys.has(candidate) &&
+      candidate !== context.sparePath &&
+      now >= (this.pathRetries.get(candidate)?.retryAt ?? 0);
+    const full = this.standbys.size >= this.limit();
+    const wanted = full ? [context.favourite].filter((path) => path !== undefined) : context.candidates;
+    const path = wanted.find((candidate) => missing(candidate));
     const slot = path === undefined ? false : this.takeSlot();
     if (path === undefined || slot === false) {
       return;
+    }
+    if (full) {
+      this.makeRoom();
     }
     const standby = new StandbyEngine(path, context.sharing, this.engineDeps);
     this.standbys.set(path, standby);
     this.logger.info({ path, shared: standby.shared }, "starting a standby");
     this.run(standby, "could not start its engine or session", () => standby.start(context.openSession), slot);
+  }
+
+  /** Drops the standby on the worst path, or first one whose path is down, for the favourite path's. */
+  private makeRoom(): void {
+    const worst = this.standbys
+      .values()
+      .toArray()
+      .toSorted((a, b) => this.rank(b.path) - this.rank(a.path))[0];
+    if (worst !== undefined) {
+      this.drop(worst, "the favourite path gets its standby");
+    }
   }
 
   /** A start slot (see `startSlots`): its release, undefined without a limit, false while all are taken. */

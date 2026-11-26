@@ -198,7 +198,9 @@ test("streams wait instead of going direct while no WireGuard path is up", async
     await expect(none).not.toHaveClass(/unavailable/);
     for (const greyed of [down, off]) {
       await expect(greyed).toHaveClass(/unavailable/);
-      await expect(greyed).toHaveCSS("opacity", "0.5");
+      // Its text is grey; the button itself is not dimmed, so the ring of a remote's focus shows.
+      await expect(greyed).toHaveCSS("color", "rgb(110, 118, 129)");
+      await expect(greyed).toHaveCSS("opacity", "1");
       await expect(greyed).toHaveAttribute("aria-pressed", "false");
     }
     await down.click();

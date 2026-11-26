@@ -527,9 +527,13 @@ a {
   color: var(--accent);
 }
 
-/* A choice that does nothing for now, such as a network path that is down. It can still be chosen. */
+/*
+ * A choice that does nothing for now, such as a network path that is down. It can still be chosen,
+ * so only its text is greyed: dimming the whole button would dim the ring a remote's focus draws.
+ */
 .segment.unavailable {
-  opacity: 0.5;
+  background: transparent;
+  color: var(--gray);
 }
 
 .segments[aria-busy="true"] .segment {

@@ -157,11 +157,6 @@ export class MoveSlots {
     this.free = size;
   }
 
-  /** Whether `tryTake` would get a slot now. */
-  get available(): boolean {
-    return this.free > 0;
-  }
-
   tryTake(): boolean {
     if (this.free === 0) {
       return false;

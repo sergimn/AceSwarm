@@ -74,8 +74,8 @@ export interface StandbyContext {
   candidates: readonly string[];
   /**
    * The favourite path while the stream is to move there: it is one of the `candidates` (the first).
-   * It gets a standby before the others, also when they fill `STANDBY_MAX_PATHS`. Undefined with no
-   * favourite, and while the stream plays on it or may not move to it.
+   * It gets a standby before the others, also when they fill `STANDBY_MAX_PATHS` (one of theirs
+   * goes for it). Undefined with no favourite, and while the stream plays on it or may not move to it.
    */
   favourite?: string | undefined;
   /** Whether the stream may use the path at all: the gateway has it, and the policy allows it. */

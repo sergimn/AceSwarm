@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { Snapshot } from "../../packages/shared/src/api-types.ts";
+import type { PathStatus, Snapshot } from "../../packages/shared/src/api-types.ts";
 import { addStreamList, openApp, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
@@ -451,6 +451,54 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   expect(previewLoads).toHaveLength(loaded);
   expect(await choiceWrites()).toEqual([]);
   expect(saved).toEqual([]);
+  // The page asks for snapshots until it closes, after the test's own request context is gone.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+});
+
+test("the favourite path's choice that has the focus keeps it while paths come and go", async ({ page, request }) => {
+  // The stack has the direct path alone. Here the page gets the snapshots a controller sends with
+  // the WireGuard paths in `profiles` as well, as while profiles are added and removed elsewhere.
+  const real = await snapshot(request);
+  expect(real.paths.map(({ id }) => id)).toEqual(["direct"]);
+  const vpn = (label: string): PathStatus => ({ ...real.paths[0]!, id: `wg:${label}`, kind: "wireguard", label });
+  let profiles = ["zeta"];
+  const current = async (): Promise<Snapshot> => {
+    const now = await snapshot(request);
+    return { ...now, paths: [...now.paths, ...profiles.map((label) => vpn(label))] };
+  };
+  await page.route("**/api/snapshot", async (route) => {
+    await route.fulfill({ json: await current() });
+  });
+  await page.route("**/api/events", async (route) => {
+    // One snapshot, then the browser opens the stream again a second later, as after a dropped one.
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `retry: 1000\nevent: snapshot\ndata: ${JSON.stringify(await current())}\n\n`,
+    });
+  });
+  await openApp(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const favourite = page.getByRole("dialog", { name: "Settings" }).getByRole("group", { name: "Favourite path" });
+  const choices = favourite.getByRole("button");
+  const zeta = favourite.getByRole("button", { name: "zeta", exact: true });
+  await expect(choices).toHaveText(["None", "Direct", "zeta"]);
+  await zeta.focus();
+  await expect(zeta).toBeFocused();
+
+  // A path listed before it: the choices are drawn in their new order, and the focus stays.
+  profiles = ["alpha", "zeta"];
+  await expect(choices).toHaveText(["None", "Direct", "alpha", "zeta"]);
+  await expect(zeta).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(favourite.getByRole("button", { name: "alpha", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(zeta).toBeFocused();
+
+  // Its own path goes: the focus goes to the first choice, not out of the dialog.
+  profiles = ["alpha"];
+  await expect(choices).toHaveText(["None", "Direct", "alpha"]);
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toBeFocused();
   // The page asks for snapshots until it closes, after the test's own request context is gone.
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });
