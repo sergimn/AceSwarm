@@ -977,6 +977,25 @@ p.form-error {
   .player-waiting-reason {
     font-size: 0.875em;
   }
+
+  /*
+   * The player's four buttons take one row on a phone held sideways, and two on one held upright:
+   * more rows would take the room of the stats window and of the message above them.
+   */
+  .player-actions {
+    gap: 8px;
+  }
+
+  .player-actions .button {
+    min-height: 2.75em;
+    padding: 4px 10px;
+    font-size: 0.875em;
+  }
+
+  /* Their words say it all, and the icons' room is what a fourth button needs. */
+  .player-actions .button svg {
+    display: none;
+  }
 }
 
 .player-stats dl {

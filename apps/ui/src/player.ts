@@ -14,6 +14,15 @@ const OVERLAY_MS = 4000;
 /** The least room left between the stats window and the title above it, or the buttons below it. */
 const STATS_GAP = 12;
 
+/**
+ * How long, once the stream was handed over or taken back, a press on what took the pressed
+ * button's place does nothing: the second click of a double click, or a second press of OK, would
+ * undo the first right away.
+ */
+const SWITCH_QUIET_MS = 1000;
+/** How long the address stays on screen when the browser can't copy it: long enough to write it down. */
+const ADDRESS_NOTE_MS = 120_000;
+
 /** The custom properties that place the message that says why there is no picture. */
 const WAITING_SIDES = ["top", "bottom", "left"] as const;
 
@@ -63,6 +72,10 @@ export class Player {
    * can't hand it over may not come back from trying.
    */
   private readonly copyButton: HTMLButtonElement;
+  /** When the stream was last handed over or taken back (see `SWITCH_QUIET_MS`). */
+  private switchedAt = -Infinity;
+  /** The address, shown for a while after the browser couldn't copy it. */
+  private addressNote: HTMLElement | undefined;
   /** Whether the page hears nothing from the controller: the overlay then stays up to say so. */
   private stale = false;
   /**
@@ -439,6 +452,9 @@ export class Player {
     this.streamId = undefined;
     this.stream = undefined;
     this.handOff = undefined;
+    this.switchedAt = -Infinity;
+    this.addressNote?.remove();
+    this.addressNote = undefined;
     this.following = false;
     // The next `update` finds the page stale or not afresh, and raises the overlay if it is.
     this.stale = false;
@@ -484,11 +500,11 @@ export class Player {
   /**
    * Hands the stream to an external player, and stops playing it here at once: a TV decodes one
    * stream at a time, and two players would both have sound. The page says what to do next where
-   * the picture was, since a browser in full screen shows nothing of a download.
+   * the picture was, since a browser in full screen hides its downloads.
    */
   private handOver(): void {
     const stream = this.stream;
-    if (stream?.enabled !== true) {
+    if (stream?.enabled !== true || this.justSwitched()) {
       return;
     }
     const handOff = handOffFor(stream.name, externalAddress(stream), navigator.userAgent);
@@ -500,7 +516,7 @@ export class Player {
   /** Plays the stream here again, after it was handed to an external player. */
   private watchHere(): void {
     const stream = this.stream;
-    if (stream === undefined) {
+    if (stream === undefined || this.justSwitched()) {
       return;
     }
     this.handOff = undefined;
@@ -509,25 +525,39 @@ export class Player {
 
   /** Shows the player with the stream just handed over or taken back; the focus goes to `button`. */
   private showHandOff(stream: StreamView, button: HTMLButtonElement): void {
+    this.switchedAt = performance.now();
     this.follow(stream);
     this.showNoPicture();
     this.placeStats();
     button.focus();
   }
 
+  /**
+   * Whether the stream was handed over or taken back a moment ago. The button pressed for that gave
+   * its place and the focus to the one that undoes it, and Copy link moved up beside it: a second
+   * press that follows at once was meant for the first button, and does nothing.
+   */
+  private justSwitched(): boolean {
+    return performance.now() - this.switchedAt < SWITCH_QUIET_MS;
+  }
+
   /** Copies the stream's address, for a player that the browser can't hand the stream to. */
   private copyLink(): void {
     const stream = this.stream;
-    if (stream?.enabled !== true) {
+    if (stream?.enabled !== true || this.justSwitched()) {
       return;
     }
     const address = externalAddress(stream);
     void copyText(address, this.root).then((copied) => {
+      this.addressNote?.remove();
+      this.addressNote = undefined;
       if (copied) {
         toast("Link copied");
-      } else {
-        // The address itself, to type it by hand: the player only shows it once it handed over.
-        toast(`This browser doesn't let the page copy. The address is ${address}`, "error");
+      } else if (this.stream?.id === stream.id) {
+        // The address itself, to write down or type by hand, for long enough to do so: before the
+        // stream is handed over, the player shows it nowhere else.
+        const note = `This browser doesn't let the page copy. The address is ${address}`;
+        this.addressNote = toast(note, "error", ADDRESS_NOTE_MS);
       }
     });
   }

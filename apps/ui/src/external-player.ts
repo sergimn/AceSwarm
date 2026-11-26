@@ -32,9 +32,12 @@ export function androidIntentUrl(url: string): string {
   return `intent://${host}${pathname}${search}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end`;
 }
 
-/** A name on one line: control characters, line breaks included, become spaces. */
+/**
+ * A name on one line: control characters become spaces, and so do the two separators that are line
+ * breaks to whoever reads a file by Unicode's rules (U+2028 and U+2029).
+ */
 function oneLine(name: string): string {
-  return name.replaceAll(/\p{Cc}+/gu, " ").trim();
+  return name.replaceAll(/[\p{Cc}\u{2028}\u{2029}]+/gu, " ").trim();
 }
 
 /** The longest name a downloaded file gets, before its extension. */
@@ -66,8 +69,8 @@ export function handOffFor(name: string, url: string, userAgent: string): HandOf
 }
 
 /**
- * What the player says once it handed its stream over, where its picture was. A browser shows its
- * downloads nowhere while the page is full screen, so the line names the file and where to find it.
+ * What the player says once it handed its stream over, where its picture was. A browser hides its
+ * downloads while the page is full screen, so the line names the file and where to find it.
  * The address is there to type or copy by hand where nothing else works.
  */
 export function handOffMessage(handOff: HandOff, fullscreen: boolean): { title: string; reason: string } {

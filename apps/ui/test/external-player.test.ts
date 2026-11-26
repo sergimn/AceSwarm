@@ -59,6 +59,7 @@ describe("m3uFileName", () => {
   it("leaves out what file systems refuse", () => {
     expect(m3uFileName('News: "24/7" <HD> | a\\b?*')).toBe("News 24 7 HD a b.m3u");
     expect(m3uFileName("two\nlines\tand a tab")).toBe("two lines and a tab.m3u");
+    expect(m3uFileName("one\u{2028}two")).toBe("one two.m3u");
     expect(m3uFileName("  ..hidden")).toBe("hidden.m3u");
   });
 
@@ -82,6 +83,10 @@ describe("m3uPlaylist", () => {
   it("keeps a name with a line break on one line, so that it can't add an entry", () => {
     expect(m3uPlaylist("Channel\r\nhttp://other.example/x", PLAYLIST)).toBe(
       `#EXTM3U\n#EXTINF:-1,Channel http://other.example/x\n${PLAYLIST}\n`,
+    );
+    // Unicode's own line and paragraph separators, and the next-line control character.
+    expect(m3uPlaylist("One\u{2028}Two\u{2029}Three\u{85}Four", PLAYLIST)).toBe(
+      `#EXTM3U\n#EXTINF:-1,One Two Three Four\n${PLAYLIST}\n`,
     );
   });
 });
