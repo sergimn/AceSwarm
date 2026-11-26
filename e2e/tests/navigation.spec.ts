@@ -228,9 +228,9 @@ test("hands a stream to an external player, and plays it here again", async ({ p
     await navigator.clipboard.writeText("something else");
   })()`);
 
-  // OK held down on the remote repeats the key, and a second press can follow the first at once.
-  // Only the first press counts: the button gives its place and the focus to the one that takes
-  // the stream back, which a repeat or a press right after it would press.
+  // OK held down on the remote repeats the key, here for longer than the moment after a hand-over
+  // in which these buttons do nothing. Only the first press counts: the button gives its place and
+  // the focus to the one that takes the stream back, which each repeat would press.
   let downloads = 0;
   page.on("download", () => {
     downloads += 1;
@@ -242,17 +242,21 @@ test("hands a stream to an external player, and plays it here again", async ({ p
     (async () => {
       await page.keyboard.down("Enter");
       await page.keyboard.down("Enter");
+      await page.waitForTimeout(SWITCH_QUIET_MS);
       await page.keyboard.down("Enter");
       await page.keyboard.up("Enter");
-      await page.keyboard.press("Enter");
     })(),
   ]);
   // A desktop browser downloads a playlist file with the stream in it, at an address that plays.
   expect(download.suggestedFilename()).toBe("Channel 12.m3u");
   expect(await readFile(await download.path(), "utf8")).toBe(`#EXTM3U\n#EXTINF:-1,Channel 12\n${address}\n`);
-  const playlist = await request.get(address);
-  expect(playlist.ok(), await playlist.text()).toBe(true);
-  expect(await playlist.text()).toContain("#EXTINF");
+  // Asked again while it doesn't answer: a stream whose broadcast pauses has no playlist for a moment.
+  await expect
+    .poll(async () => {
+      const playlist = await request.get(address);
+      return playlist.ok() ? await playlist.text() : "";
+    })
+    .toContain("#EXTINF");
 
   // The player says what to do, where its picture was, while it is still full screen: the browser
   // hides its downloads there.
@@ -272,24 +276,32 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   expect(downloads).toBe(1);
 
   // Copy link stays, for a player that didn't get the stream. The first toast is gone by now, or
-  // goes within its five seconds, and so is the moment after the hand-over in which presses on
-  // these buttons do nothing.
+  // goes within its five seconds, and the moment after the hand-over in which presses on these
+  // buttons do nothing passed while OK was held.
   await expect(toast).toHaveCount(0);
-  await page.waitForTimeout(SWITCH_QUIET_MS);
   await player.hover();
   await copy.click();
   await expect(toast).toHaveText("Link copied");
   expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe(address);
 
-  // And back: the page plays the stream again, and counts as its viewer. A double click takes it
-  // back once: its second click, on the button that hands over, hands nothing over.
-  await player.hover();
-  await resume.dblclick();
+  // And back: the page plays the stream again, and counts as its viewer. Presses that follow the
+  // first at once, on the two buttons that are then where it was, do nothing: the stream isn't
+  // handed over again, and its address isn't copied. The three come from one script in the page,
+  // so that not even a slow runner puts a second between them.
+  await page.evaluate(`navigator.clipboard.writeText("something else")`);
+  await page.evaluate(`(() => {
+    const buttons = [...document.querySelectorAll(".player-actions button")];
+    for (const name of ["Watch here again", "Open in external player", "Copy link"]) {
+      buttons.find((button) => button.textContent.trim() === name).click();
+    }
+  })()`);
   await expect(message).toBeHidden();
   await expect(open).toBeFocused();
   await expect(resume).toBeHidden();
   await expect.poll(videoSource).not.toBeNull();
   await expect.poll(viewers).toBe(1);
+
+  expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe("something else");
 
   await page.keyboard.press("Escape");
   await expect(player).toBeHidden();
@@ -608,7 +620,8 @@ test("ends the hand-over when the stream is disabled, and plays it in the page o
   const copy = player.getByRole("button", { name: "Copy link" });
   const message = player.locator(".player-waiting");
   // A double click hands the stream over once: its second click lands where the button that takes
-  // the stream back, or Copy link, just went, and does nothing.
+  // the stream back just went, and does nothing. Both clicks reach the page together, whatever the
+  // runner's speed.
   let downloads = 0;
   page.on("download", () => {
     downloads += 1;
@@ -695,22 +708,41 @@ test.describe("in a browser on Android", () => {
     await expect.poll(videoSource).not.toBeNull();
 
     // Copy link first, as in a browser that might not come back from the link. The address it
-    // couldn't copy stays on screen, to write down: other messages go after five seconds.
+    // couldn't copy shows under the stream's name, to write down: it stays, and the controls with
+    // it, past the few seconds after which they fade. It is above the stats window, over nothing.
+    const copy = player.getByRole("button", { name: "Copy link" });
+    const note = player.locator(".player-address");
+    await expect(note).toBeHidden();
     await player.hover();
-    await player.getByRole("button", { name: "Copy link" }).click();
-    const note = player.locator(".toast.error");
+    await copy.click();
     await expect(note).toHaveText(`This browser doesn't let the page copy. The address is ${address.href}`);
     await page.waitForTimeout(7000);
     await expect(note).toBeVisible();
+    await expect(player).toHaveClass(/show-overlay/);
+    const noteBox = await note.boundingBox();
+    const statsBox = await player.locator(".player-stats").boundingBox();
+    expect(noteBox!.y + noteBox!.height).toBeLessThanOrEqual(statsBox!.y);
     expect(await videoSource()).not.toBeNull();
 
-    // The button follows a link that asks Android to open the playlist in an app, and downloads no file.
+    // Closing the player takes the address away: the stream opens without it.
+    await page.keyboard.press("Escape");
+    await expect(player).toBeHidden();
+    await page.locator(".tile", { hasText: "Channel 11" }).click();
+    await expect(player).toBeVisible();
+    await expect(note).toBeHidden();
+    await expect.poll(videoSource).not.toBeNull();
     await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+
+    // The button follows a link that asks Android to open the playlist in an app, and downloads no
+    // file. The message has the address from then on, so the line under the name goes.
     await player.getByRole("button", { name: "Open in external player" }).click();
     const message = player.locator(".player-waiting");
     await expect(message).toContainText("Sent to an external player");
     await expect(message).toContainText("Pick a player if your device asks for one.");
     await expect(message).toContainText(`If none opens, open this address in your player: ${address.href}`);
+    await expect(note).toBeHidden();
     expect(await page.evaluate("window.followed")).toEqual([
       {
         href: `intent://${address.host}${address.pathname}#Intent;scheme=http;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end`,
@@ -721,9 +753,7 @@ test.describe("in a browser on Android", () => {
     await expect(player.getByRole("button", { name: "Watch here again" })).toBeFocused();
     await expect.poll(videoSource).toBeNull();
 
-    // Closing the player takes the address away with it.
     await page.keyboard.press("Escape");
     await expect(player).toBeHidden();
-    await expect(page.locator(".toast")).toHaveCount(0);
   });
 });

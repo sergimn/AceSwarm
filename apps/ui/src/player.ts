@@ -74,8 +74,13 @@ export class Player {
   private readonly copyButton: HTMLButtonElement;
   /** When the stream was last handed over or taken back (see `SWITCH_QUIET_MS`). */
   private switchedAt = -Infinity;
-  /** The address, shown for a while after the browser couldn't copy it. */
-  private addressNote: HTMLElement | undefined;
+  /**
+   * The stream's address, under the title and the clock, for a while after the browser couldn't
+   * copy it. It is part of the top bar, which the stats window stays below, so it covers nothing;
+   * the overlay stays up while it shows.
+   */
+  private readonly addressNote: HTMLElement;
+  private addressTimer: ReturnType<typeof setTimeout> | undefined;
   /** Whether the page hears nothing from the controller: the overlay then stays up to say so. */
   private stale = false;
   /**
@@ -91,7 +96,10 @@ export class Player {
    * included, whether or not the browser could enter full screen.
    */
   private readonly clock: HTMLElement;
-  /** The title and the clock, and the buttons (Back, Restart...): the stats window stays between them. */
+  /**
+   * The title and the clock (and the address under them, while it shows), and the buttons (Back,
+   * Restart...): the stats window stays between them.
+   */
   private readonly topBar: HTMLElement;
   private readonly actions: HTMLElement;
   private hls: Hls | undefined;
@@ -107,6 +115,7 @@ export class Player {
     this.watch = watch;
     this.video = h("video", { className: "player-video", attrs: { playsinline: true, autoplay: true } });
     this.title = h("h2", { className: "player-title" });
+    this.addressNote = h("p", { className: "player-address", attrs: { hidden: true, role: "alert" } });
     this.statRows = (Object.keys(PLAYER_STATS) as PlayerStatKey[]).map((key) => {
       const value = h("dd");
       const row = h("div", { className: "player-stat", attrs: { "data-stat": key } }, [
@@ -172,7 +181,10 @@ export class Player {
     });
     this.clock = h("time", { className: "player-clock" });
     startClock(this.clock);
-    this.topBar = h("div", { className: "player-top" }, [this.title, this.clock]);
+    this.topBar = h("div", { className: "player-top" }, [
+      h("div", { className: "player-heading" }, [this.title, this.clock]),
+      this.addressNote,
+    ]);
     this.actions = h("div", { className: "player-actions" }, [
       backButton,
       restartButton,
@@ -396,6 +408,7 @@ export class Player {
   private follow(stream: StreamView): void {
     if (!stream.enabled) {
       this.handOff = undefined;
+      this.showAddress(undefined);
     }
     const plays = stream.enabled && this.handOff === undefined;
     if (plays === this.following) {
@@ -453,8 +466,7 @@ export class Player {
     this.stream = undefined;
     this.handOff = undefined;
     this.switchedAt = -Infinity;
-    this.addressNote?.remove();
-    this.addressNote = undefined;
+    this.showAddress(undefined);
     this.following = false;
     // The next `update` finds the page stale or not afresh, and raises the overlay if it is.
     this.stale = false;
@@ -491,7 +503,7 @@ export class Player {
     this.root.classList.add("show-overlay");
     clearTimeout(this.overlayTimer);
     this.overlayTimer = setTimeout(() => {
-      if (!this.stale) {
+      if (!this.stale && this.addressNote.hidden) {
         this.root.classList.remove("show-overlay");
       }
     }, OVERLAY_MS);
@@ -526,6 +538,8 @@ export class Player {
   /** Shows the player with the stream just handed over or taken back; the focus goes to `button`. */
   private showHandOff(stream: StreamView, button: HTMLButtonElement): void {
     this.switchedAt = performance.now();
+    // A stream that is handed over has its address in the message.
+    this.showAddress(undefined);
     this.follow(stream);
     this.showNoPicture();
     this.placeStats();
@@ -549,17 +563,37 @@ export class Player {
     }
     const address = externalAddress(stream);
     void copyText(address, this.root).then((copied) => {
-      this.addressNote?.remove();
-      this.addressNote = undefined;
       if (copied) {
+        this.showAddress(undefined);
         toast("Link copied");
       } else if (this.stream?.id === stream.id) {
-        // The address itself, to write down or type by hand, for long enough to do so: before the
-        // stream is handed over, the player shows it nowhere else.
-        const note = `This browser doesn't let the page copy. The address is ${address}`;
-        this.addressNote = toast(note, "error", ADDRESS_NOTE_MS);
+        this.showAddress(address);
       }
     });
+  }
+
+  /**
+   * Shows the stream's address under the title, to write down or type by hand, for long enough to
+   * do so: before the stream is handed over, the player shows it nowhere else. `undefined` takes
+   * it away.
+   */
+  private showAddress(address: string | undefined): void {
+    if (address === undefined && this.addressNote.hidden) {
+      return;
+    }
+    clearTimeout(this.addressTimer);
+    this.addressNote.hidden = address === undefined;
+    const note = address === undefined ? "" : `This browser doesn't let the page copy. The address is ${address}`;
+    setText(this.addressNote, note);
+    if (address !== undefined) {
+      this.addressTimer = setTimeout(() => {
+        this.showAddress(undefined);
+      }, ADDRESS_NOTE_MS);
+    }
+    // The top bar changed height, and the stats window stays below it. The overlay fades again
+    // once the address went.
+    this.placeStats();
+    this.showOverlay();
   }
 
   private restart(): void {

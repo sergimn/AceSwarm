@@ -974,7 +974,8 @@ p.form-error {
   }
 
   /* The longest reason, a stream handed to an external player, takes several lines there. */
-  .player-waiting-reason {
+  .player-waiting-reason,
+  .player-address {
     font-size: 0.875em;
   }
 
@@ -1061,13 +1062,27 @@ p.form-error {
   opacity: 0;
 }
 
+/* The title and the clock, and under them the stream's address while it shows. */
 .player-top {
   position: relative;
   z-index: 1;
+}
+
+.player-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+}
+
+/*
+ * The stream's address, for a while when the browser couldn't copy it: the width of the bar, so
+ * that it takes few lines on a narrow screen. An address has no place to break.
+ */
+.player-address {
+  max-width: 40em;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .player-connection {
@@ -1092,10 +1107,8 @@ p.form-error {
   gap: 8px;
 }
 
-/* A toast can hold an address, which has no place to break. */
 .toast {
   max-width: 28em;
-  overflow-wrap: anywhere;
   padding: 10px 16px;
   border-radius: 8px;
   background: var(--surface-2);

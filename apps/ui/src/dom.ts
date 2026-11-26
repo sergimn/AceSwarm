@@ -165,11 +165,7 @@ export function placeToasts(host: HTMLElement | undefined): void {
   }
 }
 
-/**
- * Shows a short message for `ms`, a few seconds unless told otherwise, and returns it, for a caller
- * that takes it away sooner.
- */
-export function toast(message: string, kind: "info" | "error" = "info", ms = 5000): HTMLElement {
+export function toast(message: string, kind: "info" | "error" = "info"): void {
   const toastRoot = document.querySelector<HTMLElement>("#toasts") ?? document.body;
   const element = h("div", {
     className: `toast ${kind}`,
@@ -179,8 +175,7 @@ export function toast(message: string, kind: "info" | "error" = "info", ms = 500
   toastRoot.append(element);
   setTimeout(() => {
     element.remove();
-  }, ms);
-  return element;
+  }, 5000);
 }
 
 export function errorMessage(error: unknown): string {
