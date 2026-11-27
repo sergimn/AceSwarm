@@ -10,6 +10,7 @@ import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { externalPlaylistStream } from "./hls-urls.ts";
 import { NetworkPolicyError, type Orchestrator } from "./orchestrator.ts";
 import { DuplicateStreamError, type NewStream } from "./stream-store.ts";
 import { describeDevice } from "./viewers.ts";
@@ -55,9 +56,6 @@ const idParams = z.object({ id: streamIdSchema });
 const nameParams = z.object({ name: z.string().min(1).max(64) });
 
 const HOP_HEADERS = ["content-type", "content-length", "cache-control", "last-modified"];
-
-/** The playlist for players outside the page (see `hlsUrls`), with the stream's id. */
-const EXTERNAL_PLAYLIST = /^\/hls\/([a-z0-9]{6,32})\/external\/index\.m3u8(?:\?|$)/;
 
 function badRequest(reply: FastifyReply, error: string, details?: string[]): FastifyReply {
   return reply.code(400).send(details === undefined ? { error } : { error, details });
@@ -319,18 +317,18 @@ export async function registerRoutes(
   // HLS playlists and segments come from the transcoder; proxying keeps a single origin for the
   // browser and avoids exposing the transcoder.
   app.get("/hls/*", async (request, reply) => {
+    const target = new URL(`${options.transcoderUrl}${request.url}`);
     // The transcoder has a playlist for players outside the page for any stream it is asked about,
     // with the slate until the stream has video (a player may ask before the stream's pipeline is
-    // there). Which streams there are is known here: only an enabled one has that playlist.
-    const external = EXTERNAL_PLAYLIST.exec(request.url)?.[1];
-    if (external !== undefined && !orchestrator.isEnabled(external)) {
+    // there). Which streams there are is known here: only an enabled one has that playlist. The
+    // address is read as the transcoder will read it, so that it can't be written past this.
+    const external = externalPlaylistStream(target.pathname);
+    if (external !== undefined && !orchestrator.hasExternalPlaylist(external)) {
       return reply.code(404).send({ error: "no such stream" });
     }
     let upstream: Response;
     try {
-      upstream = await fetch(`${options.transcoderUrl}${request.url}`, {
-        signal: AbortSignal.timeout(15_000),
-      });
+      upstream = await fetch(target, { signal: AbortSignal.timeout(15_000) });
     } catch (error) {
       return reply.code(502).send({ error: describeError(error) });
     }

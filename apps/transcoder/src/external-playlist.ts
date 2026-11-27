@@ -19,18 +19,46 @@ export const SLATE_AFTER_MS = 5000;
  * long after the one before it as that one lasts, and a broadcast with few key frames has long ones.
  */
 export const SLATE_MARGIN_MS = 3000;
-/** How many of the stream's last segments that looks at. */
+/** How many of the stream's last segments that looks at. They start over with each ffmpeg run. */
 const RECENT_SEGMENTS = 6;
 /**
- * A segment that says it lasts longer than this doesn't count there: it is the first one after the
- * stream had no data for a while, whose timestamps span the time that is missing.
+ * A segment that lasts longer than this may not be one the stream usually has: the first one after
+ * the stream had no data for a while says it lasts all the time that is missing. It counts only
+ * while it is no more than twice what the stream's last segments usually last (their median), as
+ * the segments of a broadcast with key frames this far apart all are.
  */
-const LONGEST_SEGMENT_SECONDS = 10;
+const LONG_SEGMENT_SECONDS = 10;
+/**
+ * No segment counts for more than this. A full output that writes none for this long is taken for
+ * stuck and started again (`FULL_OUTPUT_STALL_SECONDS`, 30 unless set otherwise), so a stream that
+ * plays has none longer.
+ */
+const LONGEST_SEGMENT_SECONDS = 30;
 /**
  * A playlist nobody asked for in this long starts its slate over from now, instead of adding every
  * segment of it that came due meanwhile: nobody was there to play them.
  */
 const CATCH_UP_MS = 60_000;
+/**
+ * Where the slate starts for a player that has nothing of this playlist yet, it starts this long
+ * ago: the player gets three segments at once and plays a few seconds behind the newest one, as it
+ * does on a stream that plays. On one segment at a time it runs dry at each, and VLC then waits
+ * longer before it plays what comes next, the stream's video included.
+ */
+const SLATE_HEAD_START_MS = 4000;
+
+/**
+ * How long after a segment of the stream the slate is due, from what the stream's last segments
+ * lasted (in seconds): a little longer than the next one usually takes to come.
+ */
+function slateAfter(recent: readonly number[]): number {
+  const sorted = recent.toSorted((one, other) => one - other);
+  const usual = sorted[Math.floor((sorted.length - 1) / 2)] ?? 0;
+  const counted = sorted.filter(
+    (seconds) => seconds <= LONG_SEGMENT_SECONDS || (seconds <= 2 * usual && seconds <= LONGEST_SEGMENT_SECONDS),
+  );
+  return Math.max(SLATE_AFTER_MS, Math.max(0, ...counted) * 1000 + SLATE_MARGIN_MS);
+}
 
 export interface ExternalPlaylistOptions {
   /** How many segments the playlist lists. */
@@ -52,8 +80,8 @@ export interface ExternalPlaylistOptions {
  * The page's player waits when its playlist stops growing, and tries again when it fails. Other
  * players give up: the ones built on ffmpeg some ten seconds after the last new segment, and every
  * one of them at the first playlist request that fails. So this playlist always goes on. While
- * the stream starts, and whenever no segment of it came for a few seconds (`SLATE_AFTER_MS`), it
- * lists the slate's segments, one more as each comes due, until the stream's next segment.
+ * the stream starts, and whenever no segment of it came for a few seconds (`slateAfter`), it lists
+ * the slate's segments, one more as each comes due, until the stream's next segment.
  *
  * The slate is a loop: its segments' timestamps run on from one to the next, as a player needs
  * (one segment listed over and over stops some players), and start over with each pass. Every
@@ -79,7 +107,7 @@ export class ExternalPlaylist {
   private slateNext: number | undefined;
   /** When the next segment of the slate is due, unless one of the stream comes first. */
   private slateDueAt: number;
-  /** What the stream's last segments lasted, in seconds. */
+  /** What the last segments of the stream's ffmpeg run lasted, in seconds. */
   private readonly recent: number[] = [];
 
   constructor(options: ExternalPlaylistOptions) {
@@ -87,7 +115,7 @@ export class ExternalPlaylist {
     this.staleAfterMs = options.staleAfterMs;
     this.slate = options.slate;
     this.onSlate = options.onSlate;
-    this.slateDueAt = options.now;
+    this.slateDueAt = options.now - SLATE_HEAD_START_MS;
   }
 
   /** Whether the playlist's newest segment is the slate's. */
@@ -101,15 +129,18 @@ export class ExternalPlaylist {
       this.stretch += 1;
     }
     this.playlist.append(this.stretch, [segment], "", at);
+    if (generation !== this.lastGeneration) {
+      // Another ffmpeg run may cut its segments differently: a re-encoded one every two seconds, a
+      // copy at the broadcast's key frames.
+      this.recent.length = 0;
+    }
     this.lastGeneration = generation;
     this.slateNext = undefined;
-    if (segment.duration <= LONGEST_SEGMENT_SECONDS) {
-      this.recent.push(segment.duration);
-    }
+    this.recent.push(segment.duration);
     if (this.recent.length > RECENT_SEGMENTS) {
       this.recent.shift();
     }
-    this.slateDueAt = at + Math.max(SLATE_AFTER_MS, Math.max(0, ...this.recent) * 1000 + SLATE_MARGIN_MS);
+    this.slateDueAt = at + slateAfter(this.recent);
   };
 
   /**
@@ -118,15 +149,20 @@ export class ExternalPlaylist {
    */
   render(now: number): string | undefined {
     this.playlist.expire(now - this.staleAfterMs);
+    if (now - this.slateDueAt > CATCH_UP_MS) {
+      // Nobody asked for a long time: the slate starts over for whoever asks now.
+      this.slateDueAt = now - SLATE_HEAD_START_MS;
+    } else if (this.playlist.length === 0) {
+      // Nothing is left to list, so there is nothing to wait for: the stream's last segments are
+      // old, even where the next one would not be late yet.
+      this.slateDueAt = Math.min(this.slateDueAt, now - SLATE_HEAD_START_MS);
+    }
     this.addSlate(now);
     return this.playlist.render();
   }
 
   private addSlate(now: number): void {
     const segments = this.slate()?.segments ?? [];
-    if (now - this.slateDueAt > CATCH_UP_MS) {
-      this.slateDueAt = now;
-    }
     while (this.slateDueAt <= now) {
       const index = this.slateNext ?? 0;
       const segment = segments[index];

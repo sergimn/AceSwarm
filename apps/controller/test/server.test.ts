@@ -62,6 +62,20 @@ test("the API waits until the orchestrator started; the HLS proxy doesn't", asyn
   await service.app.close();
 });
 
+/**
+ * Other ways to write the address of a stream's playlist for external players, which reach the
+ * transcoder as that playlist: percent-encoded letters, `..`, and `\` for `/`.
+ */
+const otherSpellings = (stream: string): string[] => [
+  `/hls/${stream}/%65xternal/index.m3u8`,
+  `/hls/${stream}/external/index%2Em3u8`,
+  `/hls/${stream}/external/%69ndex.m3u8?again`,
+  `/hls/%${stream.codePointAt(0)?.toString(16) ?? ""}${stream.slice(1)}/external/index.m3u8`,
+  `/hls/other1/../${stream}/external/index.m3u8`,
+  `/hls/${stream}/full/%2e%2e/external/index.m3u8`,
+  String.raw`/hls/${stream}\external\index.m3u8`,
+];
+
 test("whoever gets a stream's playlist for external players counts as its viewer; nothing else of the proxy does", async () => {
   // A transcoder with one stream, which answers everything under it. As the real one, it has a
   // playlist for external players for any stream it is asked about.
@@ -83,7 +97,7 @@ test("whoever gets a stream's playlist for external players counts as its viewer
   /** The streams that are enabled: `abcdef` is; `mnopqr` is in the list, disabled; `ghijkl` is not in it. */
   const enabled = new Set(["abcdef"]);
   const orchestrator = {
-    isEnabled: (stream: string) => enabled.has(stream),
+    hasExternalPlaylist: (stream: string) => enabled.has(stream),
     reportExternalPlayer: (...player: unknown[]) => {
       players.push(player);
     },
@@ -136,6 +150,34 @@ test("whoever gets a stream's playlist for external players counts as its viewer
   enabled.add("mnopqr");
   expect((await ask("/hls/mnopqr/external/index.m3u8")).statusCode).toBe(200);
   expect(players.at(-1)).toEqual(["mnopqr", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20"]);
+
+  // The same playlist's address can be written in other ways: the proxy's request to the
+  // transcoder resolves `..` and `\`, and the transcoder's router decodes the path. Those are read
+  // here as the transcoder reads them, so they are refused and counted like the plain one. They go
+  // over a real connection: `inject` would tidy the address before the proxy sees it.
+  await service.app.listen({ port: 0, host: "127.0.0.1" });
+  const own = (service.app.server.address() as AddressInfo).port;
+  const raw = async (path: string): Promise<number | undefined> =>
+    new Promise((resolve, reject) => {
+      get({ host: "127.0.0.1", port: own, path, headers: { "user-agent": "VLC/3.0.20 LibVLC/3.0.20" } }, (response) => {
+        response.resume();
+        response.on("end", () => {
+          resolve(response.statusCode);
+        });
+      }).on("error", reject);
+    });
+  asked.length = 0;
+  players.length = 0;
+  for (const path of otherSpellings("ghijkl")) {
+    expect(await raw(path), path).toBe(404);
+  }
+  expect(asked).toEqual([]);
+  for (const path of otherSpellings("abcdef")) {
+    expect(await raw(path), path).toBe(200);
+    expect(players.at(-1), path).toEqual(["abcdef", "127.0.0.1", "VLC/3.0.20 LibVLC/3.0.20"]);
+  }
+  expect(players).toHaveLength(otherSpellings("abcdef").length);
+  expect(asked).toHaveLength(otherSpellings("abcdef").length);
 });
 
 test("restarting a stream with no run says whether it is disabled, not running yet or unknown", async () => {

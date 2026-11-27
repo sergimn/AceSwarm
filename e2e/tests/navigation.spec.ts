@@ -711,11 +711,15 @@ test("ends the hand-over when the stream is disabled, and plays it in the page o
   } finally {
     await enabled(true);
   }
-  // Enabled, it has one at once, long before its video: with the slate, which a player can fetch.
-  const waiting = await request.get(stream!.hls.external);
-  expect(waiting.status(), await waiting.text()).toBe(200);
-  const slate = (await waiting.text()).split("\n").findLast((line) => line.endsWith(".ts"));
-  expect(slate).toMatch(/^\.\.\/slate\/seg_\d+\.ts$/);
+  // Enabled, it has one long before its video, as soon as its earlier run is gone (the playlist of
+  // that run goes with it): with the slate, which a player can fetch.
+  let slate: string | undefined;
+  const newestListed = async (): Promise<string | undefined> => {
+    const waiting = await request.get(stream!.hls.external);
+    slate = waiting.ok() ? (await waiting.text()).split("\n").findLast((line) => line.endsWith(".ts")) : undefined;
+    return slate ?? `status ${String(waiting.status())}`;
+  };
+  await expect.poll(newestListed, { timeout: 30_000 }).toMatch(/^\.\.\/slate\/seg_\d+\.ts$/);
   const segment = await request.get(new URL(slate!, new URL(stream!.hls.external, "http://host")).pathname);
   expect(segment.ok()).toBe(true);
   expect(segment.headers()["content-type"]).toBe("video/mp2t");

@@ -235,14 +235,21 @@ export class Orchestrator {
     return true;
   }
 
-  /** Whether the stream is in the list and enabled: only then does it have a playlist for players outside the page. */
-  isEnabled(stream: string): boolean {
-    return this.deps.store.get(stream)?.enabled === true;
+  /**
+   * Whether the stream has a playlist for players outside the page: it is in the list and enabled,
+   * and no earlier run of it is still being torn down. The transcoder drops that run's playlist
+   * with its pipeline, so a player that got it would see the next one start over.
+   */
+  hasExternalPlaylist(stream: string): boolean {
+    return this.deps.store.get(stream)?.enabled === true && !this.teardowns.has(stream);
   }
 
-  /** A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`). */
+  /**
+   * A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`),
+   * unless the stream was disabled or removed while its request was on the way.
+   */
   reportExternalPlayer(stream: string, address: string, userAgent: string | undefined): void {
-    if (this.deps.store.get(stream) !== undefined) {
+    if (this.hasExternalPlaylist(stream)) {
       this.deps.viewers.poll(stream, address, userAgent);
     }
   }

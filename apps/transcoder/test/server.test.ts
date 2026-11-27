@@ -131,6 +131,28 @@ describe("the transcoder's playlists", () => {
     expect(segment).toBe("/hls/stream1/g1/full/seg_000000.ts");
     expect((await get(segment)).body).toBe("full video");
 
+    // The router decodes the path, each part once, so these are the same playlist. The controller,
+    // which knows which streams have one, reads an address the same way (`externalPlaylistStream`).
+    for (const written of [
+      "/hls/stream1/%65xternal/index.m3u8",
+      "/hls/stream1/external/index%2Em3u8",
+      "/hls/%73tream1/external/%69ndex.m3u8",
+    ]) {
+      expect((await get(written)).body, written).toBe(playlist.body);
+    }
+    // And these are not, there or here.
+    for (const other of [
+      "/hls/stream1/external/index.m3u8/",
+      "/hls/stream1//external/index.m3u8",
+      "/hls/stream1/external/index.m3u8;x",
+      "/hls/stream1/External/index.m3u8",
+      "/hls/stream1/%2565xternal/index.m3u8",
+      "/hls/stream1%2Fexternal/index.m3u8",
+      "/hls/stream1/external%2Findex.m3u8",
+    ]) {
+      expect((await get(other)).statusCode, other).toBe(404);
+    }
+
     // The other playlists are as they were, and no other name is one.
     expect((await get("/hls/stream1/preview/index.m3u8")).body).toContain("../g1/preview/seg_000000.ts");
     expect((await get("/hls/stream1/other/index.m3u8")).json()).toEqual({ error: "no such stream" });
@@ -145,7 +167,8 @@ describe("the transcoder's playlists", () => {
     const waiting = await get(external);
     expect(waiting.statusCode).toBe(200);
     expect(waiting.headers["content-type"]).toBe("application/vnd.apple.mpegurl");
-    expect(listed(waiting.body)).toEqual(["../slate/seg_000.ts"]);
+    // Three segments of it to start with, so that the player has some to play behind the newest.
+    expect(listed(waiting.body)).toEqual(["../slate/seg_000.ts", "../slate/seg_001.ts", "../slate/seg_002.ts"]);
     // Its segments are next to the stream's own, under a name no ffmpeg run has.
     const segment = new URL("../slate/seg_000.ts", `http://transcoder${external}`).pathname;
     expect(segment).toBe("/hls/stream1/slate/seg_000.ts");
@@ -170,7 +193,7 @@ describe("the transcoder's playlists", () => {
     expect((await get("/hls/stream1/full/index.m3u8")).json()).toEqual({ error: "no segments yet" });
     await writeSegments();
     const playing = (await get(external)).body;
-    expect(listed(playing).slice(-3)).toEqual(["../slate/seg_000.ts", "|", "../g1/full/seg_000000.ts"]);
+    expect(listed(playing).slice(-3)).toEqual(["../slate/seg_002.ts", "|", "../g1/full/seg_000000.ts"]);
     expect(listed((await get("/hls/stream1/full/index.m3u8")).body)).toEqual(["../g1/full/seg_000000.ts"]);
     // The slate a stream starts with is not counted: its series is there, at 0.
     expect(await slates()).toBe(0);
@@ -214,13 +237,13 @@ describe("the transcoder's playlists", () => {
     expect(await sequenceOf("waiting1", now)).toBe(0);
     await manager.start("stream1", "http://e1/play", false);
     // Some 40 seconds of slate later, both lists moved on.
-    expect(await sequenceOf("waiting1", now + 41_000)).toBe(15);
-    expect(await sequenceOf("stream1", now + 41_000)).toBe(15);
+    expect(await sequenceOf("waiting1", now + 41_000)).toBe(17);
+    expect(await sequenceOf("stream1", now + 41_000)).toBe(17);
     // Nobody asked for either for over a minute. The stream without a pipeline starts over when
     // another playlist is made; the one with a pipeline goes on.
     expect(await sequenceOf("waiting2", now + 110_000)).toBe(0);
     expect(await sequenceOf("waiting1", now + 110_000)).toBe(0);
-    expect(await sequenceOf("stream1", now + 110_000)).toBeGreaterThan(15);
+    expect(await sequenceOf("stream1", now + 110_000)).toBeGreaterThan(17);
 
     // A stream that stops (the controller disabled it) loses its playlist, with or without a pipeline.
     expect(await manager.stop("stream1")).toBe(true);

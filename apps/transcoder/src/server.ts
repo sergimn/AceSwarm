@@ -134,7 +134,7 @@ export class PipelineManager {
     this.slates = new Counter({
       name: "aceswarm_pipeline_slates_total",
       help:
-        "Times a player outside the page (see aceswarm_viewers) got the slate, the picture that says the " +
+        "Times a player outside the page (see aceswarm_stream_viewers) got the slate, the picture that says the " +
         "stream has no video right now, where the stream's video was before: no new segment of it came " +
         "for some seconds. Counted when a player asks, once for each time the video stops coming; the " +
         "slate a stream starts with doesn't count",
@@ -291,6 +291,9 @@ export class PipelineManager {
         }
       }
       this.layoutGaps.zero({ stream: id });
+      // Here and not with the stream's playlist for players outside the page, which there can be
+      // before a pipeline: only a stream that had video can count a slate in its place.
+      this.slates.inc({ stream: id }, 0);
     }
     // A standby that becomes the source: the pipeline reads it from now on, for ffmpeg, and the
     // engine allows one reader per session. Right after the standby's reader lets go, the engine
@@ -389,8 +392,6 @@ export class PipelineManager {
       });
       external = { playlist, askedAt: now };
       this.externals.set(id, external);
-      // As for the layout changes below: the series starts at 0.
-      this.slates.inc({ stream: id }, 0);
     }
     return external;
   }
