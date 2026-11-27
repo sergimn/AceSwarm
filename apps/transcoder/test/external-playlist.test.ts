@@ -222,6 +222,9 @@ const FILES_KEPT = 10;
 /** A file a playlist lists is there for this long at least, in seconds: VLC asks for the second segment behind a discontinuity some ten seconds after the first. */
 const FILE_LIFE = 12;
 
+/** How long the random test may take: 150 streams of ten minutes take well under a second here, and a few on a slow CI runner. */
+const LONG_TEST_MS = 30_000;
+
 /** How long after the stream delivered faster than in real time a segment in its own time may be left out, in seconds. */
 const FAST_SPAN = 30;
 
@@ -270,8 +273,10 @@ class Watch {
   /** Times the slate took over from the stream's video. */
   slates = 0;
   private readonly name: string;
-  /** The stream's segments as its ffmpeg writes them. */
-  private readonly written: readonly Arrival[];
+  /** When the stream's ffmpeg wrote each of its segments, by its address. */
+  private readonly writtenAt = new Map<string, number>();
+  /** The number of each ffmpeg run's newest segment that came. */
+  private readonly newestOfRun = new Map<number, number>();
   /** The stream's segments as the playlist was told of them, in order, and where each is in that order. */
   private readonly arrivals: Arrival[] = [];
   private readonly orderOf = new Map<string, number>();
@@ -289,14 +294,19 @@ class Watch {
 
   constructor(name: string, written: readonly Arrival[]) {
     this.name = name;
-    this.written = written;
+    for (const one of written) {
+      this.writtenAt.set(uriOf(one), one.at);
+    }
   }
 
   /** The player asks at `now`, after the segments in `came`, and gets `listed`. */
   asks(now: number, came: readonly Arrival[], listed: readonly Entry[]): void {
     const where = `${this.name} at ${now.toFixed(1)}`;
     // It asks often enough to see every segment the playlist ever lists.
-    expect(listed[0]?.index ?? Infinity, where).toBeLessThanOrEqual(this.seen.size);
+    // (Each check runs its expect only when it fails: there are a million of them.)
+    if (!((listed[0]?.index ?? Infinity) <= this.seen.size)) {
+      expect(listed[0]?.index ?? Infinity, where).toBeLessThanOrEqual(this.seen.size);
+    }
     this.came(came, listed.length > 0 && this.seen.get(this.seen.size - 1)?.slate === false);
     for (const entry of listed) {
       if (this.seen.has(entry.index)) {
@@ -318,7 +328,9 @@ class Watch {
     for (let index = this.before.index + 1; index < this.seen.size; index += 1) {
       since += this.seen.get(index)?.duration ?? NaN;
     }
-    expect(since, where).toBeLessThanOrEqual(now - this.before.at + 2 * NOTICE_SLACK + 1e-6);
+    if (!(since <= now - this.before.at + 2 * NOTICE_SLACK + 1e-6)) {
+      expect(since, where).toBeLessThanOrEqual(now - this.before.at + 2 * NOTICE_SLACK + 1e-6);
+    }
   }
 
   /** The playlist was told of the segments in `came`, while it showed the stream or not. */
@@ -339,6 +351,7 @@ class Watch {
       }
       this.orderOf.set(uriOf(arrival), this.arrivals.length);
       this.arrivals.push(arrival);
+      this.newestOfRun.set(arrival.run, arrival.index);
     }
   }
 
@@ -349,8 +362,10 @@ class Watch {
         continue;
       }
       const [run, index] = (/g(\d+)\/full\/seg_(\d+)/.exec(entry.uri) ?? []).slice(1).map(Number);
-      const newestOfRun = this.arrivals.findLast((arrival) => arrival.run === run)?.index ?? NaN;
-      expect(index, `${where}: ${entry.uri} is gone`).toBeGreaterThan(newestOfRun - FILES_KEPT);
+      const newest = this.newestOfRun.get(run ?? NaN) ?? NaN;
+      if (!((index ?? NaN) > newest - FILES_KEPT)) {
+        expect(index, `${where}: ${entry.uri} is gone`).toBeGreaterThan(newest - FILES_KEPT);
+      }
     }
   }
 
@@ -360,12 +375,14 @@ class Watch {
     if (newest === undefined) {
       return;
     }
-    if (listed.at(-1)?.slate === false && newest.regular && newest.at - this.fastAt > FAST_SPAN) {
+    const waiting = this.settled !== this.arrivals.length;
+    if (waiting && listed.at(-1)?.slate === false && newest.regular && newest.at - this.fastAt > FAST_SPAN) {
       // While the stream shows, the playlist lists its segments as a player asks.
       expect(this.settled, `${where}: ${uriOf(newest)} waits`).toBe(this.arrivals.length);
     }
     // While the slate shows, they wait, but not once they came in their own time for a while, and still do.
     if (
+      waiting &&
       listed.at(-1)?.slate === true &&
       now - this.regularSince > WAITS_AT_MOST &&
       now - newest.at <= 2.5 + NOTICE_SLACK
@@ -385,10 +402,13 @@ class Watch {
       // While the count runs, the file of what it lists is there long enough for any player to get
       // it. A player gets the first one behind a discontinuity at once. (Without a count the playlist
       // lists what ffmpeg writes, as the page's does, and its files are as long there.)
-      const newer = this.written.find((one) => one.run === arrival?.run && one.index === arrival.index + FILES_KEPT);
-      expect((newer?.at ?? Infinity) - now, `${where}: ${entry.uri} is gone too soon`).toBeGreaterThanOrEqual(
-        FILE_LIFE,
-      );
+      const newer =
+        arrival === undefined
+          ? undefined
+          : this.writtenAt.get(uriOf({ ...arrival, index: arrival.index + FILES_KEPT }));
+      if (!((newer ?? Infinity) - now >= FILE_LIFE)) {
+        expect((newer ?? Infinity) - now, `${where}: ${entry.uri} is gone too soon`).toBeGreaterThanOrEqual(FILE_LIFE);
+      }
     }
     for (const leftOut of this.arrivals.slice(this.settled, order)) {
       // What comes in its own time is never left out once the stream is back. Right behind the
@@ -396,7 +416,9 @@ class Watch {
       // a few seconds after the stream delivered faster than in real time, which used up what the
       // count had to spare (see the notes' limits).
       const fast = leftOut.at - this.fastAt <= FAST_SPAN;
-      expect(behindSlate || fast || !leftOut.regular, `${where}: ${uriOf(leftOut)} left out`).toBe(true);
+      if (!behindSlate && !fast && leftOut.regular) {
+        expect.fail(`${where}: ${uriOf(leftOut)} left out`);
+      }
       this.brokenAt = Math.max(this.brokenAt, leftOut.at);
     }
     this.settled = order + 1;
@@ -1222,30 +1244,34 @@ describe("ExternalPlaylist", () => {
     }
   });
 
-  it("never lists more than the time that passed since the stream's last segment before the slate", () => {
-    for (let seed = 1; seed <= 150; seed += 1) {
-      const random = seeded(seed);
-      const { text, segment } = make();
-      const written = pausingStream(random, 600);
-      const watch = new Watch(`seed ${String(seed)}`, written);
-      const phase = random();
-      let next = 0;
-      let asked = 0;
-      for (let now = 2; now < 600; now += 0.5 + random() * 1.5) {
-        const came: Arrival[] = [];
-        for (const look of looksUntil(now, asked, phase, random)) {
-          for (let one = written[next]; one !== undefined && one.at <= look; one = written[next]) {
-            segment(look, one.run, one.index, one.duration);
-            came.push({ ...one, at: look });
-            next += 1;
+  it(
+    "never lists more than the time that passed since the stream's last segment before the slate",
+    () => {
+      for (let seed = 1; seed <= 150; seed += 1) {
+        const random = seeded(seed);
+        const { text, segment } = make();
+        const written = pausingStream(random, 600);
+        const watch = new Watch(`seed ${String(seed)}`, written);
+        const phase = random();
+        let next = 0;
+        let asked = 0;
+        for (let now = 2; now < 600; now += 0.5 + random() * 1.5) {
+          const came: Arrival[] = [];
+          for (const look of looksUntil(now, asked, phase, random)) {
+            for (let one = written[next]; one !== undefined && one.at <= look; one = written[next]) {
+              segment(look, one.run, one.index, one.duration);
+              came.push({ ...one, at: look });
+              next += 1;
+            }
           }
+          watch.asks(now, came, entriesOf(text(now)));
+          asked = now;
         }
-        watch.asks(now, came, entriesOf(text(now)));
-        asked = now;
+        expect(watch.slates, `seed ${String(seed)}: times the slate took over`).toBeGreaterThan(3);
       }
-      expect(watch.slates, `seed ${String(seed)}: times the slate took over`).toBeGreaterThan(3);
-    }
-  });
+    },
+    LONG_TEST_MS,
+  );
 
   it("lists nothing more of a slate without segments, or with one that lasts no time", () => {
     const empty = make(() => ({ directory: "/hls/_slate", segments: [] }));
