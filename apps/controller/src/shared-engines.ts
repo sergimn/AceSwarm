@@ -21,7 +21,7 @@ export interface SharedEngineSettings {
 export type SharedRestartReason = "watched" | "failures" | "all-failed" | "manual" | "unresponsive";
 
 export interface FailureReport {
-  /** Someone watches the stream full screen. */
+  /** Someone watches the stream: full screen in the page, or in a player outside it. */
   watched: boolean;
   /** The stream's recovery ladder reached the step where it would restart its own engine. */
   wantsRestart: boolean;

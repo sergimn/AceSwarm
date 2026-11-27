@@ -459,10 +459,18 @@ test("a player outside the page counts as a viewer of a stream in the list, and 
   expect(orchestrator.getStream(added.id)?.viewers).toBe(1);
   expect(orchestrator.snapshot().streams.map(({ viewers }) => viewers)).toEqual([1]);
 
+  // A stream that is disabled has no viewers from that moment: its players lost their playlist.
   await orchestrator.updateStream(added.id, { enabled: false });
   expect(orchestrator.isEnabled(added.id)).toBe(false);
+  expect(orchestrator.viewers()).toEqual([]);
+  expect(orchestrator.getStream(added.id)?.viewers).toBe(0);
   await orchestrator.updateStream(added.id, { enabled: true });
   expect(orchestrator.isEnabled(added.id)).toBe(true);
+  orchestrator.reportExternalPlayer(added.id, "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
+  expect(orchestrator.viewers()).toHaveLength(1);
+  // Its name can change under them.
+  await orchestrator.updateStream(added.id, { name: "Renamed" });
+  expect(orchestrator.viewers()).toHaveLength(1);
 
   await orchestrator.removeStream(added.id);
   expect(orchestrator.viewers()).toEqual([]);

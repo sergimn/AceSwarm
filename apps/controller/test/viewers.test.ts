@@ -128,9 +128,11 @@ describe("players outside the page", () => {
     tracker.poll("s1", "192.0.2.7", VLC);
     clock.now += 45_000;
     tracker.poll("s1", "192.0.2.7", VLC);
-    expect(tracker.list()).toEqual([
-      { viewer: "external2", stream: "s1", device: "VLC", since: new Date(1_045_000).toISOString() },
-    ]);
+    const again = [{ viewer: "external2", stream: "s1", device: "VLC", since: new Date(1_045_000).toISOString() }];
+    expect(tracker.list()).toEqual(again);
+    // Listing them forgot the viewer it was before the pause, not the one it is now: it stays that one.
+    tracker.poll("s1", "192.0.2.7", VLC);
+    expect(tracker.list()).toEqual(again);
   });
 
   test("go with their stream, and make room like the others", () => {
@@ -146,6 +148,17 @@ describe("players outside the page", () => {
     expect(tracker.list().map(({ viewer }) => viewer)).toEqual(["external3", "aaaaaaaa"]);
     tracker.poll("s2", "192.0.2.8", VLC);
     expect(tracker.list().map(({ viewer }) => viewer)).toEqual(["aaaaaaaa", "external4"]);
+  });
+
+  test("make room first when they no longer count, before a page that was heard from longer ago", () => {
+    const { tracker, clock } = viewers(2);
+    // A page counts for two and a half minutes after its last report, a player outside it for half a minute.
+    tracker.report("aaaaaaaa", "s1", "Chrome");
+    clock.now += 1000;
+    tracker.poll("s1", "192.0.2.7", VLC);
+    clock.now += 40_000;
+    tracker.poll("s1", "192.0.2.8", VLC);
+    expect(tracker.list().map(({ viewer }) => viewer)).toEqual(["aaaaaaaa", "external2"]);
   });
 
   test("lose their id to a page that reports under it, and get a new one", () => {
@@ -213,13 +226,16 @@ test.each([
   ["libmpv", "mpv"],
   ["mpv 0.32.0", "mpv"],
   [FFMPEG, "ffmpeg"],
-  // A browser that plays the playlist by itself.
+  // A request with a browser's own User-Agent, as a page other than ours that plays the playlist sends.
   [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
     "Safari on iOS",
   ],
   ["curl/8.5.0", "External player"],
   ["stagefright/1.2 (Linux;Android 13)", "External player on Android"],
+  // An app built on ExoPlayer that sets no User-Agent, and what Safari's own player is said to send.
+  ["Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ3A.230805.001)", "External player on Android"],
+  ["AppleCoreMedia/1.0.0.21F90 (iPhone; U; CPU OS 17_5 like Mac OS X; en_us)", "External player on iOS"],
   [undefined, "External player"],
 ])("describes the player %s as %s", (userAgent, expected) => {
   expect(describePlayer(userAgent)).toBe(expected);

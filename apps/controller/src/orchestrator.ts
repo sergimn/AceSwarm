@@ -43,7 +43,7 @@ export interface OrchestratorDeps {
   settingsStore: SettingsStore;
   /** The engines streams share, one per path, while engine sharing is on. */
   shared: SharedEngines;
-  /** Who watches which stream full screen. */
+  /** Who watches which stream: pages that show it full screen, and players outside the page. */
   viewers: Viewers;
   engines: EngineManager;
   ace: AcestreamClient;
@@ -330,6 +330,11 @@ export class Orchestrator {
     );
     if (updated === undefined) {
       return undefined;
+    }
+    if (!updated.enabled) {
+      // Nobody watches a stream that is off. A page says so itself once it knows; a player outside
+      // the page says nothing, and would count until its last request is old enough.
+      this.deps.viewers.forgetStream(id);
     }
     const supervisor = this.supervisors.get(id);
     if (updated.enabled && supervisor === undefined) {

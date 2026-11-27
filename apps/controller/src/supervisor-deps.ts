@@ -30,7 +30,7 @@ export interface SupervisorDeps extends StreamEnginesDeps {
   sharedEngines?: () => boolean;
   /** Whether streams keep hot standbys on the other paths (the setting can change at any time). */
   hotStandby?: () => boolean;
-  /** Number of players showing this stream full screen. */
+  /** Number of players showing this stream: pages that show it full screen, and players outside the page. */
   viewers?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }

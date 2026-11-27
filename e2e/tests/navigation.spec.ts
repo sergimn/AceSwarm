@@ -312,14 +312,15 @@ test("counts a player outside the page as a viewer while it asks for the stream'
   const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
   expect(stream).toBeDefined();
   const { id, hls } = stream!;
-  /** Who watches the stream: each viewer's id and device, in the order they came. */
+  /** Who watches the stream: each viewer's id and device, in the order each was last heard from. */
   const watching = async (): Promise<ViewerView[]> =>
     ((await (await request.get("/api/viewers")).json()) as ViewerView[]).filter((viewer) => viewer.stream === id);
   const devices = async (): Promise<string[]> => (await watching()).map(({ device }) => device);
   const count = async (): Promise<number | undefined> => (await streamById(request, id))?.viewers;
 
   // The page's own playlist counts nobody: the page reports itself, and tests fetch it too.
-  expect((await request.get(hls.full)).ok()).toBe(true);
+  // (It has none for a moment while the stream recovers from a pause: then the next request counts.)
+  await expect.poll(async () => (await request.get(hls.full)).ok(), { timeout: 30_000 }).toBe(true);
   expect(await watching()).toEqual([]);
 
   // Two players, by what they call themselves.

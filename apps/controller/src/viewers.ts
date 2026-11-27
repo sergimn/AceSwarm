@@ -9,7 +9,7 @@ export interface ViewersOptions {
    * again every few seconds while it plays, so this is many requests long.
    */
   externalTimeoutMs?: number;
-  /** Viewers kept at most; the one heard from longest ago goes first. */
+  /** Viewers kept at most. Those that no longer count make room first, then the one heard from longest ago. */
   maxViewers?: number;
   now?: () => number;
   /** Makes up the id of a player outside the page: random, as the ones the pages make up. */
@@ -83,14 +83,15 @@ export class Viewers {
       .digest("base64");
     const known = this.external.get(key);
     const previous = known === undefined ? undefined : this.viewers.get(known);
-    // One that stopped asking for longer than it counts is a new viewer when it comes back, and so
-    // is one whose id a page's report took meanwhile.
+    // One that stopped asking for longer than it counts is a new viewer when it comes back. So is
+    // one whose id a page's report took meanwhile: `put` forgot its key then, so it isn't known
+    // here, and the comparison of the keys only says so a second time.
     const same = previous?.key === key && this.now() - previous.lastSeen <= previous.timeoutMs;
     const viewer = known !== undefined && same ? known : this.newId();
     this.put(viewer, { stream, device: describePlayer(userAgent), timeoutMs: this.externalTimeoutMs, key });
   }
 
-  /** Viewers of a stream that went away (it was removed): they stop counting right away. */
+  /** Viewers of a stream that went away (it was removed or disabled): they stop counting right away. */
   forgetStream(stream: string): void {
     for (const [id, viewer] of this.viewers) {
       if (viewer.stream === stream) {
@@ -128,6 +129,11 @@ export class Viewers {
     if (heard.key !== undefined) {
       this.external.set(heard.key, id);
     }
+    if (this.viewers.size > this.maxViewers) {
+      // Those that no longer count make room first: a page counts longer after its last report than
+      // a player outside the page does, so the one heard from longest ago may still count.
+      this.forgetGone();
+    }
     // Insertion order is the order they were heard from, so the first entries are the oldest.
     for (const oldest of this.viewers.keys()) {
       if (this.viewers.size <= this.maxViewers) {
@@ -146,13 +152,17 @@ export class Viewers {
   }
 
   /** The viewers heard from recently; forgets the others. */
-  private *activeEntries(): Generator<[string, Viewer]> {
+  private activeEntries(): MapIterator<[string, Viewer]> {
+    this.forgetGone();
+    return this.viewers.entries();
+  }
+
+  /** Forgets the viewers that were not heard from for longer than they count. */
+  private forgetGone(): void {
     const now = this.now();
     for (const [id, viewer] of this.viewers) {
       if (now - viewer.lastSeen > viewer.timeoutMs) {
         this.remove(id);
-      } else {
-        yield [id, viewer];
       }
     }
   }
@@ -167,9 +177,10 @@ const BROWSERS: [RegExp, string][] = [
 
 /**
  * Players outside the page, by what they call themselves: VLC says "VLC/3.0.20 LibVLC/3.0.20",
- * Kodi "Kodi/21.0 (...)", apps built on ExoPlayer "ExoPlayerLib/2.19.1" or "AndroidXMedia3/1.4.1",
- * mpv "libmpv" (older ones "mpv 0.32.0"), and ffmpeg, ffplay and what is built on their library
- * "Lavf/61.7.100".
+ * Kodi "Kodi/21.0 (...)", mpv "libmpv" (older ones "mpv 0.32.0"), and ffmpeg, ffplay and what is
+ * built on their library "Lavf/61.7.100". An app built on ExoPlayer says "ExoPlayerLib/2.19.1" or
+ * "AndroidXMedia3/1.4.1" when it lets the library name itself; one that sets nothing sends
+ * Android's own "Dalvik/2.1.0 (Linux; U; Android ...)", which has no name here.
  */
 const PLAYERS: [RegExp, string][] = [
   [/\bVLC\//, "VLC"],
@@ -206,8 +217,9 @@ export function describeDevice(userAgent = ""): string {
 
 /**
  * The same for a player outside the page, such as "VLC" or "Kodi on Android": most say no more
- * than their name. A browser that plays the playlist by itself is named as a browser, and one
- * that says nothing known is an "External player".
+ * than their name. A request that comes with a browser's User-Agent is named as that browser, and
+ * one that says nothing known is an "External player". The player a browser has built in may not
+ * ask as the browser: Safari's is said to ask as "AppleCoreMedia/...", which is not known here.
  */
 export function describePlayer(userAgent = ""): string {
   return describe([...PLAYERS, ...BROWSERS], "External player", userAgent);
