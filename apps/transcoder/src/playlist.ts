@@ -72,6 +72,11 @@ export class VirtualPlaylist {
     return this.segments.length;
   }
 
+  /** How long the longest segment it lists lasts, in seconds: 0 when it lists none. */
+  get longest(): number {
+    return Math.max(0, ...this.segments.map((segment) => segment.duration));
+  }
+
   /**
    * Adds the segments a generation currently lists. Segments already added are skipped, and a
    * generation the playlist went on from can never add more: a playlist only goes forward. Which

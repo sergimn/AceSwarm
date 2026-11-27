@@ -29,33 +29,29 @@ const RECENT_SEGMENTS = 6;
  */
 const LONG_SEGMENT_SECONDS = 10;
 /**
- * No segment counts for more than this. A full output that writes none for this long is taken for
- * stuck and started again (`FULL_OUTPUT_STALL_SECONDS`, 30 unless set otherwise), so a stream that
- * plays has none longer.
- */
-const LONGEST_SEGMENT_SECONDS = 30;
-/**
- * A playlist nobody asked for in this long starts its slate over from now, instead of adding every
- * segment of it that came due meanwhile: nobody was there to play them.
+ * A playlist nobody asked for in this long goes on with its slate from now, instead of adding
+ * every segment of it that came due meanwhile: nobody was there to play them.
  */
 const CATCH_UP_MS = 60_000;
 /**
- * Where the slate starts for a player that has nothing of this playlist yet, it starts this long
- * ago: the player gets three segments at once and plays a few seconds behind the newest one, as it
- * does on a stream that plays. On one segment at a time it runs dry at each, and VLC then waits
- * longer before it plays what comes next, the stream's video included.
+ * The slate starts this many of its segments ago, so a player gets three at once. It has little
+ * or nothing left to play by then: nothing of a playlist it just opened, and what it had of the
+ * stream's video went while the slate waited. With three segments it plays a few seconds behind
+ * the newest one again, as it does on a stream that plays. On one segment at a time it runs dry
+ * at each, and VLC then waits longer before it plays what comes next, the stream's video included.
  */
-const SLATE_HEAD_START_MS = 4000;
+const SLATE_SEGMENTS_AHEAD = 2;
 
 /**
- * How long after a segment of the stream the slate is due, from what the stream's last segments
- * lasted (in seconds): a little longer than the next one usually takes to come.
+ * How long after a segment of the stream the next one may take, from what the last segments of the
+ * stream's ffmpeg run lasted (in seconds): a little longer than it usually takes to come. No
+ * segment counts for more than `longest` seconds.
  */
-function slateAfter(recent: readonly number[]): number {
+function slateAfter(recent: readonly number[], longest: number): number {
   const sorted = recent.toSorted((one, other) => one - other);
   const usual = sorted[Math.floor((sorted.length - 1) / 2)] ?? 0;
   const counted = sorted.filter(
-    (seconds) => seconds <= LONG_SEGMENT_SECONDS || (seconds <= 2 * usual && seconds <= LONGEST_SEGMENT_SECONDS),
+    (seconds) => seconds <= LONG_SEGMENT_SECONDS || (seconds <= 2 * usual && seconds <= longest),
   );
   return Math.max(SLATE_AFTER_MS, Math.max(0, ...counted) * 1000 + SLATE_MARGIN_MS);
 }
@@ -65,10 +61,13 @@ export interface ExternalPlaylistOptions {
   windowSize: number;
   /** Video older than this leaves the playlist, as it leaves the page's (see `PipelineSettings.liveEdge`). */
   staleAfterMs: number;
+  /**
+   * No segment of a stream that plays lasts longer than this: a full output that writes none for
+   * this long is taken for stuck and started again (see `StuckLimits.fullOutputStallMs`).
+   */
+  longestSegmentMs: number;
   /** The slate, once it is made: none before that, or when it could not be made. */
   slate: () => Slate | undefined;
-  /** When the playlist starts: the slate is due from then on, until the stream's first segment. */
-  now: number;
   /** The slate took the place of the stream's video. */
   onSlate?: () => void;
 }
@@ -80,8 +79,9 @@ export interface ExternalPlaylistOptions {
  * The page's player waits when its playlist stops growing, and tries again when it fails. Other
  * players give up: the ones built on ffmpeg some ten seconds after the last new segment, and every
  * one of them at the first playlist request that fails. So this playlist always goes on. While
- * the stream starts, and whenever no segment of it came for a few seconds (`slateAfter`), it lists
- * the slate's segments, one more as each comes due, until the stream's next segment.
+ * the stream starts, and whenever no segment of it came for a few seconds (`slateDue`), it lists
+ * the slate's segments, three to start with and one more as each comes due, until the stream's
+ * next segment.
  *
  * The slate is a loop: its segments' timestamps run on from one to the next, as a player needs
  * (one segment listed over and over stops some players), and start over with each pass. Every
@@ -94,6 +94,7 @@ export interface ExternalPlaylistOptions {
 export class ExternalPlaylist {
   private readonly playlist: VirtualPlaylist;
   private readonly staleAfterMs: number;
+  private readonly longestSegmentMs: number;
   private readonly slate: () => Slate | undefined;
   private readonly onSlate: (() => void) | undefined;
   /**
@@ -103,24 +104,21 @@ export class ExternalPlaylist {
   private stretch = 0;
   /** The ffmpeg run of the stream's last segment. */
   private lastGeneration: number | undefined;
-  /** While the slate shows: which of its segments is next. */
+  /** When the stream's last segment came: never yet, before its first one. */
+  private lastAt = -Infinity;
+  /** While the slate shows: which of its segments is next... */
   private slateNext: number | undefined;
-  /** When the next segment of the slate is due, unless one of the stream comes first. */
-  private slateDueAt: number;
+  /** ...and when that one is due, unless one of the stream comes first. */
+  private slateDueAt = 0;
   /** What the last segments of the stream's ffmpeg run lasted, in seconds. */
   private readonly recent: number[] = [];
 
   constructor(options: ExternalPlaylistOptions) {
     this.playlist = new VirtualPlaylist(options.windowSize);
     this.staleAfterMs = options.staleAfterMs;
+    this.longestSegmentMs = options.longestSegmentMs;
     this.slate = options.slate;
     this.onSlate = options.onSlate;
-    this.slateDueAt = options.now - SLATE_HEAD_START_MS;
-  }
-
-  /** Whether the playlist's newest segment is the slate's. */
-  get showsSlate(): boolean {
-    return this.slateNext !== undefined;
   }
 
   /** Takes a segment of the stream, as its full output's playlist took it. */
@@ -135,12 +133,12 @@ export class ExternalPlaylist {
       this.recent.length = 0;
     }
     this.lastGeneration = generation;
+    this.lastAt = at;
     this.slateNext = undefined;
     this.recent.push(segment.duration);
     if (this.recent.length > RECENT_SEGMENTS) {
       this.recent.shift();
     }
-    this.slateDueAt = at + slateAfter(this.recent);
   };
 
   /**
@@ -149,20 +147,37 @@ export class ExternalPlaylist {
    */
   render(now: number): string | undefined {
     this.playlist.expire(now - this.staleAfterMs);
-    if (now - this.slateDueAt > CATCH_UP_MS) {
-      // Nobody asked for a long time: the slate starts over for whoever asks now.
-      this.slateDueAt = now - SLATE_HEAD_START_MS;
-    } else if (this.playlist.length === 0) {
-      // Nothing is left to list, so there is nothing to wait for: the stream's last segments are
-      // old, even where the next one would not be late yet.
-      this.slateDueAt = Math.min(this.slateDueAt, now - SLATE_HEAD_START_MS);
-    }
     this.addSlate(now);
     return this.playlist.render();
   }
 
+  /**
+   * When the slate takes the place of the stream's video: when the stream's next segment is late.
+   *
+   * That is by what the last segments of its ffmpeg run lasted (`slateAfter`), but never later than
+   * a player waits. A player goes by the segments the playlist lists, so the slate comes no later
+   * than three seconds more than the longest of those: after an outage they are the slate's, and
+   * the stream's first segment may be the short end of a long one, so a player is back to waiting
+   * ten seconds while the stream's next segment takes as long as its segments usually do. With
+   * nothing left to list (the stream's last segments got old), that is five seconds, long gone.
+   * Before the stream's first segment the slate is due at once.
+   */
+  private slateDue(): number {
+    const listed = Math.max(SLATE_AFTER_MS, this.playlist.longest * 1000 + SLATE_MARGIN_MS);
+    return this.lastAt + Math.min(slateAfter(this.recent, this.longestSegmentMs / 1000), listed);
+  }
+
   private addSlate(now: number): void {
     const segments = this.slate()?.segments ?? [];
+    const starts = this.slateNext === undefined;
+    if (starts && this.slateDue() > now) {
+      return;
+    }
+    if (starts || now - this.slateDueAt > CATCH_UP_MS) {
+      // It starts with the request that finds it due, and after a long time without one it goes on
+      // from the request that comes: with three segments, for a player with nothing left to play.
+      this.slateDueAt = now - SLATE_SEGMENTS_AHEAD * (segments[0]?.duration ?? 0) * 1000;
+    }
     while (this.slateDueAt <= now) {
       const index = this.slateNext ?? 0;
       const segment = segments[index];
@@ -175,7 +190,8 @@ export class ExternalPlaylist {
       if (this.slateNext === undefined && this.lastGeneration !== undefined) {
         this.onSlate?.();
       }
-      this.playlist.append(this.stretch, [segment], "", this.slateDueAt);
+      // The segments it starts with are no older than what they follow.
+      this.playlist.append(this.stretch, [segment], "", Math.max(this.slateDueAt, this.lastAt));
       this.slateNext = (index + 1) % segments.length;
       this.slateDueAt += segment.duration * 1000;
     }

@@ -16,6 +16,7 @@ import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
 import { ExternalPlaylist, type Slate } from "./external-playlist.ts";
 import { makeSlate, SLATE_NAME, slateFile, type RunFfmpeg } from "./slate.ts";
+import { DEFAULT_STUCK_LIMITS } from "./stuck-runs.ts";
 
 const idParams = z.object({ id: z.string().regex(/^[a-z0-9]{6,32}$/) });
 const httpUrl = z.url({ protocol: /^https?$/ });
@@ -384,8 +385,8 @@ export class PipelineManager {
       const playlist = new ExternalPlaylist({
         windowSize: this.settings.plan.playlistSize,
         staleAfterMs: (this.settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS).staleAfterMs,
+        longestSegmentMs: (this.settings.stuck ?? DEFAULT_STUCK_LIMITS).fullOutputStallMs,
         slate: () => this.slate,
-        now,
         onSlate: () => {
           this.slates.inc({ stream: id });
         },
@@ -495,8 +496,8 @@ export function registerRoutes(service: Service, manager: PipelineManager): void
   });
 
   app.get(`/hls/:id/${SLATE_NAME}/:file`, async (request, reply) => {
-    const { file = "" } = request.params as Partial<Record<string, string>>;
-    const path = manager.slatePath(file);
+    const { id, file = "" } = request.params as Partial<Record<string, string>>;
+    const path = idParams.safeParse({ id }).success ? manager.slatePath(file) : undefined;
     if (path === undefined) {
       return reply.code(404).send({ error: "segment not found" });
     }

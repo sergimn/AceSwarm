@@ -133,6 +133,19 @@ describe("VirtualPlaylist", () => {
     expect(playlist.append(1, segments(1, 1), "1/")).toBe(1);
   });
 
+  it("says how long the longest segment it lists lasts", () => {
+    const playlist = new VirtualPlaylist(3);
+    expect(playlist.longest).toBe(0);
+    playlist.append(1, [{ duration: 11.5, uri: "seg_000000.ts" }], "1/", 1000);
+    playlist.append(1, segments(1, 2), "1/", 2000);
+    expect(playlist.longest).toBe(11.5);
+    // Only the segments it still lists count: not one that left its window, or got old.
+    playlist.append(1, segments(3, 3), "1/", 3000);
+    expect(playlist.longest).toBe(2);
+    playlist.expire(4000);
+    expect(playlist.longest).toBe(0);
+  });
+
   it("drops segments older than a time, and keeps both sequences counting across the gap", () => {
     const playlist = new VirtualPlaylist(6);
     playlist.append(1, segments(0, 2), "1/", 1000);

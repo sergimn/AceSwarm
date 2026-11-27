@@ -9,7 +9,6 @@ const SLATE: Slate = {
 const STALE_MS = 60_000;
 
 interface Made {
-  playlist: ExternalPlaylist;
   /** What the playlist lists at `seconds`: `s<n>` a segment of the slate, `g<run>:<n>` one of the stream, `|` a discontinuity. */
   at: (seconds: number) => string;
   /** The playlist's text at `seconds`. */
@@ -20,13 +19,13 @@ interface Made {
   slates: () => number;
 }
 
-function make(slate: () => Slate | undefined = () => SLATE, staleAfterMs = STALE_MS): Made {
+function make(slate: () => Slate | undefined = () => SLATE, staleAfterMs = STALE_MS, longestSegmentMs = 30_000): Made {
   let slates = 0;
   const playlist = new ExternalPlaylist({
     windowSize: 6,
     staleAfterMs,
+    longestSegmentMs,
     slate,
-    now: 0,
     onSlate: () => {
       slates += 1;
     },
@@ -47,7 +46,7 @@ function make(slate: () => Slate | undefined = () => SLATE, staleAfterMs = STALE
     const uri = `../g${String(run)}/full/seg_${String(index).padStart(6, "0")}.ts`;
     playlist.add(run, { uri, duration }, seconds * 1000);
   };
-  return { playlist, at, text, segment, slates: () => slates };
+  return { at, text, segment, slates: () => slates };
 }
 
 const sequences = (text = ""): [media: number, discontinuity: number] => [
@@ -57,10 +56,9 @@ const sequences = (text = ""): [media: number, discontinuity: number] => [
 
 describe("ExternalPlaylist", () => {
   it("starts the slate with three segments at once, then lists one more as each comes due", () => {
-    const { at, text, playlist } = make();
+    const { at, text } = make();
     // A player that has nothing yet gets a few seconds to play behind the newest segment.
     expect(at(0)).toBe("s0 s1 s2");
-    expect(playlist.showsSlate).toBe(true);
     expect(at(1.9)).toBe("s0 s1 s2");
     expect(at(2)).toBe("s0 s1 s2 | s0");
     expect(at(4.5)).toBe("s0 s1 s2 | s0 s1");
@@ -72,6 +70,7 @@ describe("ExternalPlaylist", () => {
 
   it("starts the slate's loop over behind a discontinuity, and keeps counting", () => {
     const { at, text } = make();
+    expect(at(0)).toBe("s0 s1 s2");
     expect(at(2)).toBe("s0 s1 s2 | s0");
     expect(sequences(text(2))).toEqual([0, 0]);
     expect(at(9)).toBe("s1 s2 | s0 s1 s2 | s0");
@@ -86,10 +85,10 @@ describe("ExternalPlaylist", () => {
   });
 
   it("goes over to the stream's segments behind a discontinuity", () => {
-    const { at, segment, playlist, slates } = make();
+    const { at, segment, slates } = make();
+    expect(at(0)).toBe("s0 s1 s2");
     expect(at(2)).toBe("s0 s1 s2 | s0");
     segment(3, 1, 0);
-    expect(playlist.showsSlate).toBe(false);
     expect(at(3)).toBe("s0 s1 s2 | s0 | g1:0");
     segment(5, 1, 1);
     segment(7, 1, 2);
@@ -99,28 +98,39 @@ describe("ExternalPlaylist", () => {
     expect(slates()).toBe(0);
   });
 
-  it("takes the slate again when no segment of the stream came for five seconds, from its first segment", () => {
-    const { at, segment, slates, playlist } = make();
+  it("takes the slate again when no segment of the stream came for five seconds, with three segments at once", () => {
+    const { at, segment, slates } = make();
     expect(at(0)).toBe("s0 s1 s2");
     segment(1, 1, 0);
     segment(3, 1, 1);
     expect(SLATE_AFTER_MS).toBe(5000);
     expect(at(7.9)).toBe("s0 s1 s2 | g1:0 g1:1");
     expect(slates()).toBe(0);
-    // One segment of it, not three: a player has the stream's last segments to play behind it.
-    expect(at(8)).toBe("s0 s1 s2 | g1:0 g1:1 | s0");
-    expect(playlist.showsSlate).toBe(true);
+    // A player played what it had of the stream while the slate waited: it gets three segments
+    // again, from its first one, and one more as each comes due.
+    expect(at(8)).toBe("s2 | g1:0 g1:1 | s0 s1 s2");
     expect(slates()).toBe(1);
-    expect(at(12)).toBe("s2 | g1:0 g1:1 | s0 s1 s2");
+    expect(at(9.9)).toBe("s2 | g1:0 g1:1 | s0 s1 s2");
+    expect(at(10)).toBe("g1:0 g1:1 | s0 s1 s2 | s0");
     // The stream is back, in the same ffmpeg run: its segments are behind a discontinuity all the same.
-    segment(13, 1, 2);
-    expect(at(13)).toBe("g1:0 g1:1 | s0 s1 s2 | g1:2");
+    segment(11, 1, 2);
+    expect(at(11)).toBe("g1:1 | s0 s1 s2 | s0 | g1:2");
     expect(slates()).toBe(1);
     // Five seconds count from its last segment, each time, and each time counts once.
-    segment(15, 1, 3);
-    expect(at(19.5)).toBe("g1:1 | s0 s1 s2 | g1:2 g1:3");
-    expect(at(24)).toBe("s2 | g1:2 g1:3 | s0 s1 s2");
+    segment(13, 1, 3);
+    expect(at(17.9)).toBe("s0 s1 s2 | s0 | g1:2 g1:3");
+    expect(at(18)).toBe("s0 | g1:2 g1:3 | s0 s1 s2");
     expect(slates()).toBe(2);
+  });
+
+  it("starts the slate with the request that finds it due, however long ago that was", () => {
+    const { at, segment, slates } = make();
+    segment(1, 1, 0);
+    segment(3, 1, 1);
+    // Nobody asked for half a minute after the stream stopped: the slate is not half a minute long.
+    expect(at(33)).toBe("g1:0 g1:1 | s0 s1 s2");
+    expect(at(35)).toBe("g1:0 g1:1 | s0 s1 s2 | s0");
+    expect(slates()).toBe(1);
   });
 
   it("puts a segment of the stream that comes as the slate is due before it", () => {
@@ -150,12 +160,12 @@ describe("ExternalPlaylist", () => {
     // Each comes six seconds after the one before: the slate waits three more than that.
     expect(SLATE_MARGIN_MS).toBe(3000);
     expect(at(14.9)).toBe("g1:0 g1:1");
-    expect(at(15)).toBe("g1:0 g1:1 | s0");
+    expect(at(15)).toBe("g1:0 g1:1 | s0 s1 s2");
     expect(slates()).toBe(1);
     // A short segment after long ones: the next may be long again.
     segment(16, 1, 2, 2);
-    expect(at(24.9)).toBe("g1:0 g1:1 | s0 | g1:2");
-    expect(at(25)).toBe("g1:0 g1:1 | s0 | g1:2 | s0");
+    expect(at(24.9)).toBe("g1:0 g1:1 | s0 s1 s2 | g1:2");
+    expect(at(25)).toBe("s1 s2 | g1:2 | s0 s1 s2");
   });
 
   it("shows no slate between the segments of a broadcast whose key frames are far apart", () => {
@@ -170,8 +180,36 @@ describe("ExternalPlaylist", () => {
     expect(slates()).toBe(0);
     // When it stops, the slate comes three seconds after its next segment was due.
     expect(at(110.9)).not.toMatch(/s\d/);
-    expect(at(111)).toMatch(/g1:8 \| s0$/);
+    expect(at(111)).toMatch(/g1:8 \| s0 s1 s2$/);
     expect(slates()).toBe(1);
+  });
+
+  it("comes back in time after an outage, when the stream's first segment is the short end of a long one", () => {
+    const { at, segment, slates } = make();
+    // Twelve seconds between key frames. The stream stops, and a player asks every two seconds.
+    segment(0, 1, 0, 12);
+    segment(12, 1, 1, 12);
+    segment(24, 1, 2, 12);
+    for (let second = 26; second <= 70; second += 2) {
+      at(second);
+    }
+    expect(at(70)).not.toMatch(/g/);
+    expect(slates()).toBe(1);
+    // It comes back a little before a key frame. The playlist now lists segments of two seconds
+    // and this one, so a player waits as it does for a stream of short segments, and the stream's
+    // next segment takes eleven seconds.
+    segment(71, 1, 3, 1.8);
+    expect(at(75.9)).toMatch(/g1:3$/);
+    expect(at(76)).toMatch(/g1:3 \| s0 s1 s2$/);
+    expect(slates()).toBe(2);
+    // With a long segment listed again, the slate waits as it did before the outage.
+    segment(82, 1, 4, 12);
+    segment(94, 1, 5, 12);
+    for (let second = 94; second <= 108; second += 2) {
+      expect(at(second), String(second)).toMatch(/g1:5$/);
+    }
+    expect(at(109)).toMatch(/g1:5 \| s0 s1 s2$/);
+    expect(slates()).toBe(3);
   });
 
   it("doesn't wait longer after a segment whose time spans an outage", () => {
@@ -180,12 +218,12 @@ describe("ExternalPlaylist", () => {
     // The first one after 40 seconds without data says it lasts that long.
     segment(42, 1, 1, 41.5);
     expect(at(46.9).endsWith("g1:1")).toBe(true);
-    expect(at(47).endsWith("g1:1 | s0")).toBe(true);
+    expect(at(47).endsWith("g1:1 | s0 s1 s2")).toBe(true);
     // Nor after a second one soon after.
     segment(48, 1, 2);
     segment(75, 1, 3, 26);
     expect(at(79.9).endsWith("g1:3")).toBe(true);
-    expect(at(80).endsWith("g1:3 | s0")).toBe(true);
+    expect(at(80).endsWith("g1:3 | s0 s1 s2")).toBe(true);
   });
 
   it("tells a segment that spans an outage from a stream's usual long ones", () => {
@@ -196,12 +234,20 @@ describe("ExternalPlaylist", () => {
     // After 40 seconds without data: more than twice what its segments usually last.
     long.segment(76, 1, 3, 52);
     expect(long.at(90.9)).toBe("g1:3");
-    expect(long.at(91)).toBe("g1:3 | s0");
-    // A stream's first segment says what is usual, unless it is longer than any stream's that plays.
+    expect(long.at(91)).toBe("g1:3 | s0 s1 s2");
+    // A stream's first segment says what is usual, unless no stream that plays has one that long:
+    // a full output that writes none for 30 seconds is started again.
     const first = make();
     first.segment(0, 1, 0, 41.5);
     expect(first.at(4.9)).toBe("g1:0");
-    expect(first.at(5)).toBe("g1:0 | s0");
+    expect(first.at(5)).toBe("g1:0 | s0 s1 s2");
+    // Where a full output may take a minute, a broadcast with key frames 40 seconds apart plays.
+    const patient = make(() => SLATE, STALE_MS, 60_000);
+    patient.segment(0, 1, 0, 40);
+    patient.segment(40, 1, 1, 40);
+    expect(patient.at(59)).toBe("g1:0 g1:1");
+    expect(patient.at(82.9)).toBe("g1:1");
+    expect(patient.at(83)).toBe("g1:1 | s0 s1 s2");
   });
 
   it("takes each ffmpeg run's segments for what they are", () => {
@@ -217,7 +263,7 @@ describe("ExternalPlaylist", () => {
     expect(at(30.9)).toBe("g1:0 g1:1 g1:2 | g2:0 g2:1");
     expect(at(42.9)).toBe("g1:0 g1:1 g1:2 | g2:0 g2:1");
     expect(slates()).toBe(0);
-    expect(at(43)).toBe("g1:0 g1:1 g1:2 | g2:0 g2:1 | s0");
+    expect(at(43)).toBe("g1:2 | g2:0 g2:1 | s0 s1 s2");
   });
 
   it("lists the stream's segments only while there is no slate, and nothing once they are old", () => {
@@ -268,6 +314,9 @@ describe("ExternalPlaylist", () => {
     // Within a minute, the segments that came due meanwhile are all there.
     expect(at(650)).toBe("s2 | s0 s1 s2 | s0 s1");
     expect(sequences(text(650))).toEqual([25, 8]);
+    // After more than a minute it goes on from now, with three segments again.
+    expect(at(800)).toBe("s2 | s0 s1");
+    expect(sequences(text(800))).toEqual([31, 10]);
   });
 
   it("lists nothing more of a slate without segments, or with one that lasts no time", () => {
