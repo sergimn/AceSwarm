@@ -1,12 +1,12 @@
 /**
- * Handing a stream to a player outside the page, such as VLC: on Android the browser asks the
- * system to open the stream in an app, and elsewhere it downloads a small `.m3u` file for the
- * computer's player to open.
+ * Handing a stream to a player outside the page, such as VLC: on Android the page follows a link
+ * that asks the system to open the stream in an app, and elsewhere it downloads a small `.m3u`
+ * file for the computer's player to open.
  */
 
 /** How a stream was handed over, with the address of its playlist. */
 export type HandOff =
-  /** Android: `link` is the intent link the browser followed. */
+  /** Android: `link` is the intent link the page followed. */
   | { kind: "app"; url: string; link: string }
   /** Elsewhere: the `.m3u` file the browser downloaded. */
   | { kind: "file"; url: string; fileName: string; content: string };
@@ -22,9 +22,10 @@ export function isAndroid(userAgent: string): boolean {
 }
 
 /**
- * An Android intent link for the address of an HLS playlist: a browser that follows it asks the
- * system to open the playlist in an app. It names no app, so the system offers the players that
- * are installed, or opens the one set as the default.
+ * An Android intent link for the address of an HLS playlist: it asks the system to open the
+ * playlist in an app, and names none, so that the system can offer the players that are installed
+ * or open the one set as the default. What a browser and Android do with it was not tried on a
+ * real device yet (see "External players" in `docs/architecture.md`).
  */
 export function androidIntentUrl(url: string): string {
   const { protocol, host, pathname, search } = new URL(url);
@@ -148,6 +149,8 @@ export async function copyText(text: string, host: HTMLElement): Promise<boolean
   field.setAttribute("aria-hidden", "true");
   host.append(field);
   field.select();
+  // Older Safari on iOS is known to select nothing with `select()` alone (not checked here).
+  field.setSelectionRange(0, text.length);
   const copied = copySelection();
   field.remove();
   if (focused instanceof HTMLElement) {

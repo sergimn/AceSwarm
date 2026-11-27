@@ -783,12 +783,39 @@ test.describe("in a browser on Android", () => {
     await expect(player).toBeVisible();
     await expect(note).toBeHidden();
     await expect.poll(videoSource).not.toBeNull();
+
+    // So does disabling the stream, which has no address to give out then.
     await player.hover();
     await copy.click();
     await expect(note).toBeVisible();
+    const enabled = async (value: boolean): Promise<void> => {
+      const response = await request.patch(`/api/streams/${stream!.id}`, { data: { enabled: value } });
+      expect(response.ok(), await response.text()).toBe(true);
+    };
+    try {
+      await enabled(false);
+      await expect(copy).toBeHidden();
+      await expect(note).toBeHidden();
+    } finally {
+      await enabled(true);
+    }
+    await expect(copy).toBeVisible();
+
+    // And so does a copy that works, as if the browser had allowed it meanwhile.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+    await page.evaluate("document.execCommand = () => true");
+    await copy.click();
+    await expect(player.locator(".toast")).toHaveText("Link copied");
+    await expect(note).toBeHidden();
+    await page.evaluate("document.execCommand = () => false");
 
     // The button follows a link that asks Android to open the playlist in an app, and downloads no
     // file. The message has the address from then on, so the line under the name goes.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
     await player.getByRole("button", { name: "Open in external player" }).click();
     const message = player.locator(".player-waiting");
     await expect(message).toContainText("Sent to an external player");
@@ -807,5 +834,7 @@ test.describe("in a browser on Android", () => {
 
     await page.keyboard.press("Escape");
     await expect(player).toBeHidden();
+    // The stream is left as it was found, playing: it was disabled for a moment.
+    await waitForPlaying(request, stream!.id);
   });
 });
