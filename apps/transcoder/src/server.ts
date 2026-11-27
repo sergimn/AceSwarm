@@ -14,7 +14,7 @@ import type { OpenSource } from "./source-reader.ts";
 import { LAYOUT_CHANGE_KINDS } from "./ts-tables.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
-import { ExternalPlaylist, type Slate } from "./external-playlist.ts";
+import { ExternalPlaylist, steadyNow, type Slate } from "./external-playlist.ts";
 import { makeSlate, SLATE_NAME, slateFile, type RunFfmpeg } from "./slate.ts";
 import { DEFAULT_STUCK_LIMITS } from "./stuck-runs.ts";
 
@@ -65,6 +65,8 @@ export class PipelineManager {
   private readonly standbySettings: StandbyReaderSettings | undefined;
   private readonly watchLiveEdge: WatchLiveEdge;
   private readonly openSource: OpenSource | undefined;
+  /** The clock of the playlists for players outside the page (see `steadyNow`). */
+  private readonly clock: () => number;
   /** Shared by every stream's standby readers, so that few decode checks run at once. */
   private readonly decoder: DecodeChecker;
   readonly generations: Counter<"stream" | "reason">;
@@ -79,9 +81,15 @@ export class PipelineManager {
     logger: Logger,
     spawner?: Spawner,
     standbySettings?: StandbyReaderSettings,
-    options: { watchLiveEdge?: WatchLiveEdge; decoder?: DecodeChecker; openSource?: OpenSource } = {},
+    options: {
+      watchLiveEdge?: WatchLiveEdge;
+      decoder?: DecodeChecker;
+      openSource?: OpenSource;
+      clock?: () => number;
+    } = {},
   ) {
     this.settings = settings;
+    this.clock = options.clock ?? steadyNow;
     this.logger = logger;
     this.spawner = spawner;
     this.standbySettings = standbySettings;
@@ -263,6 +271,7 @@ export class PipelineManager {
     await this.stopping.get(id);
     let pipeline = this.pipelines.get(id);
     if (pipeline === undefined) {
+      const external = this.externalOf(id, this.clock()).playlist;
       pipeline = new Pipeline(
         id,
         this.settings,
@@ -280,7 +289,9 @@ export class PipelineManager {
           layoutGap: (stream, ms) => {
             this.layoutGaps.observe({ stream }, ms / 1000);
           },
-          fullSegment: this.externalOf(id, Date.now()).playlist.add,
+          fullSegment: (generation, segment) => {
+            external.add(generation, segment, this.clock());
+          },
         },
         { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
       );
@@ -362,8 +373,9 @@ export class PipelineManager {
   }
 
   /** The stream's playlist for players outside the page as it is now; undefined while it lists nothing. */
-  async externalPlaylist(id: string, now = Date.now()): Promise<string | undefined> {
+  async externalPlaylist(id: string, at?: number): Promise<string | undefined> {
     await this.pipelines.get(id)?.sync();
+    const now = at ?? this.clock();
     const external = this.externalOf(id, now);
     external.askedAt = now;
     return external.playlist.render(now);

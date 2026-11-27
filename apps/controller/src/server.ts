@@ -336,7 +336,16 @@ export async function registerRoutes(
   // HLS playlists and segments come from the transcoder; proxying keeps a single origin for the
   // browser and avoids exposing the transcoder.
   app.get("/hls/*", async (request, reply) => {
-    const target = new URL(`${options.transcoderUrl}${request.url}`);
+    let target: URL;
+    try {
+      target = new URL(`${options.transcoderUrl}${request.url}`);
+    } catch (error) {
+      return reply.code(502).send({ error: describeError(error) });
+    }
+    // Only the transcoder's HLS files are for the browser: not an address that `..` takes past them.
+    if (!target.pathname.startsWith("/hls/")) {
+      return reply.code(404).send({ error: "not found" });
+    }
     // The transcoder has a playlist for players outside the page for any stream it is asked about,
     // with the slate until the stream has video (a player may ask before the stream's pipeline is
     // there). Which streams there are is known here: only an enabled one has that playlist. The

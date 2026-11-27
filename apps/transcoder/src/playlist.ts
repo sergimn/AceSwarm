@@ -65,9 +65,10 @@ export class VirtualPlaylist {
   private readonly left = new Set<number>();
 
   /**
-   * With `keepChangesMs`, a discontinuity stays listed for that long, however many segments follow
-   * it: the playlist then lists more than `windowSize` segments for a while. A player that reads
-   * the playlist again only after that many came must still find the discontinuity in it.
+   * With `keepChangesMs`, a discontinuity stays listed for that long, with the segment before it,
+   * although more than `windowSize` segments follow it: a player that reads the playlist again only
+   * after that many came must still find the discontinuity in it (see `dropGone` for the files
+   * this lists). Without, the playlist lists no more than `windowSize` segments, ever.
    */
   constructor(windowSize: number, onSegment?: OnSegment, keepChangesMs = 0) {
     this.windowSize = windowSize;
@@ -125,7 +126,7 @@ export class VirtualPlaylist {
    */
   private keepsHead(now: number): boolean {
     const next = this.segments[1];
-    return next?.discontinuity === true && now - next.addedAt < this.keepChangesMs;
+    return this.keepChangesMs > 0 && next?.discontinuity === true && now - next.addedAt < this.keepChangesMs;
   }
 
   private leave(generation: number): void {
@@ -142,6 +143,18 @@ export class VirtualPlaylist {
    */
   expire(before: number): void {
     while (this.segments[0] !== undefined && this.segments[0].addedAt < before) {
+      this.dropHead();
+    }
+  }
+
+  /**
+   * Drops the segments up to the last one whose file is gone, by `gone`: a player must not be sent
+   * to a file that is not there. Only the first segments can leave a live playlist, so the ones
+   * before it go too.
+   */
+  dropGone(gone: (uri: string) => boolean): void {
+    const last = this.segments.findLastIndex((segment) => gone(segment.uri));
+    for (let dropped = 0; dropped <= last; dropped += 1) {
       this.dropHead();
     }
   }

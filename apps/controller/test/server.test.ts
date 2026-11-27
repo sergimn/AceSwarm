@@ -178,6 +178,16 @@ test("whoever gets a stream's playlist for external players counts as its viewer
   }
   expect(players).toHaveLength(otherSpellings("abcdef").length);
   expect(asked).toHaveLength(otherSpellings("abcdef").length);
+
+  // Nothing but the transcoder's HLS files is to be had through the proxy, however it is written.
+  asked.length = 0;
+  for (const path of ["/hls/../pipelines", "/hls/%2e%2e/metrics", String.raw`/hls/abcdef/..\..\pipelines`]) {
+    expect(await raw(path), path).toBe(404);
+  }
+  expect(asked).toEqual([]);
+  // Nor from another host's address: it is no address of the transcoder.
+  expect(await raw("http://elsewhere.example/hls/abcdef/full/index.m3u8")).toBe(502);
+  expect(asked).toEqual([]);
 });
 
 test("restarting a stream with no run says whether it is disabled, not running yet or unknown", async () => {

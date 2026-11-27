@@ -55,6 +55,13 @@ export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "ful
   return keyFrames && plan.fullMode === "copy" && plan.allFrames !== true;
 }
 
+/**
+ * How many segments ffmpeg keeps on disk beyond the ones its playlist lists: the served playlist
+ * lags slightly behind ffmpeg's. So a run's file of a segment is gone once this many and the
+ * playlist's size more are written.
+ */
+export const HLS_DELETE_THRESHOLD = 4;
+
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
   const directory = `${plan.directory}/${variant}`;
   return [
@@ -64,9 +71,8 @@ function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
     String(plan.segmentSeconds),
     "-hls_list_size",
     String(plan.playlistSize),
-    // Keep a few extra segments on disk: the served playlist lags slightly behind ffmpeg's.
     "-hls_delete_threshold",
-    "4",
+    String(HLS_DELETE_THRESHOLD),
     "-hls_flags",
     "delete_segments+independent_segments+temp_file",
     "-hls_segment_filename",

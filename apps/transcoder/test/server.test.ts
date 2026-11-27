@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createLogger } from "@aceswarm/shared/logger";
 import { createService, type Service } from "@aceswarm/shared/service";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PipelineSettings } from "../src/pipeline.ts";
 import { PipelineManager, registerRoutes } from "../src/server.ts";
 import type { RunFfmpeg } from "../src/slate.ts";
@@ -48,6 +48,7 @@ const mediaSequence = (playlist = ""): number => Number(/#EXT-X-MEDIA-SEQUENCE:(
 
 describe("the transcoder's playlists", () => {
   let hlsDir: string;
+  let settings: PipelineSettings;
   let service: Service;
   let manager: PipelineManager;
   /** Every connection to a source, in order. */
@@ -55,7 +56,7 @@ describe("the transcoder's playlists", () => {
 
   beforeEach(async () => {
     hlsDir = await mkdtemp(join(tmpdir(), "transcoder-server-test-"));
-    const settings: PipelineSettings = {
+    settings = {
       hlsDir,
       ffmpegPath: "ffmpeg",
       handoverTimeoutMs: 120_000,
@@ -87,16 +88,18 @@ describe("the transcoder's playlists", () => {
 
   const get = async (url: string) => service.app.inject({ method: "GET", url });
 
-  /** Writes what the stream's first ffmpeg run has written so far: a playlist of one segment, for each output. */
-  async function writeSegments(): Promise<void> {
+  /** Writes what the stream's first ffmpeg run has written so far: a playlist of its first `count` segments, for each output. */
+  async function writeSegments(count = 1): Promise<void> {
     for (const variant of ["full", "preview"]) {
       const directory = join(hlsDir, "stream1", "g1", variant);
       await mkdir(directory, { recursive: true });
-      await writeFile(join(directory, "seg_000000.ts"), `${variant} video`);
-      await writeFile(
-        join(directory, "index.m3u8"),
-        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg_000000.ts\n",
-      );
+      const lines = ["#EXTM3U", "#EXT-X-TARGETDURATION:2"];
+      for (let index = 0; index < count; index += 1) {
+        const name = `seg_${String(index).padStart(6, "0")}.ts`;
+        await writeFile(join(directory, name), `${variant} video`);
+        lines.push("#EXTINF:2.000,", name);
+      }
+      await writeFile(join(directory, "index.m3u8"), `${lines.join("\n")}\n`);
     }
   }
 
@@ -254,6 +257,57 @@ describe("the transcoder's playlists", () => {
     expect(await sequenceOf("stream1", now + 112_000)).toBe(0);
     expect(await manager.stop("waiting2")).toBe(false);
     expect(await sequenceOf("waiting2", now + 150_000)).toBe(0);
+  });
+
+  test("keeps the playlist of a stream without a pipeline while a player asks for it", async () => {
+    await manager.prepareSlate(fakeSlate);
+    const now = Date.now();
+    const sequenceOf = async (stream: string, at: number) => mediaSequence(await manager.externalPlaylist(stream, at));
+    // The stream's engine takes long to start, and a player asks every ten seconds meanwhile.
+    let last = 0;
+    for (let seconds = 0; seconds <= 70; seconds += 10) {
+      last = await sequenceOf("waiting1", now + seconds * 1000);
+    }
+    expect(last).toBeGreaterThan(0);
+    // Another stream's playlist is made: the one a player asked for a moment ago keeps counting.
+    expect(await sequenceOf("other1", now + 75_000)).toBe(0);
+    expect(await sequenceOf("waiting1", now + 76_000)).toBeGreaterThanOrEqual(last);
+  });
+
+  test("players outside the page go on through a wall clock that is set back", async () => {
+    // The playlists for players outside the page keep time by a clock that never goes back.
+    let steady = 1_000_000_000;
+    const own = createService({ name: "test", logger });
+    const sources = fakeSources();
+    const clocked = new PipelineManager(own, settings, logger, fakeFfmpeg, undefined, {
+      openSource: sources.open,
+      clock: () => steady,
+    });
+    const at = async (seconds: number): Promise<string[]> => {
+      steady = 1_000_000_000 + seconds * 1000;
+      return listed((await clocked.externalPlaylist("stream1")) ?? "");
+    };
+    try {
+      await clocked.prepareSlate(fakeSlate);
+      await clocked.start("stream1", "http://e1/play", false);
+      sources.opened[0]?.layout(layoutOf(256));
+      await writeSegments(1);
+      expect(await at(0)).toEqual(["../g1/full/seg_000000.ts"]);
+      // No video for six seconds: the slate takes over, and what the playlist lists is counted.
+      expect((await at(6)).slice(-2)).toEqual(["|", "../slate/seg_000.ts"]);
+      await writeSegments(2);
+      await at(6.5);
+      expect((await at(7.9)).slice(-2)).toEqual(["|", "../g1/full/seg_000001.ts"]);
+      // The wall clock is set back an hour, and the stream goes on in its own time.
+      const wall = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(wall - 3_600_000);
+      await writeSegments(3);
+      expect((await at(9)).at(-1)).toBe("../g1/full/seg_000002.ts");
+    } finally {
+      vi.restoreAllMocks();
+      await clocked.stopAll();
+      await own.app.close();
+    }
   });
 
   test("no slate when ffmpeg can't make it: the playlists work as without one", async () => {

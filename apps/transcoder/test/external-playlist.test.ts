@@ -102,10 +102,11 @@ interface Arrival {
 const uriOf = ({ run, index }: Arrival): string => `../g${String(run)}/full/seg_${String(index).padStart(6, "0")}.ts`;
 
 /**
- * A stream of two-second segments that pauses every so often, for 5.5 to 25 seconds, and comes
- * back in one of the ways streams do: with all it missed at once, in two lots or one segment
- * behind the other; with one segment that spans the pause; just late; or as another ffmpeg run.
- * The segments as its ffmpeg writes them.
+ * A stream of two-second segments that pauses every so often, for 5.5 to 50 seconds or too briefly
+ * for the slate (2 to 4.5), and comes back in one of the ways streams do: with all it missed at
+ * once, in two lots (up to two and a half seconds apart) or one segment behind the other; with one
+ * segment that spans the pause; just late; or as another ffmpeg run. The segments as its ffmpeg
+ * writes them.
  */
 function pausingStream(random: () => number, seconds: number): Arrival[] {
   const written: Arrival[] = [];
@@ -117,12 +118,13 @@ function pausingStream(random: () => number, seconds: number): Arrival[] {
     index += 1;
   };
   while (clock < seconds) {
-    const playing = 8 + Math.floor(random() * 10);
+    const playing = 3 + Math.floor(random() * 15);
     for (let count = 0; count < playing; count += 1) {
       clock += 2;
       write(clock, 2, true);
     }
-    const pause = 5.5 + random() * 19.5;
+    const kind = random();
+    const pause = kind < 0.3 ? 2 + random() * 2.5 : kind < 0.8 ? 5.5 + random() * 19.5 : 25 + random() * 25;
     const missed = Math.max(1, Math.floor(pause / 2));
     const how = Math.floor(random() * 6);
     clock += pause;
@@ -134,7 +136,9 @@ function pausingStream(random: () => number, seconds: number): Arrival[] {
         break;
       }
       case 1: {
-        const later = clock + 0.3 + random() * 0.6;
+        // Further apart only for the shorter pauses: after a long one, a second lot that comes
+        // after the first was listed deletes its files (see the notes' limits).
+        const later = clock + 0.3 + random() * (pause > 25 ? 0.6 : 2.2);
         for (let count = 0; count < missed; count += 1) {
           write(count < missed / 2 ? clock : later, 2, false);
         }
@@ -189,6 +193,10 @@ function looksUntil(now: number, after: number, phase: number, random: () => num
 
 /** How long the stream's segments wait while the slate shows (`HOLD_MS` in the source), in seconds. */
 const HOLD = 1.25;
+/** The longest a two-second segment in its own time is noticed after the one before it, in seconds. */
+const OWN_TIME_AT_MOST = 3.25;
+/** How many of a run's last segments ffmpeg keeps the files of: the six its playlist lists, and four more. */
+const FILES_KEPT = 10;
 
 /**
  * A player that asks for the playlist, and checks what it gets against the stream's segments as
@@ -233,8 +241,17 @@ class Watch {
         this.stream(entry, where);
       }
     }
-    // The stream comes back: its newest segment waits no longer than the playlist says.
+    // Nothing it lists is gone: ffmpeg deletes a run's oldest files as it writes new ones.
+    for (const entry of listed) {
+      if (entry.slate) {
+        continue;
+      }
+      const [run, index] = (/g(\d+)\/full\/seg_(\d+)/.exec(entry.uri) ?? []).slice(1).map(Number);
+      const newestOfRun = this.arrivals.findLast((arrival) => arrival.run === run)?.index ?? NaN;
+      expect(index, `${where}: ${entry.uri} is gone`).toBeGreaterThan(newestOfRun - FILES_KEPT);
+    }
     const newest = this.arrivals.at(-1);
+    // The stream comes back: its newest segment waits no longer than the playlist says.
     if (newest?.regular === true && now - newest.at > HOLD + 1e-6) {
       expect(this.settled, `${where}: ${uriOf(newest)} not listed`).toBe(this.arrivals.length);
     }
@@ -252,6 +269,13 @@ class Watch {
   private stream(entry: Entry, where: string): void {
     const order = this.orderOf.get(entry.uri) ?? NaN;
     const behindSlate = this.seen.get(entry.index - 1)?.slate === true;
+    const first = this.arrivals[this.settled];
+    const previous = this.arrivals[this.settled - 1];
+    if (!behindSlate && first !== undefined && previous !== undefined && first.at - previous.at > OWN_TIME_AT_MOST) {
+      // The stream paused again after it was back, too briefly for the slate: what it delivers now
+      // makes up for that, while the player waited. It is the player's to play.
+      this.before = undefined;
+    }
     for (const leftOut of this.arrivals.slice(this.settled, order)) {
       // What comes in its own time is never left out once the stream is back. Right behind the
       // slate it may be: the slate lasted that much longer, and the stream's video has no gap.
@@ -554,6 +578,20 @@ describe("ExternalPlaylist", () => {
     expect(sequences(text(800))).toEqual([31, 10]);
   });
 
+  it("goes on with its slate from now when nobody asked for a minute, before the stream's video got old", () => {
+    // A stale threshold of five minutes.
+    const { at, text, segment } = make(() => SLATE, 300_000);
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    expect(at(8)).toBe("g1:0 g1:1 | s0");
+    // Two minutes later, whoever asks has nothing to play: three of the slate's segments, from now.
+    expect(at(128)).toBe("g1:0 g1:1 | s0 s1 s2 | s0");
+    expect(sequences(text(128))).toEqual([0, 0]);
+    // Nothing is counted for that player: the stream's next segment is listed as it comes.
+    segment(129, 1, 2);
+    expect(at(129)).toBe("g1:1 | s0 s1 s2 | s0 | g1:2");
+  });
+
   it("keeps the stream's segments waiting while the slate shows, until none came for a moment", () => {
     const { at, segment } = make();
     segment(0, 1, 0);
@@ -604,6 +642,38 @@ describe("ExternalPlaylist", () => {
     expect(longer.at(9.7)).toBe("g1:0 g1:1 | s0 s1");
     longer.segment(10.5, 1, 3);
     expect(longer.at(10.5)).toBe("g1:0 g1:1 | s0 s1 | g1:3");
+  });
+
+  it("takes the newest segments of the look that ended the wait with the ones that waited", () => {
+    const { at, segment } = make();
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    expect(at(8)).toBe("g1:0 g1:1 | s0");
+    // Nobody asks meanwhile. The stream makes up for its pause in two lots, a second and a half
+    // apart: the second one ends the wait. Of all seven, the two newest fit.
+    for (const index of [2, 3, 4]) {
+      segment(9, 1, index);
+    }
+    for (const index of [5, 6, 7, 8]) {
+      segment(10.5, 1, index);
+    }
+    expect(at(10.5)).toBe("g1:0 g1:1 | s0 | g1:7 g1:8");
+  });
+
+  it("ends the wait with each segment of a stream whose segments last a second", () => {
+    const { at, segment } = make();
+    for (let index = 0; index <= 4; index += 1) {
+      segment(index, 1, index, 1);
+    }
+    expect(at(9)).toBe("g1:0 g1:1 g1:2 g1:3 g1:4 | s0");
+    // The stream is back in its own time, and a player asks every half a second: its segments are
+    // noticed a second apart, sooner than the wait would end otherwise.
+    segment(10, 1, 5, 1);
+    expect(at(10.5)).toBe("g1:0 g1:1 g1:2 g1:3 g1:4 | s0");
+    segment(11, 1, 6, 1);
+    expect(at(11)).toBe("g1:2 g1:3 g1:4 | s0 | g1:5 g1:6");
+    segment(12, 1, 7, 1);
+    expect(at(12)).toBe("g1:3 g1:4 | s0 | g1:5 g1:6 g1:7");
   });
 
   it("doesn't keep one ffmpeg run's segments waiting for another's", () => {
@@ -680,6 +750,38 @@ describe("ExternalPlaylist", () => {
     expect(at(10.2)).toBe("g1:0 g1:1 | s0 | g1:2 | g1:5");
   });
 
+  it("puts a discontinuity where ffmpeg wrote more segments between two looks than its playlist lists", () => {
+    const { at, segment } = make();
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    // ffmpeg makes up for lost time, and lists six segments in its playlist: the page's playlist
+    // never had the two before them.
+    for (const index of [4, 5, 6, 7, 8, 9]) {
+      segment(3, 1, index);
+    }
+    expect(at(3)).toBe("g1:1 | g1:4 g1:5 g1:6 g1:7 g1:8 g1:9");
+  });
+
+  it("goes to the slate at once when ffmpeg deleted the files of all it lists", () => {
+    const { at, text, segment } = make();
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    expect(at(8)).toBe("g1:0 g1:1 | s0");
+    for (const index of [2, 3, 4, 5, 6]) {
+      segment(9, 1, index);
+    }
+    expect(at(10.25)).toBe("g1:0 g1:1 | s0 | g1:5 g1:6");
+    // Right after that, the stream makes up for the rest of its pause. None of it fits, and ffmpeg
+    // deleted the files of all that is listed: a playlist without segments would end a player.
+    for (let index = 7; index <= 18; index += 1) {
+      segment(10.5, 1, index);
+    }
+    expect(at(10.5)).toBe("| s0 s1 s2");
+    expect(sequences(text(10.5))).toEqual([5, 2]);
+    segment(12.5, 1, 19);
+    expect(at(12.5)).toBe("| s0 s1 s2 | g1:19");
+  });
+
   it("lists all the stream delivers after the slate for a player that had nothing", () => {
     const { at, segment, slates } = make();
     expect(at(0)).toBe("s0 s1 s2");
@@ -743,8 +845,9 @@ describe("ExternalPlaylist", () => {
     segment(17.7, 1, 10);
     segment(18.5, 1, 11);
     expect(at(18.5)).toBe("g1:2 | s0 s1 | g1:5 g1:6 g1:7 | g1:9 g1:10");
+    // With the next, ffmpeg deleted the file of the first one listed, ten before it.
     segment(20.5, 1, 12);
-    expect(at(20.5)).toBe("g1:2 | s0 s1 | g1:5 g1:6 g1:7 | g1:9 g1:10 | g1:12");
+    expect(at(20.5)).toBe("s0 s1 | g1:5 g1:6 g1:7 | g1:9 g1:10 | g1:12");
   });
 
   it("lists all the stream delivers again once its segments came for half a minute", () => {
@@ -762,7 +865,7 @@ describe("ExternalPlaylist", () => {
     }
     expect(at(38)).toBe("g1:14 g1:15 g1:16 g1:17 g1:18 g1:19");
     // Sooner after the slate, only one of three fits: 22 seconds passed since the stream's last
-    // segment before the slate, and 18 are listed.
+    // segment before the slate, and 18 are listed. The first two listed left with their files.
     const soon = make();
     soon.segment(0, 1, 0);
     expect(soon.at(5)).toBe("g1:0 | s0");
@@ -772,7 +875,26 @@ describe("ExternalPlaylist", () => {
     for (const index of [9, 10, 11]) {
       soon.segment(22, 1, index);
     }
-    expect(soon.at(22)).toBe("g1:0 | s0 | g1:1 g1:2 g1:3 g1:4 g1:5 g1:6 g1:7 g1:8 | g1:11");
+    expect(soon.at(22)).toBe("g1:2 g1:3 g1:4 g1:5 g1:6 g1:7 g1:8 | g1:11");
+  });
+
+  it("lists all the stream delivers after a pause too short for the slate, once it is back from one", () => {
+    const { at, segment } = make();
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    expect(at(11)).toBe("g1:0 g1:1 | s0 s1 s2");
+    for (const index of [2, 3, 4, 5, 6]) {
+      segment(12, 1, index);
+    }
+    expect(at(13.25)).toBe("g1:1 | s0 s1 s2 | g1:5 g1:6");
+    segment(14, 1, 7);
+    segment(16, 1, 8);
+    // The stream pauses again, for less than the slate waits. The data of the pause is lost, and
+    // the segment after it lasts that long as well: no slate stood in for it, so it is listed.
+    segment(20.4, 1, 9, 5.6);
+    expect(at(20.4)).toBe("g1:1 | s0 s1 s2 | g1:5 g1:6 g1:7 g1:8 g1:9");
+    segment(22.4, 1, 10);
+    expect(at(22.4)).toBe("g1:1 | s0 s1 s2 | g1:5 g1:6 g1:7 g1:8 g1:9 g1:10");
   });
 
   it("counts from the stream's last segment each time the slate takes over", () => {
@@ -792,6 +914,54 @@ describe("ExternalPlaylist", () => {
       segment(16, 1, index);
     }
     expect(at(17.25)).toBe("g1:0 | s0 s1 | g1:2 g1:3 | s0 s1 | g1:5 g1:6");
+  });
+
+  it("keeps counting through a slate that shows for longer than half a minute", () => {
+    const { at, segment } = make();
+    segment(0, 1, 0);
+    for (let seconds = 2; seconds <= 40; seconds += 2) {
+      at(seconds);
+    }
+    expect(at(40)).toBe("s2 | s0 s1 s2 | s0 s1 s2 | s0 s1 s2");
+    // The stream is back with one segment, which fits, and a moment later with what it missed.
+    segment(40.5, 1, 1);
+    expect(at(41.75)).toBe("s2 | s0 s1 s2 | s0 s1 s2 | s0 s1 s2 | g1:1");
+    for (const index of [2, 3, 4]) {
+      segment(42.5, 1, index);
+    }
+    expect(at(42.5)).toBe("s2 | s0 s1 s2 | s0 s1 s2 | s0 s1 s2 | g1:1 | g1:4");
+  });
+
+  it("keeps counting for half a minute after the last segment it left out", () => {
+    const { at, segment } = make();
+    segment(0, 1, 0);
+    segment(2, 1, 1);
+    expect(at(10)).toBe("g1:0 g1:1 | s0 s1");
+    for (const index of [2, 3, 4, 5]) {
+      segment(10.5, 1, index);
+    }
+    expect(at(11.75)).toBe("g1:0 g1:1 | s0 s1 | g1:4 g1:5");
+    // The stream goes on in its own time, but for a second lot that makes up for its pause.
+    let index = 6;
+    const ownTime = (from: number, to: number): void => {
+      for (let seconds = from; seconds <= to; seconds += 2) {
+        segment(seconds, 1, index);
+        index += 1;
+        at(seconds);
+      }
+    };
+    const lot = (seconds: number): void => {
+      for (const end = index + 3; index < end; index += 1) {
+        segment(seconds, 1, index);
+      }
+    };
+    ownTime(12.5, 24.5);
+    lot(25.5);
+    expect(at(25.5)).toBe("g1:6 g1:7 g1:8 g1:9 g1:10 g1:11 g1:12");
+    // Thirty seconds after the slate, a third lot is left out as well: the second one was not.
+    ownTime(26.5, 40.5);
+    lot(41.5);
+    expect(at(41.5)).toBe("g1:18 g1:19 g1:20 g1:21 g1:22 g1:23");
   });
 
   it("takes what fits of another ffmpeg run's first segments after the slate", () => {

@@ -1,4 +1,5 @@
-import { VirtualPlaylist, type OnSegment, type PlaylistSegment } from "./playlist.ts";
+import { HLS_DELETE_THRESHOLD } from "./ffmpeg-args.ts";
+import { segmentIndex, VirtualPlaylist, type OnSegment, type PlaylistSegment } from "./playlist.ts";
 
 /**
  * The slate: a picture that says the stream has no video right now, as a short loop of segments
@@ -41,10 +42,13 @@ const CATCH_UP_MS = 60_000;
  */
 const SLATE_SEGMENTS_AHEAD = 2;
 /**
- * A change between the slate and the stream stays listed this long (see `VirtualPlaylist`). VLC
- * plays what it has before it goes on behind a discontinuity, and reads the playlist again only
- * then: a discontinuity that came and left the list meanwhile it never sees, and the video behind
- * it ends its playing. This covers a player that plays this far behind the newest segment.
+ * A discontinuity stays listed this long (see `VirtualPlaylist`): a change between the slate and
+ * the stream, a pass of the slate's loop, another ffmpeg run, or segments left out. VLC plays what
+ * it has before it goes on behind a discontinuity, and reads the playlist again only then: a
+ * discontinuity that came and left the list meanwhile it never sees, and the video behind it ends
+ * its playing. This covers a player that plays this far behind the newest segment. But no longer
+ * than the files of the segments listed are there (see `gone`): a run that writes faster than in
+ * real time deletes them sooner.
  */
 export const KEEP_CHANGES_MS = 20_000;
 /**
@@ -58,7 +62,12 @@ const ARRIVAL_SLACK_MS = 1000;
  * for a look that is itself a little early or late: the pipeline's timer is never on the dot.
  */
 const LOOK_JITTER_MS = 250;
-/** The count that starts with a slate (see `Count`) ends when the stream's segments were listed this long, one after the other. */
+/** How many ffmpeg runs' newest segments the playlist remembers (see `gone`): far more than are listed at once. */
+const RUNS_REMEMBERED = 8;
+/**
+ * The count that starts with a slate (see `Count`) ends when the stream's segments were listed this
+ * long, with neither the slate nor a segment left out between them.
+ */
 const SETTLED_MS = 30_000;
 /**
  * While the slate shows, the stream's segments wait until none came for this long: the pipeline
@@ -66,9 +75,24 @@ const SETTLED_MS = 30_000;
  * within a moment, oldest first, over several looks. The newest of those are the ones to list (see
  * `firstListed`), and not only for what they show: ffmpeg deletes a segment's file when ten newer
  * ones are written, so the oldest of them are gone within seconds, while VLC asks for a listed
- * segment up to ten seconds later, and ends on a file that is gone.
+ * segment up to ten seconds later, and ends on a file that is gone. The wait also ends with a
+ * segment that comes in its own time (see `endsWait`).
  */
 const HOLD_MS = ARRIVAL_SLACK_MS + LOOK_JITTER_MS;
+
+/**
+ * The clock to give the playlist its times by, in milliseconds: one that never goes back. The
+ * playlist counts what it lists against the time that passed (see `Count`), and a wall clock that is
+ * set back would leave out the stream's every new segment for as long as it went back.
+ */
+export function steadyNow(): number {
+  return performance.timeOrigin + performance.now();
+}
+
+/** The folder of a segment's file, as the playlist names it: each ffmpeg run writes its segments to its own. */
+function folderOf(uri: string): string {
+  return uri.slice(0, uri.lastIndexOf("/") + 1);
+}
 
 /** What the stream's last segments usually last, in seconds: their median, the lower one of two. */
 function usualOf(recent: readonly number[]): number {
@@ -167,8 +191,10 @@ export class ExternalPlaylist {
    * another, or one pass of the slate. The playlist puts a discontinuity between two.
    */
   private stretch = 0;
-  /** The ffmpeg run of the stream's last segment. */
+  /** The ffmpeg run of the stream's last segment... */
   private lastGeneration: number | undefined;
+  /** ...and its number in that run. */
+  private lastIndex = -1;
   /** When the stream's last segment came, listed or not: never yet, before its first one. */
   private lastAt = -Infinity;
   /** While the slate shows: which of its segments is next... */
@@ -181,11 +207,19 @@ export class ExternalPlaylist {
   private pending: Arrival[] = [];
   /** The count since the slate last took over, until the stream is back for good. */
   private count: Count | undefined;
-  /** The stream's next segment doesn't follow the last one listed: it is of another ffmpeg run, or some were left out. */
+  /** The stream's next segment doesn't follow the last one listed: it is of another ffmpeg run, or some were left out or never came. */
   private apart = false;
+  /** When the segments that ended the wait came: they are all taken with the ones that waited (see `add`). */
+  private waitEndedAt: number | undefined;
+  /** How many of a run's newest segment files ffmpeg keeps: as many as its playlist lists, and a few more. */
+  private readonly filesKept: number;
+  /** The number of each ffmpeg run's newest segment, by the folder of its files (see `gone`). */
+  private readonly newestFiles = new Map<string, number>();
 
   constructor(options: ExternalPlaylistOptions) {
     this.playlist = new VirtualPlaylist(options.windowSize, undefined, KEEP_CHANGES_MS);
+    // ffmpeg's playlist lists as many as this one does.
+    this.filesKept = options.windowSize + HLS_DELETE_THRESHOLD;
     this.staleAfterMs = options.staleAfterMs;
     this.longestSegmentMs = options.longestSegmentMs;
     this.slate = options.slate;
@@ -196,18 +230,28 @@ export class ExternalPlaylist {
    * Takes a segment of the stream, as its full output's playlist took it. Segments that come
    * together are looked at together, so it is listed with the next ones that come or the next
    * time a player asks. While the slate shows it waits with the ones before it (see `HOLD_MS`),
-   * until a player asks after that long, or until it is itself that much later than the last one.
+   * until a player asks after that long, or until segments come that end the wait (`endsWait`):
+   * those are taken with the ones that waited, all that came with them as well, since the newest
+   * of all are the ones to list.
    */
   readonly add: OnSegment = (generation, segment, at) => {
+    const folder = folderOf(segment.uri);
+    this.newestFiles.delete(folder);
+    this.newestFiles.set(folder, segmentIndex(segment.uri));
+    if (this.newestFiles.size > RUNS_REMEMBERED) {
+      this.newestFiles.delete(this.newestFiles.keys().next().value ?? folder);
+    }
     const newest = this.pending.at(-1);
-    const waits = newest?.generation === generation && this.holding;
-    if (newest !== undefined && !waits && (newest.at !== at || newest.generation !== generation)) {
-      this.take(at);
+    if (newest !== undefined && (newest.at !== at || newest.generation !== generation)) {
+      if (this.waitEndedAt !== undefined) {
+        this.take(this.waitEndedAt);
+      } else if (!this.holding || newest.generation !== generation) {
+        this.take(at);
+      } else if (this.endsWait(segment, at - newest.at)) {
+        this.waitEndedAt = at;
+      }
     }
     this.pending.push({ generation, segment, at });
-    if (newest !== undefined && waits && at - newest.at >= HOLD_MS) {
-      this.take(at);
-    }
   };
 
   /**
@@ -217,11 +261,35 @@ export class ExternalPlaylist {
   render(now: number): string | undefined {
     this.playlist.expire(now - this.staleAfterMs);
     const newest = this.pending.at(-1);
-    if (newest !== undefined && !(this.holding && now - newest.at < HOLD_MS)) {
+    if (this.waitEndedAt !== undefined) {
+      this.take(this.waitEndedAt);
+    } else if (newest !== undefined && !(this.holding && now - newest.at < HOLD_MS)) {
       this.take(now);
     }
+    this.playlist.dropGone(this.gone);
     this.addSlate(now);
     return this.playlist.render();
+  }
+
+  /**
+   * Whether the file of a segment the playlist lists is gone: ffmpeg deleted it, since its run wrote
+   * as many newer ones as it keeps (measured: when it writes the tenth newer one, with a playlist of
+   * six). That is so of a segment the playlist kept listed behind a change (see
+   * `KEEP_CHANGES_MS`), or one before others it left out (see `Count`). The slate's files are never gone.
+   */
+  private readonly gone = (uri: string): boolean => {
+    const newest = this.newestFiles.get(folderOf(uri));
+    return newest !== undefined && segmentIndex(uri) <= newest - this.filesKept;
+  };
+
+  /**
+   * Whether a segment that came `after` milliseconds after the newest one that waits ends the wait:
+   * the pipeline looked in between and found nothing (`HOLD_MS`), or it came no sooner after that
+   * one than it lasts, less a look's jitter, as the stream in its own time does. Segments shorter
+   * than `HOLD_MS` come in their own time before it is over, and would wait for good.
+   */
+  private endsWait(segment: PlaylistSegment, after: number): boolean {
+    return after >= Math.min(HOLD_MS, segment.duration * 1000 - LOOK_JITTER_MS);
   }
 
   /** Whether the stream's segments wait: while the slate shows for a player that is counted for (see `Count`). */
@@ -237,6 +305,7 @@ export class ExternalPlaylist {
     const batch = this.pending;
     const first = batch[0];
     const newest = batch.at(-1);
+    this.waitEndedAt = undefined;
     if (first === undefined || newest === undefined) {
       return;
     }
@@ -251,6 +320,12 @@ export class ExternalPlaylist {
       this.apart = true;
     }
     for (const [index, { segment }] of batch.entries()) {
+      const number = segmentIndex(segment.uri);
+      if (number !== this.lastIndex + 1) {
+        // ffmpeg wrote more than its playlist lists between two looks: the ones between never came.
+        this.apart = true;
+      }
+      this.lastIndex = number;
       if (index < from) {
         this.leaveOut(at);
       } else {
@@ -283,10 +358,19 @@ export class ExternalPlaylist {
    * early for this stream then, because players go by the short segments the playlist lists after
    * an outage (see `slateDue`), and a broadcast with key frames far apart would lose every segment
    * until one fits.
+   *
+   * The count ends when the stream is late again after it was listed, too briefly for the slate:
+   * what it delivers then makes up for a pause no slate stood in for, while players waited. What it
+   * still had to deliver for the slate's time came before that pause.
    */
   private firstListed(batch: readonly Arrival[], at: number, waited: boolean): number {
     const count = this.count;
     if (count === undefined) {
+      return 0;
+    }
+    const first = batch[0];
+    if (this.slateNext === undefined && first !== undefined && first.at - this.lastAt > this.ownTimeAtMost()) {
+      this.count = undefined;
       return 0;
     }
     const newest = batch.at(-1);
@@ -305,6 +389,15 @@ export class ExternalPlaylist {
       return from - 1;
     }
     return from;
+  }
+
+  /**
+   * The longest a segment of the stream in its own time can take to be noticed after the one before
+   * it, in milliseconds: as long as they usually last, and a second more, since the one before it
+   * may have been noticed at once and this one a second late.
+   */
+  private ownTimeAtMost(): number {
+    return usualOf(this.recent) * 1000 + ARRIVAL_SLACK_MS + LOOK_JITTER_MS;
   }
 
   /** What segments that came together get on top of the time that passed (see `firstListed`), in milliseconds. */
@@ -356,13 +449,25 @@ export class ExternalPlaylist {
    * a player waits. A player goes by the segments the playlist lists, so the slate comes no later
    * than three seconds more than the longest of those: after an outage they are the slate's, and
    * the stream's first segment may be the short end of a long one, so a player is back to waiting
-   * ten seconds while the stream's next segment takes as long as its segments usually do. With
-   * nothing left to list (the stream's last segments got old), that is five seconds, long gone.
-   * Before the stream's first segment the slate is due at once.
+   * ten seconds while the stream's next segment takes as long as its segments usually do. Before
+   * the stream's first segment the slate is due at once, and so it is with nothing left to list (see
+   * `addSlate`).
    */
   private slateDue(): number {
     const listed = Math.max(SLATE_AFTER_MS, this.playlist.longest * 1000 + SLATE_MARGIN_MS);
     return this.lastAt + Math.min(slateAfter(this.recent, this.longestSegmentMs / 1000), listed);
+  }
+
+  /** When the slate's next segment is due, as of `now`. */
+  private nextSlateDue(now: number): number {
+    if (this.slateNext !== undefined) {
+      return this.slateDueAt;
+    }
+    // A playlist without segments ends a player. It has none when the stream's last ones got old,
+    // which they can before the next one is late with a short stale threshold, or when ffmpeg
+    // deleted their files (see `gone`): the stream's last segment may have come a moment ago then,
+    // and been left out (see `Count`).
+    return this.playlist.length === 0 ? now : this.slateDue();
   }
 
   /**
@@ -374,7 +479,7 @@ export class ExternalPlaylist {
   private addSlate(now: number): void {
     const segments = this.slate()?.segments ?? [];
     const starts = this.slateNext === undefined;
-    const due = starts ? this.slateDue() : this.slateDueAt;
+    const due = this.nextSlateDue(now);
     const next = segments[this.slateNext ?? 0];
     if (due > now || next === undefined || !(next.duration > 0)) {
       return;
