@@ -17,7 +17,7 @@ function runShim(snippet: string): unknown {
     "spec.loader.exec_module(shim)",
     snippet,
   ].join("\n");
-  const out = execFileSync("python3", ["-I", "-c", script, SHIM], { encoding: "utf8" });
+  const out = execFileSync("python3", ["-I", "-B", "-c", script, SHIM], { encoding: "utf8" });
   return JSON.parse(out);
 }
 

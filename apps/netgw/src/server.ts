@@ -114,6 +114,8 @@ export function registerRoutes(service: Service, gateway: Gateway): void {
   app.get("/policy", () => gateway.policy());
   app.get("/assignments", () => gateway.router.list());
   app.get("/peers", () => gateway.peers.all());
+  // What every engine exchanged with each of its peers, for the controller's metrics.
+  app.get("/peer-traffic", () => gateway.peers.traffic());
 
   app.post("/reload", async () => {
     await gateway.reload();

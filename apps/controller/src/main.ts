@@ -10,6 +10,7 @@ import { EngineRuns } from "./engine-runs.ts";
 import { EngineManager } from "./engines.ts";
 import { ControllerMetrics } from "./metrics.ts";
 import { Orchestrator } from "./orchestrator.ts";
+import { PEER_TRAFFIC_POLL_MS, PeerTrafficMonitor } from "./peer-traffic.ts";
 import { registerRoutes } from "./server.ts";
 import { NetworkPolicyStore } from "./network-policy-store.ts";
 import { SettingsStore } from "./settings-store.ts";
@@ -65,6 +66,7 @@ const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
   docker,
   {
     stack: config.STACK_NAME,
+    network: config.ENGINE_NETWORK,
     onOomKill: (stream) => {
       metrics.engineOomKills.inc({ stream });
     },
@@ -72,6 +74,9 @@ const engineResources: EngineResourceMonitor = new EngineResourceMonitor(
   },
   logger,
 );
+
+// What each engine exchanged with each of its peers, which only the metrics show.
+const peerTraffic = new PeerTrafficMonitor(netgw);
 
 // What each engine container is for, which the engine gauges carry as labels and the log says of
 // an engine that is restarted or removed.
@@ -88,6 +93,7 @@ const metrics: ControllerMetrics = new ControllerMetrics(
     engines: () => engineResources.running(),
     runningSince: (stream) => orchestrator.runningSince(stream),
     enginePlaces: (engines, streams) => enginePlaces.resolve(engines, streams),
+    peerTraffic: (engineIp) => peerTraffic.of(engineIp),
   },
 );
 const sharedEngines = new SharedEngines({
@@ -177,8 +183,15 @@ const sampleEngines = (): void => {
 };
 sampleEngines();
 const engineResourceTimer = setInterval(sampleEngines, config.ENGINE_STATS_SECONDS * 1000);
+// A request gives up before the next one is due, so they never pile up.
+const peerTrafficTimer = setInterval(() => {
+  void peerTraffic.sample().catch((error: unknown) => {
+    logger.debug({ err: error }, "could not get the engines' peer traffic from the gateway");
+  });
+}, PEER_TRAFFIC_POLL_MS);
 await runService(service, config.PORT, logger, async () => {
   clearInterval(engineResourceTimer);
+  clearInterval(peerTrafficTimer);
   await orchestrator.stop();
 });
 await started;

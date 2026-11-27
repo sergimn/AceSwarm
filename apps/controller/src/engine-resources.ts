@@ -22,6 +22,8 @@ export interface EngineMemory {
   engine: string;
   /** The network path of a shared engine, from its container's label; null for a stream's own engine. */
   sharedPath: string | null;
+  /** Its address on the engines network, which the gateway knows it by; empty when it has none. */
+  ip: string;
   usedBytes: number;
   limitBytes: number;
   /** The engine's memory cache cap (`--memory-cache-limit`); null when it has none. */
@@ -90,6 +92,8 @@ function countRunning(containers: readonly ContainerSummary[]): EngineCount {
 
 export interface EngineResourceOptions {
   stack: string;
+  /** The engines network, which each engine's address is read from. */
+  network: string;
   /** Called once for every out-of-memory kill seen. */
   onOomKill: (stream: string) => void;
   /** Told about every run of an engine that ended because its process exited. */
@@ -162,10 +166,11 @@ export class EngineResourceMonitor {
       if (usage === undefined) {
         continue;
       }
+      const ip = details?.NetworkSettings.Networks[this.options.network]?.IPAddress ?? "";
       if (engineCacheOnDisk(details?.Config.Env)) {
         // Nothing to estimate: the stream data is in a file, and what the engine uses above its
         // idle memory is not a cache.
-        memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
+        memory.push({ stream, engine, sharedPath, ip, ...usage, cacheLimitBytes: null, cacheBytes: 0 });
         continue;
       }
       const cacheLimitBytes = engineCacheLimit(details?.Config.Env);
@@ -174,7 +179,7 @@ export class EngineResourceMonitor {
         this.lowestBytes(details, usage.usedBytes),
         cacheLimitBytes,
       );
-      memory.push({ stream, engine, sharedPath, ...usage, cacheLimitBytes, cacheBytes });
+      memory.push({ stream, engine, sharedPath, ip, ...usage, cacheLimitBytes, cacheBytes });
     }
     for (const id of this.lastExit.keys()) {
       if (!seen.has(id)) {
