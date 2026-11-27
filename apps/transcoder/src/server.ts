@@ -8,12 +8,14 @@ import { Counter, Gauge, Histogram } from "@prometheus-io/client";
 import { z } from "zod";
 import { FULL_MODES } from "./ffmpeg-args.ts";
 import { DECODINGS } from "./key-frames.ts";
-import { watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
+import { DEFAULT_LIVE_EDGE_SETTINGS, watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
 import type { OpenSource } from "./source-reader.ts";
 import { LAYOUT_CHANGE_KINDS } from "./ts-tables.ts";
 import { StandbyReaders, type StandbyReaderSettings } from "./standby-readers.ts";
 import { createDecodeChecker, DEFAULT_DECODE_CHECK_SETTINGS, type DecodeChecker } from "./decode-check.ts";
+import { ExternalPlaylist, type Slate } from "./external-playlist.ts";
+import { makeSlate, SLATE_NAME, slateFile, type RunFfmpeg } from "./slate.ts";
 
 const idParams = z.object({ id: z.string().regex(/^[a-z0-9]{6,32}$/) });
 const httpUrl = z.url({ protocol: /^https?$/ });
@@ -25,11 +27,17 @@ const standbysBody = z.object({ sources: z.array(standbySource).max(16) });
 /** How many times the pipeline opens a source again that a standby reader just let go of (see `start`). */
 const REOPENS_AFTER_RELEASE = 5;
 /**
- * The playlist for players outside the page, such as VLC, at `/hls/<id>/external/index.m3u8`: the
- * full output's, under an address of its own, so that the controller can tell who asks for it. Its
- * segments are the full output's own files: a playlist names them relative to the stream.
+ * The playlist for players outside the page, such as VLC, at `/hls/<id>/external/index.m3u8` (see
+ * `ExternalPlaylist`). Its own address also lets the controller tell who asks for it. The stream's
+ * segments in it are the full output's own files: a playlist names them relative to the stream.
  */
 const EXTERNAL_PLAYLIST = "external";
+/**
+ * A stream without a pipeline whose playlist for players outside the page nobody asked for in this
+ * long loses it. The controller only asks for the streams that are enabled, and takes the playlist
+ * away with the pipeline when one is disabled; this is for a request that came after that.
+ */
+const UNASKED_EXTERNAL_MS = 60_000;
 
 /**
  * Owns every pipeline and exposes them over HTTP, together with the HLS output. It also reads the
@@ -43,6 +51,13 @@ export class PipelineManager {
    */
   private readonly stopping = new Map<string, Promise<void>>();
   private readonly standbys = new Map<string, StandbyReaders>();
+  /**
+   * Each stream's playlist for players outside the page, and when it was last asked for. A stream
+   * has it before its pipeline: a player may ask while the stream's engine still starts.
+   */
+  private readonly externals = new Map<string, { playlist: ExternalPlaylist; askedAt: number }>();
+  /** What those players get while a stream has no new video, once it is made (see `prepareSlate`). */
+  private slate: Slate | undefined;
   private readonly settings: PipelineSettings;
   private readonly logger: Logger;
   private readonly spawner: Spawner | undefined;
@@ -55,6 +70,7 @@ export class PipelineManager {
   readonly handovers: Counter<"stream" | "result">;
   readonly layoutChanges: Counter<"stream" | "kind" | "run">;
   readonly layoutGaps: Histogram<"stream">;
+  readonly slates: Counter<"stream">;
 
   constructor(
     service: Service,
@@ -113,6 +129,16 @@ export class PipelineManager {
       // A move the same run reads on over takes a second or two, a new run a few seconds, a change
       // in the middle of a group of pictures up to two key frame intervals.
       buckets: [0.5, 1, 1.5, 2, 3, 5, 8, 13, 20, 30, 60],
+      registers,
+    });
+    this.slates = new Counter({
+      name: "aceswarm_pipeline_slates_total",
+      help:
+        "Times a player outside the page (see aceswarm_viewers) got the slate, the picture that says the " +
+        "stream has no video right now, where the stream's video was before: no new segment of it came " +
+        "for some seconds. Counted when a player asks, once for each time the video stops coming; the " +
+        "slate a stream starts with doesn't count",
+      labelNames: ["stream"],
       registers,
     });
     // The client calls collect() on every scrape; one gauge refreshes all of them. It is registered
@@ -253,6 +279,7 @@ export class PipelineManager {
           layoutGap: (stream, ms) => {
             this.layoutGaps.observe({ stream }, ms / 1000);
           },
+          fullSegment: this.externalOf(id, Date.now()).playlist.add,
         },
         { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
       );
@@ -313,9 +340,65 @@ export class PipelineManager {
     return this.pipelines.has(id) ? (this.standbys.get(id)?.status() ?? []) : undefined;
   }
 
+  /**
+   * Makes the slate (see `makeSlate`). Until it is there, and when it can't be made, the playlists
+   * for players outside the page have the streams' own segments only.
+   */
+  async prepareSlate(run?: RunFfmpeg): Promise<void> {
+    const { ffmpegPath, hlsDir, plan } = this.settings;
+    try {
+      this.slate = await makeSlate({ ffmpegPath, hlsDir, ...plan }, run);
+      this.logger.info({ segments: this.slate.segments.length }, "slate ready");
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error) },
+        "could not make the slate: players outside the page get no picture while a stream has no video",
+      );
+    }
+  }
+
+  /** The stream's playlist for players outside the page as it is now; undefined while it lists nothing. */
+  async externalPlaylist(id: string, now = Date.now()): Promise<string | undefined> {
+    await this.pipelines.get(id)?.sync();
+    const external = this.externalOf(id, now);
+    external.askedAt = now;
+    return external.playlist.render(now);
+  }
+
+  /** The file of a segment of the slate, by its name in a playlist. */
+  slatePath(file: string): string | undefined {
+    return slateFile(this.slate, file);
+  }
+
+  private externalOf(id: string, now: number): { playlist: ExternalPlaylist; askedAt: number } {
+    let external = this.externals.get(id);
+    if (external === undefined) {
+      for (const [stream, { askedAt }] of this.externals) {
+        if (!this.pipelines.has(stream) && now - askedAt > UNASKED_EXTERNAL_MS) {
+          this.externals.delete(stream);
+        }
+      }
+      const playlist = new ExternalPlaylist({
+        windowSize: this.settings.plan.playlistSize,
+        staleAfterMs: (this.settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS).staleAfterMs,
+        slate: () => this.slate,
+        now,
+        onSlate: () => {
+          this.slates.inc({ stream: id });
+        },
+      });
+      external = { playlist, askedAt: now };
+      this.externals.set(id, external);
+      // As for the layout changes below: the series starts at 0.
+      this.slates.inc({ stream: id }, 0);
+    }
+    return external;
+  }
+
   async stop(id: string): Promise<boolean> {
     const pipeline = this.pipelines.get(id);
     this.pipelines.delete(id);
+    this.externals.delete(id);
     this.standbys.get(id)?.closeAll();
     this.standbys.delete(id);
     if (pipeline === undefined) {
@@ -386,13 +469,13 @@ export function registerRoutes(service: Service, manager: PipelineManager): void
   });
 
   app.get("/hls/:id/:variant/index.m3u8", async (request, reply) => {
-    const { id, variant: asked } = request.params as { id: string; variant: string };
-    const variant = asked === EXTERNAL_PLAYLIST ? "full" : asked;
+    const { id, variant } = request.params as { id: string; variant: string };
+    const external = variant === EXTERNAL_PLAYLIST && idParams.safeParse({ id }).success;
     const pipeline = manager.get(id);
-    if (pipeline === undefined || !VARIANTS.includes(variant as Variant)) {
+    if (!external && (pipeline === undefined || !VARIANTS.includes(variant as Variant))) {
       return reply.code(404).send({ error: "no such stream" });
     }
-    const playlist = await pipeline.playlist(variant as Variant);
+    const playlist = external ? await manager.externalPlaylist(id) : await pipeline?.playlist(variant as Variant);
     if (playlist === undefined) {
       return reply.code(404).send({ error: "no segments yet" });
     }
@@ -408,6 +491,18 @@ export function registerRoutes(service: Service, manager: PipelineManager): void
     return path === undefined
       ? reply.code(404).send({ error: "no thumbnail yet" })
       : reply.header("content-type", "image/jpeg").header("cache-control", "no-cache").send(createReadStream(path));
+  });
+
+  app.get(`/hls/:id/${SLATE_NAME}/:file`, async (request, reply) => {
+    const { file = "" } = request.params as Partial<Record<string, string>>;
+    const path = manager.slatePath(file);
+    if (path === undefined) {
+      return reply.code(404).send({ error: "segment not found" });
+    }
+    return reply
+      .header("content-type", "video/mp2t")
+      .header("cache-control", "max-age=60")
+      .send(createReadStream(path));
   });
 
   app.get("/hls/:id/:generation/:variant/:file", async (request, reply) => {

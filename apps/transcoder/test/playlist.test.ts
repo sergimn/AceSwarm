@@ -47,6 +47,26 @@ describe("VirtualPlaylist", () => {
     expect(text).not.toContain("1/seg_000000.ts");
   });
 
+  it("tells of each segment it takes, once, as it lists it", () => {
+    const taken: unknown[][] = [];
+    const playlist = new VirtualPlaylist(2, (...segment) => {
+      taken.push(segment);
+    });
+    playlist.append(1, segments(0, 1), "../g1/full/", 1000);
+    // Segments it has are not taken again, and the ones that left its window were still taken.
+    playlist.append(1, segments(0, 3), "../g1/full/", 3000);
+    playlist.append(2, segments(0, 0), "../g2/full/", 4000);
+    // A run it went on from adds nothing more.
+    playlist.append(1, segments(4, 4), "../g1/full/", 5000);
+    expect(taken).toEqual([
+      [1, { uri: "../g1/full/seg_000000.ts", duration: 2 }, 1000],
+      [1, { uri: "../g1/full/seg_000001.ts", duration: 2 }, 1000],
+      [1, { uri: "../g1/full/seg_000002.ts", duration: 2 }, 3000],
+      [1, { uri: "../g1/full/seg_000003.ts", duration: 2 }, 3000],
+      [2, { uri: "../g2/full/seg_000000.ts", duration: 2 }, 4000],
+    ]);
+  });
+
   it("stitches generations with discontinuities and keeps counting", () => {
     const playlist = new VirtualPlaylist(4);
     playlist.append(1, segments(0, 2), "1/");

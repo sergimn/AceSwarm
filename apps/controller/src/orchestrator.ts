@@ -235,6 +235,11 @@ export class Orchestrator {
     return true;
   }
 
+  /** Whether the stream is in the list and enabled: only then does it have a playlist for players outside the page. */
+  isEnabled(stream: string): boolean {
+    return this.deps.store.get(stream)?.enabled === true;
+  }
+
   /** A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`). */
   reportExternalPlayer(stream: string, address: string, userAgent: string | undefined): void {
     if (this.deps.store.get(stream) !== undefined) {

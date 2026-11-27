@@ -456,6 +456,14 @@ export function pipelineStarts(streamId: string): Record<string, number> {
   return starts;
 }
 
+/**
+ * How many times players outside the page got the slate where a stream's video was
+ * (aceswarm_pipeline_slates_total); undefined before the stream has a series.
+ */
+export function slatesCounted(streamId: string): number | undefined {
+  return metricValue(transcoderGet("/metrics"), "aceswarm_pipeline_slates_total", `stream="${streamId}"`);
+}
+
 /** Like `gatewayAssignments`, but undefined while the gateway is not answering. */
 export function tryGatewayAssignments(): PathAssignment[] | undefined {
   try {

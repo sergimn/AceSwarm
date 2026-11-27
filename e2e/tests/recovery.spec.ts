@@ -9,6 +9,7 @@ import {
   metricValue,
   recoveriesSucceeded,
   resetStack,
+  slatesCounted,
   streamById,
   waitForPlaying,
 } from "./helpers.ts";
@@ -110,6 +111,19 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     .poll(async () => (await streamById(request, stream.id))?.liveEdge?.state, { timeout: 30_000 })
     .toBe("live");
   const playlist = stream.hls.full;
+  // What a player outside the page gets: the segments its playlist lists, and that playlist's sequence number.
+  const external = async (): Promise<{ segments: string[]; sequence: number }> => {
+    const response = await request.get(stream.hls.external);
+    expect(response.status(), await response.text()).toBe(200);
+    const text = await response.text();
+    const segments = text.split("\n").filter((line) => line.endsWith(".ts"));
+    return { segments, sequence: Number(/#EXT-X-MEDIA-SEQUENCE:(\d+)/.exec(text)?.[1]) };
+  };
+  const newestExternal = async (): Promise<string | undefined> => (await external()).segments.at(-1);
+  const STREAM_SEGMENT = /^\.\.\/g\d+\/full\/seg_\d+\.ts$/;
+  const SLATE_SEGMENT = /^\.\.\/slate\/seg_\d+\.ts$/;
+  // While the stream plays, that is the stream's video.
+  await expect.poll(newestExternal, { timeout: 30_000 }).toMatch(STREAM_SEGMENT);
   // How long the broadcast sent nothing new, as the dashboard's "Broadcast quiet for" shows it.
   const quietFor = async (): Promise<number | undefined> => {
     const response = await request.get("/metrics");
@@ -120,6 +134,8 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
   await expect.poll(quietFor, { timeout: 30_000 }).toBeLessThan(30);
   // The recoveries that had worked by the time it waits for the broadcast.
   let recovered: Record<string, number>;
+  // What players outside the page got when the page's playlist was gone.
+  let listed: Awaited<ReturnType<typeof external>>;
 
   // The source engine keeps running with the window it has, and so does the stream's engine:
   // data still comes for each new session, but the live edge stops (STALE_SOURCE_SECONDS: 30).
@@ -135,6 +151,13 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
     expect(quiet).not.toBeNull();
     // Nothing older than the threshold stays published: no playlist, no thumbnail.
     await expect.poll(async () => (await request.get(playlist)).status(), { timeout: 45_000 }).toBe(404);
+    // A player outside the page would give up on that, so its playlist goes on: with the slate
+    // only, whose segments are MPEG-TS like the stream's own.
+    listed = await external();
+    expect(listed.segments.length).toBeGreaterThan(0);
+    expect(listed.segments.filter((segment) => !SLATE_SEGMENT.test(segment))).toEqual([]);
+    expect((await newestSegment(request, stream.hls.external))[0]).toBe(0x47);
+    expect(slatesCounted(stream.id)).toBeGreaterThanOrEqual(1);
     // Its tries show as waiting for the broadcast too (each one is a new engine).
     const waiting = await streamById(request, stream.id);
     expect(waiting?.state).toBe("stale-source");
@@ -156,6 +179,16 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
       expect(current?.lastFrameAt).toBe(quiet);
       expect((await request.get(playlist)).status()).toBe(404);
       expect((await request.get(stream.hls.thumbnail)).status()).toBe(404);
+      // The playlist for players outside the page answers through every try, with the slate
+      // only (the old window is not published there either), and keeps moving on.
+      const now = await external();
+      expect(now.segments.filter((segment) => !SLATE_SEGMENT.test(segment))).toEqual([]);
+      expect(now.sequence).toBeGreaterThanOrEqual(listed.sequence);
+      if (check === 29) {
+        // One more segment of the slate every two seconds: over these 30 seconds, ten or more
+        // left the six that the playlist lists.
+        expect(now.sequence - listed.sequence).toBeGreaterThanOrEqual(8);
+      }
       // How long the broadcast is quiet keeps counting: a try's new session, whose own live edge
       // is first seen when it opens, doesn't start it over, and it has a value all the time.
       const quietNow = await quietFor();
@@ -184,5 +217,8 @@ test("waits for a broadcast that stops, never plays its old window, and plays it
   expect(back.liveEdge?.state).toBe("live");
   expect(Date.parse(back.liveEdge!.advancedAt!)).toBeGreaterThan(resumedAt - 15_000);
   expect((await newestSegment(request, playlist))[0]).toBe(0x47);
+  // Players outside the page get the stream's video again, in the playlist they kept asking for.
+  await expect.poll(newestExternal, { timeout: 30_000 }).toMatch(STREAM_SEGMENT);
+  expect((await external()).sequence).toBeGreaterThan(listed.sequence);
   expect(engineContainers(stream.id)).toHaveLength(1);
 });

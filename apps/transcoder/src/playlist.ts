@@ -43,6 +43,9 @@ export function segmentIndex(uri: string): number {
 /** How many generations a playlist remembers it went on from: far more than could still write segments. */
 const MAX_LEFT_GENERATIONS = 64;
 
+/** Told of each segment a playlist takes, as it lists it, with the generation it is of and the time it came. */
+export type OnSegment = (generation: number, segment: PlaylistSegment, at: number) => void;
+
 /**
  * A live playlist that survives source changes. Each ffmpeg run ("generation") writes its own
  * playlist; this one stitches them together with `#EXT-X-DISCONTINUITY` markers and keeps the
@@ -51,6 +54,7 @@ const MAX_LEFT_GENERATIONS = 64;
  */
 export class VirtualPlaylist {
   private readonly windowSize: number;
+  private readonly onSegment: OnSegment | undefined;
   private segments: VirtualSegment[] = [];
   private mediaSequence = 0;
   private discontinuitySequence = 0;
@@ -59,8 +63,9 @@ export class VirtualPlaylist {
   /** The generations whose segments were followed by another one's, oldest first. */
   private readonly left = new Set<number>();
 
-  constructor(windowSize: number) {
+  constructor(windowSize: number, onSegment?: OnSegment) {
     this.windowSize = windowSize;
+    this.onSegment = onSegment;
   }
 
   get length(): number {
@@ -88,15 +93,12 @@ export class VirtualPlaylist {
       if (discontinuity) {
         this.leave(previous);
       }
-      this.segments.push({
-        uri: `${uriPrefix}${segment.uri}`,
-        duration: segment.duration,
-        discontinuity,
-        addedAt: now,
-      });
+      const uri = `${uriPrefix}${segment.uri}`;
+      this.segments.push({ uri, duration: segment.duration, discontinuity, addedAt: now });
       this.lastGeneration = generation;
       this.lastIndex = index;
       added += 1;
+      this.onSegment?.(generation, { uri, duration: segment.duration }, now);
     }
     while (this.segments.length > this.windowSize) {
       this.dropHead();

@@ -319,6 +319,13 @@ export async function registerRoutes(
   // HLS playlists and segments come from the transcoder; proxying keeps a single origin for the
   // browser and avoids exposing the transcoder.
   app.get("/hls/*", async (request, reply) => {
+    // The transcoder has a playlist for players outside the page for any stream it is asked about,
+    // with the slate until the stream has video (a player may ask before the stream's pipeline is
+    // there). Which streams there are is known here: only an enabled one has that playlist.
+    const external = EXTERNAL_PLAYLIST.exec(request.url)?.[1];
+    if (external !== undefined && !orchestrator.isEnabled(external)) {
+      return reply.code(404).send({ error: "no such stream" });
+    }
     let upstream: Response;
     try {
       upstream = await fetch(`${options.transcoderUrl}${request.url}`, {
@@ -330,8 +337,7 @@ export async function registerRoutes(
     // A player outside the page reports nothing, and asks for its playlist every few seconds while
     // it plays: each one it gets counts it as a viewer. The page's playlists don't count: the
     // page reports itself.
-    const external = upstream.ok && request.method === "GET" ? EXTERNAL_PLAYLIST.exec(request.url)?.[1] : undefined;
-    if (external !== undefined) {
+    if (external !== undefined && upstream.ok && request.method === "GET") {
       orchestrator.reportExternalPlayer(external, request.ip, request.headers["user-agent"]);
     }
     reply.code(upstream.status);

@@ -63,9 +63,12 @@ test("the API waits until the orchestrator started; the HLS proxy doesn't", asyn
 });
 
 test("whoever gets a stream's playlist for external players counts as its viewer; nothing else of the proxy does", async () => {
-  // A transcoder with one stream, which answers everything under it.
+  // A transcoder with one stream, which answers everything under it. As the real one, it has a
+  // playlist for external players for any stream it is asked about.
+  const asked: string[] = [];
   const transcoder = createServer((request, response) => {
-    const known = request.url?.startsWith("/hls/abcdef/") === true;
+    asked.push(request.url ?? "");
+    const known = request.url?.startsWith("/hls/abcdef/") === true || request.url?.includes("/external/index.m3u8");
     response.writeHead(known ? 200 : 404, { "content-type": known ? "application/vnd.apple.mpegurl" : "text/plain" });
     response.end(known ? "#EXTM3U\n" : "no such stream");
   });
@@ -77,7 +80,10 @@ test("whoever gets a stream's playlist for external players counts as its viewer
     transcoder.close();
   });
   const players: unknown[][] = [];
+  /** The streams that are enabled: `abcdef` is; `mnopqr` is in the list, disabled; `ghijkl` is not in it. */
+  const enabled = new Set(["abcdef"]);
   const orchestrator = {
+    isEnabled: (stream: string) => enabled.has(stream),
     reportExternalPlayer: (...player: unknown[]) => {
       players.push(player);
     },
@@ -109,10 +115,27 @@ test("whoever gets a stream's playlist for external players counts as its viewer
   ]) {
     expect((await ask(url)).statusCode, url).toBe(200);
   }
-  // Neither does a playlist the player didn't get, or one it only asked about.
-  expect((await ask("/hls/ghijkl/external/index.m3u8")).statusCode).toBe(404);
+  // Neither does a playlist the player only asked about.
   expect((await ask("/hls/abcdef/external/index.m3u8", "curl/8.5.0", "HEAD")).statusCode).toBe(200);
   expect(players).toHaveLength(2);
+
+  // Only an enabled stream has that playlist. The transcoder is not asked about another: it would
+  // start one, with the slate in it, for a stream that plays nothing.
+  asked.length = 0;
+  for (const stream of ["ghijkl", "mnopqr"]) {
+    const refused = await ask(`/hls/${stream}/external/index.m3u8`);
+    expect(refused.statusCode, stream).toBe(404);
+    expect(refused.json(), stream).toEqual({ error: "no such stream" });
+  }
+  expect(asked).toEqual([]);
+  expect(players).toHaveLength(2);
+  // Its other addresses go to the transcoder as before, which knows what it has.
+  expect((await ask("/hls/mnopqr/full/index.m3u8")).statusCode).toBe(404);
+  expect(asked).toEqual(["/hls/mnopqr/full/index.m3u8"]);
+  // Enabled, it has one, and whoever gets it counts.
+  enabled.add("mnopqr");
+  expect((await ask("/hls/mnopqr/external/index.m3u8")).statusCode).toBe(200);
+  expect(players.at(-1)).toEqual(["mnopqr", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20"]);
 });
 
 test("restarting a stream with no run says whether it is disabled, not running yet or unknown", async () => {
