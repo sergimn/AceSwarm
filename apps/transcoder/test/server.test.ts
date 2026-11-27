@@ -208,19 +208,17 @@ describe("the transcoder's playlists", () => {
     const now = Date.now();
     expect(listed((await manager.externalPlaylist("stream1", now)) ?? "")).toEqual(["../g1/full/seg_000000.ts"]);
     expect(await slates()).toBe(0);
-    // Four seconds after its last segment nothing changed; a little over five, the slate is there,
-    // with three segments at once.
+    // Four seconds after its last segment nothing changed; a little over five, the slate is there.
     expect(listed((await manager.externalPlaylist("stream1", now + 4000)) ?? "")).toEqual(["../g1/full/seg_000000.ts"]);
     expect(listed((await manager.externalPlaylist("stream1", now + 6000)) ?? "")).toEqual([
       "../g1/full/seg_000000.ts",
       "|",
       "../slate/seg_000.ts",
-      "../slate/seg_001.ts",
-      "../slate/seg_002.ts",
     ]);
     expect(await slates()).toBe(1);
-    // The loop goes round, behind a discontinuity each time, and counts once.
-    expect(listed((await manager.externalPlaylist("stream1", now + 8000)) ?? "")).toEqual([
+    // One more segment as each comes due. The loop goes round, behind a discontinuity each time,
+    // and counts once.
+    expect(listed((await manager.externalPlaylist("stream1", now + 12_000)) ?? "")).toEqual([
       "../g1/full/seg_000000.ts",
       "|",
       "../slate/seg_000.ts",
@@ -241,14 +239,15 @@ describe("the transcoder's playlists", () => {
     expect(await sequenceOf("waiting1", now)).toBe(0);
     await manager.start("stream1", "http://e1/play", false);
     expect(await sequenceOf("stream1", now)).toBe(0);
-    // Some 40 seconds of slate later, both lists moved on.
-    expect(await sequenceOf("waiting1", now + 41_000)).toBe(17);
-    expect(await sequenceOf("stream1", now + 41_000)).toBe(17);
+    // Some 40 seconds of slate later, both lists moved on: 23 segments so far, of which the last
+    // nine are listed (a discontinuity stays listed for 20 seconds, with the segment before it).
+    expect(await sequenceOf("waiting1", now + 41_000)).toBe(14);
+    expect(await sequenceOf("stream1", now + 41_000)).toBe(14);
     // Nobody asked for either for over a minute. The stream without a pipeline starts over when
     // another playlist is made; the one with a pipeline goes on.
     expect(await sequenceOf("waiting2", now + 110_000)).toBe(0);
     expect(await sequenceOf("waiting1", now + 110_000)).toBe(0);
-    expect(await sequenceOf("stream1", now + 110_000)).toBeGreaterThan(17);
+    expect(await sequenceOf("stream1", now + 110_000)).toBeGreaterThan(14);
 
     // A stream that stops (the controller disabled it) loses its playlist, with or without a pipeline.
     expect(await manager.stop("stream1")).toBe(true);

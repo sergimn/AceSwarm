@@ -55,6 +55,7 @@ export type OnSegment = (generation: number, segment: PlaylistSegment, at: numbe
 export class VirtualPlaylist {
   private readonly windowSize: number;
   private readonly onSegment: OnSegment | undefined;
+  private readonly keepChangesMs: number;
   private segments: VirtualSegment[] = [];
   private mediaSequence = 0;
   private discontinuitySequence = 0;
@@ -63,9 +64,15 @@ export class VirtualPlaylist {
   /** The generations whose segments were followed by another one's, oldest first. */
   private readonly left = new Set<number>();
 
-  constructor(windowSize: number, onSegment?: OnSegment) {
+  /**
+   * With `keepChangesMs`, a discontinuity stays listed for that long, however many segments follow
+   * it: the playlist then lists more than `windowSize` segments for a while. A player that reads
+   * the playlist again only after that many came must still find the discontinuity in it.
+   */
+  constructor(windowSize: number, onSegment?: OnSegment, keepChangesMs = 0) {
     this.windowSize = windowSize;
     this.onSegment = onSegment;
+    this.keepChangesMs = keepChangesMs;
   }
 
   get length(): number {
@@ -105,10 +112,20 @@ export class VirtualPlaylist {
       added += 1;
       this.onSegment?.(generation, { uri, duration: segment.duration }, now);
     }
-    while (this.segments.length > this.windowSize) {
+    while (this.segments.length > this.windowSize && !this.keepsHead(now)) {
       this.dropHead();
     }
     return added;
+  }
+
+  /**
+   * Whether the first segment stays although the playlist is full: the one after it is behind a
+   * discontinuity that is to stay listed (see the constructor), and a discontinuity before the
+   * first segment is not written out.
+   */
+  private keepsHead(now: number): boolean {
+    const next = this.segments[1];
+    return next?.discontinuity === true && now - next.addedAt < this.keepChangesMs;
   }
 
   private leave(generation: number): void {
