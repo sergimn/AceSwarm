@@ -25,10 +25,11 @@ const RECENT_SEGMENTS = 6;
 /**
  * A segment that lasts longer than this may not be one the stream usually has: one with a jump in
  * its timestamps, where the stream had no data for a while, lasts the time that is missing as well.
- * (ffmpeg 9.0.2 wrote none in the tests: it wrote the missing time as segments at once where less
- * than ten seconds of data were lost, and moved the timestamps back where more were.) It counts
- * only while it is no more than twice what the stream's last segments usually last (their median),
- * as the segments of a broadcast with key frames this far apart all are.
+ * (ffmpeg 9.0.2 writes one where it copies the video and less than ten seconds of data were lost:
+ * ten seconds for seven lost. Where it encodes the video it writes that time as segments at once,
+ * and where more were lost it moves the timestamps back.) It counts only while it is no more than
+ * twice what the stream's last segments usually last (their median), as the segments of a
+ * broadcast with key frames this far apart all are.
  */
 const LONG_SEGMENT_SECONDS = 10;
 /**
@@ -97,7 +98,12 @@ const LOOKS_REMEMBERED = 64;
 const RUNS_REMEMBERED = 8;
 /**
  * The count that starts with a slate (see `Count`) ends when the stream's segments were listed this
- * long, with neither the slate nor a segment left out between them.
+ * long, with neither the slate nor a segment left out between them, once it left out about as much
+ * of the stream's video as the slate stood in for: from then on the playlist is never more than
+ * `NOTICE_SLACK_MS` ahead of the time that passed (see `Count.owed`), whatever the stream delivers.
+ * One that makes up for its pause slowly delivers more than the time that passed for minutes. One
+ * that never makes up for it (it came back late and stays so) is counted until the next slate,
+ * which costs it nothing: in its own time it fits.
  */
 const SETTLED_MS = 30_000;
 
@@ -187,16 +193,24 @@ interface Count {
   /**
    * How much of the stream's video came since `from`, listed or not, in milliseconds: the stream
    * made up for what it missed when that is about the time that passed since `since` (see
-   * `waitIsOver`)...
+   * `waitIsOver`). Where ffmpeg wrote more segments between two looks than its playlist lists, the
+   * ones the pipeline never saw came too: each counts for as long as the stream's segments usually last...
    */
   came: number;
   /**
-   * ...which is `from`, or later where video is missing for good: before the first segment of
-   * another ffmpeg run, or where ffmpeg wrote more segments between two looks than its playlist lists.
+   * ...and `since` is `from`, or later where video is missing for good: before the first segment
+   * of another ffmpeg run.
    */
   since: number;
   /** The last looks that found segments of the stream, oldest first. */
   looks: Look[];
+  /**
+   * How much more the playlist listed since the count started than the stream's video that came,
+   * in milliseconds: the slate's time, less the stream's video it left out (or never saw). A stream
+   * never delivers more than the time that passed, so the playlist is never more than this ahead of
+   * the time that passed, whatever it lists from now on.
+   */
+  owed: number;
   /** Whether a segment was listed since the stream is back although it didn't fit (see `firstListed`). */
   overdrawn: boolean;
 }
@@ -324,6 +338,14 @@ export class ExternalPlaylist {
     }
     this.counts({ generation, segment, at });
     this.pending.push({ generation, segment, at });
+    const oldest = this.pending[0];
+    if (!this.holding || this.pending.length <= this.filesKept || oldest === undefined) {
+      return;
+    }
+    // Of the ones that wait, only the newest are listed (see `firstListed`): ffmpeg deleted the
+    // files of the others, and a stream that never ends the wait would pile them up.
+    this.pending.shift();
+    this.leaveOut(oldest.segment, at);
   };
 
   /**
@@ -363,12 +385,17 @@ export class ExternalPlaylist {
       return;
     }
     const before = this.pending.at(-1);
-    const follows =
-      generation === (before?.generation ?? this.lastGeneration) &&
-      segmentIndex(segment.uri) === (before === undefined ? this.lastIndex : segmentIndex(before.segment.uri)) + 1;
     count.came += segment.duration * 1000;
-    if (!follows) {
-      // Video is missing before it for good: the stream goes on from here, in its own time.
+    if (generation === (before?.generation ?? this.lastGeneration)) {
+      // ffmpeg may have written more than its playlist lists since the last look: while the stream
+      // makes up for a pause at once. The ones between came, though the pipeline never saw them.
+      const after = before === undefined ? this.lastIndex : segmentIndex(before.segment.uri);
+      const unseen = Math.max(0, segmentIndex(segment.uri) - after - 1) * (usualOf(this.recent) || segment.duration);
+      count.came += unseen * 1000;
+      count.owed -= unseen * 1000;
+    } else {
+      // Another ffmpeg run: the video before its first segment is missing for good, and the stream
+      // goes on from here, in its own time.
       count.since = at - count.came;
     }
     const look = count.looks.at(-1);
@@ -435,7 +462,7 @@ export class ExternalPlaylist {
       }
       this.lastIndex = number;
       if (index < from || arrival.at < now - this.staleAfterMs) {
-        this.leaveOut(at);
+        this.leaveOut(arrival.segment, at);
       } else {
         this.list(arrival.segment, at);
       }
@@ -445,6 +472,8 @@ export class ExternalPlaylist {
       }
     }
     this.lastGeneration = first.generation;
+    // So too where all of them were left out: where none of the ones that waited fit, the slate
+    // gives way to the stream's next one that is on time after the newest of them (see `onTime`).
     this.lastAt = newest.at;
   }
 
@@ -463,7 +492,10 @@ export class ExternalPlaylist {
    * `NOTICE_SLACK_MS` to spare: one that came no later than the stream's segments usually do, while
    * the slate shows. The slate was early for this stream then, because players go by the short
    * segments the playlist lists after an outage (see `slateDue`), and a broadcast with key frames
-   * far apart would lose every segment until one fits. And once a count, a segment that came alone
+   * far apart would lose every segment until one fits. So too where none of the ones that waited
+   * fit with `NOTICE_SLACK_MS` to spare, as for a stream that came back in its own time at some
+   * moments between the slate's segments: they are left out, and the stream's next segment comes
+   * on time after the newest of them, and ends the slate. And once a count, a segment that came alone
    * while the stream shows may miss the time that passed by up to `NOTICE_SLACK_MS` (`overdrawn`),
    * and the count starts anew with it in the same way: what the stream made up for may have used up
    * all there was to spare, and its next segment in its own time, noticed late, would be left out.
@@ -514,11 +546,14 @@ export class ExternalPlaylist {
     );
   }
 
-  private leaveOut(at: number): void {
+  private leaveOut(segment: PlaylistSegment, at: number): void {
     this.apart = true;
-    if (this.count !== undefined) {
-      this.count.brokenAt = at;
+    const count = this.count;
+    if (count === undefined) {
+      return;
     }
+    count.brokenAt = at;
+    count.owed -= segment.duration * 1000;
   }
 
   private list(segment: PlaylistSegment, at: number): void {
@@ -533,7 +568,7 @@ export class ExternalPlaylist {
       return;
     }
     count.listed += segment.duration * 1000;
-    if (at - count.brokenAt >= SETTLED_MS) {
+    if (at - count.brokenAt >= SETTLED_MS && count.owed <= NOTICE_SLACK_MS) {
       this.count = undefined;
     }
   }
@@ -594,6 +629,7 @@ export class ExternalPlaylist {
         since: this.lastAt,
         looks: [],
         overdrawn: false,
+        owed: 0,
       };
     }
     while (this.slateDueAt <= now) {
@@ -614,6 +650,7 @@ export class ExternalPlaylist {
       if (this.count !== undefined) {
         this.count.listed += segment.duration * 1000;
         this.count.brokenAt = now;
+        this.count.owed += segment.duration * 1000;
       }
     }
   }
