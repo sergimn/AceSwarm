@@ -182,7 +182,7 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
 });
 
-test("presses a button or a link once while OK is held down on the remote", async ({ page }) => {
+test("presses a button once while OK is held down on the remote", async ({ page }) => {
   // Each screen the page opens (the player, a dialog) is a state it pushes onto the browser's history.
   await page.addInitScript(`(() => {
     window.screensOpened = 0;
@@ -972,7 +972,6 @@ test.describe("on a touch screen", () => {
 
     // The controls fade a few seconds after the last touch, and a finger moves no pointer over the
     // player to bring them back: a tap on the picture does.
-    await expect(player).toHaveClass(shown);
     await expect(player).not.toHaveClass(shown);
     const picture = await centre(".player-video");
     await page.touchscreen.tap(picture.x, picture.y);

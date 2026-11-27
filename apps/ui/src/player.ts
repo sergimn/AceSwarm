@@ -202,9 +202,10 @@ export class Player {
       this.showOverlay();
     });
     // A finger moves no pointer over the player: a tap brings the controls back, as a key does. The
-    // hidden controls can't be pressed (see the styles), so the tap that reveals them presses
-    // nothing: it ends before they can be pressed. A tap on controls that show presses them as
-    // before, and keeps them up.
+    // hidden controls can't be pressed (see the styles), and they show only when the click comes,
+    // after the tap ended: the tap that reveals them presses nothing. A tap on controls that show
+    // presses them as before, and keeps them up. (A second tap within the quarter of a second they
+    // take to fade in can press one, as a second click does.)
     this.root.addEventListener("click", () => {
       this.showOverlay();
     });
@@ -503,9 +504,9 @@ export class Player {
     const hidden = !this.root.classList.contains("show-overlay");
     this.showOverlay();
     // While the overlay is hidden, the first key only reveals it (so Enter cannot restart by accident).
-    // A held OK presses a button once, whichever it is: the navigator sees to that (it leaves the
-    // repeats of Enter alone, so that holding Enter on the button that hands the stream over doesn't
-    // hand over, take back, hand over...).
+    // A held OK presses a button once, whichever it is: the navigator sees to that (it ignores the
+    // repeats of Enter, so that holding Enter on the button that hands the stream over doesn't hand
+    // over, take back, hand over...).
     return hidden && (event.key === "Enter" || event.key.startsWith("Arrow"));
   }
 
