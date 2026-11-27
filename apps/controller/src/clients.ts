@@ -1,4 +1,5 @@
 import type {
+  EnginePeerTraffic,
   PathAssignment,
   PathStatus,
   PeerStats,
@@ -123,6 +124,11 @@ export class NetgwClient {
 
   async peers(ip: string): Promise<PeerStats> {
     return requestJson<PeerStats>(`${this.baseUrl}/peers/${encodeURIComponent(ip)}`, { timeoutMs: 3000 });
+  }
+
+  /** What every engine exchanged with each of its peers, as the gateway counts it. */
+  async peerTraffic(): Promise<EnginePeerTraffic[]> {
+    return requestJson<EnginePeerTraffic[]>(`${this.baseUrl}/peer-traffic`, { timeoutMs: 3000 });
   }
 
   async reload(): Promise<void> {

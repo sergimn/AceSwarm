@@ -154,6 +154,12 @@ describe("hot standby settings", () => {
     });
     expect(() => loadConfig({ STANDBY_FAILOVER_SECONDS: "0" })).toThrow();
   });
+
+  it("moves a stream to the favourite path once it was stable there for 20 s", () => {
+    expect(loadConfig({}).FAVOURITE_PATH_STABLE_SECONDS).toBe(20);
+    expect(loadConfig({ FAVOURITE_PATH_STABLE_SECONDS: "45" }).FAVOURITE_PATH_STABLE_SECONDS).toBe(45);
+    expect(() => loadConfig({ FAVOURITE_PATH_STABLE_SECONDS: "0" })).toThrow();
+  });
 });
 
 describe("tile previews", () => {

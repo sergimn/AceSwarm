@@ -66,13 +66,9 @@ export class StreamSupervisor {
     this.engines = new StreamEngines(stream.id, deps);
     this.logger = deps.logger.child({ stream: stream.id, aceId: stream.aceId });
     this.record = new StreamRecord(stream, { ...deps, logger: this.logger, gateway: this.engines.gateway });
-    this.paths = new StreamPaths({
-      paths: deps.paths,
-      pathAllowed: deps.pathAllowed,
-      pathLoad: deps.pathLoad,
-      strategy: deps.settings.pathStrategy,
-      logger: this.logger,
-    });
+    const { paths, pathAllowed, pathLoad, favouritePath, settings } = deps;
+    const pathDeps = { paths, pathAllowed, pathLoad, favouritePath, strategy: settings.pathStrategy };
+    this.paths = new StreamPaths({ ...pathDeps, logger: this.logger });
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? sleep;
     this.policy = { baseDelayMs: deps.settings.recoveryBaseDelayMs, maxDelayMs: deps.settings.recoveryMaxDelayMs };
@@ -267,6 +263,7 @@ export class StreamSupervisor {
     this.sourceWait.end();
     this.steps.played();
     this.setState("playing", null);
+    await this.failover.moveToFavourite();
   }
 
   /**

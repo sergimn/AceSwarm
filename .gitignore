@@ -9,3 +9,4 @@ apps/controller/public/
 .DS_Store
 e2e-stack.log
 __pycache__/
+*.pyc

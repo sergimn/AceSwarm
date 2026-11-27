@@ -21,7 +21,8 @@ import { broadcasts, remoteWireguardProfile, setBroadcastInput, type Broadcast }
 /**
  * Hot standby: a stream on the direct path keeps a standby on the VPN that already pulls the
  * broadcast, so when the engine it plays from fails it moves to the standby within seconds,
- * without starting an engine or going through the recovery ladder. See e2e/README.md.
+ * without starting an engine or going through the recovery ladder. A stream that plays also moves
+ * to the standby on the favourite path, once that one is stable. See e2e/README.md.
  *
  * The engine fails by being paused: it stops answering, as one that hangs. Cutting the direct path
  * off would not stall the stream here: its engine keeps getting the broadcast from the standby,
@@ -113,7 +114,7 @@ test.afterAll(async ({ request }) => {
   if (run.broadcast !== undefined) {
     await setBroadcastInput(run.broadcast, true);
   }
-  await request.patch("/api/settings", { data: { hotStandby: false, sharedEngines: false } });
+  await request.patch("/api/settings", { data: { hotStandby: false, sharedEngines: false, favouritePath: null } });
 });
 
 test("keeps a hot standby on the VPN once the stream plays", async ({ request }) => {
@@ -199,6 +200,75 @@ test("the engine it left gets hot again as the direct path's standby, and the st
   for (let check = 0; check < 5; check += 1) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     expect(await stream(request)).toMatchObject({ path: VPN_PATH, state: "playing", recoveries: before.recoveries });
+  }
+});
+
+test("moves to the favourite path once its standby there is stable, without a recovery or a new engine", async ({
+  page,
+  request,
+}) => {
+  // Two moves, each after a standby got hot and stayed so for 20 s, then a third standby to get hot.
+  test.setTimeout(900_000);
+  const before = await waitForSteadyPlaying(request, run.streamId);
+  expect(before.path).toBe(VPN_PATH);
+  const standbyEngine = before.standbys[0]?.engine?.name;
+  expect(standbyEngine).toBeTruthy();
+  const engines = engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"));
+  const recovered = await recoveriesSucceeded(request, run.streamId);
+
+  await openApp(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const favourite = page.getByRole("dialog", { name: "Settings" }).getByRole("group", { name: "Favourite path" });
+  const none = favourite.getByRole("button", { name: "None", exact: true });
+  const direct = favourite.getByRole("button", { name: "Direct", exact: true });
+  const vpn = favourite.getByRole("button", { name: PROFILE, exact: true });
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  // Both paths are up, so neither is greyed out.
+  await expect(direct).not.toHaveClass(/unavailable/);
+  await expect(vpn).not.toHaveClass(/unavailable/);
+
+  // The standby on the direct path has been hot since the test before: the stream moves to it.
+  await direct.click();
+  await expect(direct).toHaveAttribute("aria-pressed", "true");
+  await expect(none).toHaveAttribute("aria-pressed", "false");
+  expect((await snapshot(request)).favouritePath).toEqual({ path: "direct", stableSeconds: 20 });
+  const states = await statesUntilOn(request, "direct");
+  // It played all along, so it is no recovery, and it never showed anything but playing.
+  expect([...states]).toEqual(["playing"]);
+  const onDirect = await stream(request);
+  expect(onDirect.engine?.name).toBe(standbyEngine);
+  expect(onDirect.recoveries).toBe(before.recoveries);
+  expect(await recoveriesSucceeded(request, run.streamId)).toEqual(recovered);
+  // No engine started or went: the one it left becomes the standby on the VPN.
+  expect(engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"))).toEqual(engines);
+  await expect.poll(async () => (await stream(request)).standbys.map(({ path }) => path)).toEqual([VPN_PATH]);
+
+  // Back to the VPN, where the tests after this one expect it: the engine it left has to get hot
+  // as a standby first, and stay so for 20 s.
+  await vpn.click();
+  await expect(vpn).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(
+      async () => {
+        const view = await stream(request);
+        return `${view.path ?? "none"} ${view.state}`;
+      },
+      { timeout: 300_000, intervals: [2000] },
+    )
+    .toBe(`${VPN_PATH} playing`);
+  expect((await stream(request)).recoveries).toBe(before.recoveries);
+  expect(engineContainers(run.streamId).toSorted((a, b) => a.localeCompare(b, "en"))).toEqual(engines);
+
+  // With no favourite again, it stays there, also once the direct path's standby is stable.
+  await none.click();
+  await expect(none).toHaveAttribute("aria-pressed", "true");
+  expect((await snapshot(request)).favouritePath.path).toBeNull();
+  await expect
+    .poll(async () => (await standbys(request)).join(", "), { timeout: 240_000, intervals: [2000] })
+    .toBe("direct hot");
+  for (let check = 0; check < 10; check += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    expect(await stream(request)).toMatchObject({ path: VPN_PATH, recoveries: before.recoveries });
   }
 });
 

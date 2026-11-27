@@ -23,6 +23,8 @@ interface FakeEngine {
   memory: MemoryUsage | undefined;
   env?: string[] | null;
   startedAt?: string;
+  /** Its address on the engines network, when it has one. */
+  ip?: string;
 }
 
 const MB = 1024 * 1024;
@@ -72,7 +74,10 @@ function fakeDocker(engines: FakeEngine[]): DockerClient {
                 OOMKilled: entry.oomKilled,
               },
               Config: { Labels: { "aceswarm.stream": entry.stream }, Env: entry.env ?? null },
-              NetworkSettings: { Networks: {} },
+              NetworkSettings: {
+                Networks:
+                  entry.ip === undefined ? {} : { engines: { IPAddress: entry.ip }, other: { IPAddress: "10.0.0.9" } },
+              },
             },
       );
     },
@@ -97,6 +102,7 @@ function setup(engines: FakeEngine[]) {
     fakeDocker(engines),
     {
       stack: "test",
+      network: "engines",
       onOomKill: (stream) => {
         kills.push(stream);
       },
@@ -121,7 +127,11 @@ function setup(engines: FakeEngine[]) {
 describe("EngineResourceMonitor", () => {
   it("reports the memory and estimated cache of running engines only", async () => {
     const stopped = { ...engine("c", "s3", 10), running: false };
-    const capped = { ...engine("a", "s1", 300), env: ["PATH=/bin", `ACESWARM_MEMORY_CACHE_BYTES=${String(128 * MB)}`] };
+    const capped = {
+      ...engine("a", "s1", 300),
+      env: ["PATH=/bin", `ACESWARM_MEMORY_CACHE_BYTES=${String(128 * MB)}`],
+      ip: "172.31.250.130",
+    };
     const { monitor } = setup([capped, engine("b", "s2", 500), stopped]);
 
     await monitor.sample();
@@ -131,6 +141,8 @@ describe("EngineResourceMonitor", () => {
         stream: "s1",
         engine: "aceswarm-engine-s1-1",
         sharedPath: null,
+        // Its address on the engines network, whatever other networks it is on.
+        ip: "172.31.250.130",
         usedBytes: 300 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: 128 * MB,
@@ -140,6 +152,7 @@ describe("EngineResourceMonitor", () => {
         stream: "s2",
         engine: "aceswarm-engine-s2-1",
         sharedPath: null,
+        ip: "",
         usedBytes: 500 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: null,
@@ -180,6 +193,7 @@ describe("EngineResourceMonitor", () => {
         stream: "s1",
         engine: "aceswarm-engine-s1-1",
         sharedPath: null,
+        ip: "",
         usedBytes: 400 * MB,
         limitBytes: 768 * MB,
         cacheLimitBytes: null,
@@ -381,7 +395,7 @@ describe("EngineResourceMonitor", () => {
     const docker = fakeDocker([engine("a", "s1", 300)]);
     const monitor = new EngineResourceMonitor(
       docker,
-      { stack: "test", onOomKill: () => undefined },
+      { stack: "test", network: "engines", onOomKill: () => undefined },
       createLogger("test", "silent"),
     );
     await monitor.sample();

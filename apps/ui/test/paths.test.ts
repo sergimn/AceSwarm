@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { PathStatus, StandbyView, StreamView } from "@aceswarm/shared/api-types";
-import { formatPathLoad, formatPathsUp, formatSummary, isPathOff, pathLoads, usablePaths } from "../src/paths.ts";
+import {
+  favouriteOptions,
+  formatPathLoad,
+  formatPathsUp,
+  formatSummary,
+  isPathOff,
+  pathLoads,
+  usablePaths,
+} from "../src/paths.ts";
 
 function path(id: string, up: boolean): PathStatus {
   return {
@@ -127,5 +135,59 @@ describe("what runs on each path", () => {
     expect(formatPathLoad({ streams: 1, standbys: 0 })).toEqual(["1 stream"]);
     expect(formatPathLoad({ streams: 3, standbys: 1 })).toEqual(["3 streams", "1 standby"]);
     expect(formatPathLoad({ streams: 0, standbys: 2 })).toEqual(["0 streams", "2 standbys"]);
+  });
+});
+
+describe("the choices for the favourite path", () => {
+  const paths = [path("direct", true), { ...path("wg:a", true), label: "a" }, { ...path("wg:b", false), label: "b" }];
+  const options = (favourite: string | null, overrides: { wireguardOnly?: boolean; reachable?: boolean } = {}) =>
+    favouriteOptions({
+      paths,
+      wireguardOnly: overrides.wireguardOnly ?? false,
+      gatewayReachable: overrides.reachable ?? true,
+      favouritePath: { path: favourite, stableSeconds: 20 },
+    });
+
+  it("are none and every path, with the ones no stream can move to marked", () => {
+    expect(options(null)).toEqual([
+      { id: null, label: "None", selected: true, unavailable: null },
+      { id: "direct", label: "direct", selected: false, unavailable: null },
+      { id: "wg:a", label: "a", selected: false, unavailable: null },
+      { id: "wg:b", label: "b", selected: false, unavailable: "down" },
+    ]);
+  });
+
+  it("show the favourite as chosen, also while it is down", () => {
+    expect(options("wg:b").filter((option) => option.selected)).toEqual([
+      { id: "wg:b", label: "b", selected: true, unavailable: "down" },
+    ]);
+  });
+
+  it("mark the direct path as off with WireGuard only, whatever its probes say", () => {
+    const direct = options("direct", { wireguardOnly: true }).find((option) => option.id === "direct");
+    expect(direct).toEqual({ id: "direct", label: "direct", selected: true, unavailable: "off" });
+  });
+
+  it("mark every path as unknown while the gateway doesn't answer", () => {
+    expect(options(null, { reachable: false }).map((option) => option.unavailable)).toEqual([
+      null,
+      "unknown",
+      "unknown",
+      "unknown",
+    ]);
+  });
+
+  it("keep a favourite the gateway doesn't list, under the name it would have", () => {
+    expect(options("wg:new")[4]).toEqual({ id: "wg:new", label: "new", selected: true, unavailable: "unknown" });
+    const unanswered = favouriteOptions({
+      paths: [],
+      wireguardOnly: false,
+      gatewayReachable: false,
+      favouritePath: { path: "direct", stableSeconds: 20 },
+    });
+    expect(unanswered).toEqual([
+      { id: null, label: "None", selected: false, unavailable: null },
+      { id: "direct", label: "Direct", selected: true, unavailable: "unknown" },
+    ]);
   });
 });

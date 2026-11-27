@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "@aceswarm/shared/logger";
+import { wireguardPathId } from "@aceswarm/shared/network-policy";
 import { isIpv4Cidr, parseWireguardConfig, toSetconf, type WireguardConfig } from "@aceswarm/shared/wireguard";
 import { describeError } from "@aceswarm/shared/http";
 import type { CommandRunner } from "./exec.ts";
@@ -17,10 +18,6 @@ export interface Tunnel {
 
 const TABLE_BASE = 100;
 const DEFAULT_MTU = 1420;
-
-export function pathIdFor(profile: string): string {
-  return `wg:${profile}`;
-}
 
 /**
  * Brings WireGuard tunnels up and down to match the profile directory. Each tunnel gets an
@@ -123,7 +120,7 @@ export class TunnelManager {
     const slot = this.freeSlot();
     const tunnel: Tunnel = {
       profile,
-      pathId: pathIdFor(profile),
+      pathId: wireguardPathId(profile),
       iface: `aswg${String(slot)}`,
       table: TABLE_BASE + slot,
       config: undefined,

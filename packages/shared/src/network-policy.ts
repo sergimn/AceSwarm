@@ -9,6 +9,11 @@ import { z } from "zod";
 /** Id of the path that leaves through the host's own connection, without a VPN. */
 export const DIRECT_PATH_ID = "direct";
 
+/** Id of the path through a WireGuard profile's tunnel. */
+export function wireguardPathId(profile: string): string {
+  return `wg:${profile}`;
+}
+
 /** Name of the policy file in the WireGuard profile directory. */
 export const NETWORK_POLICY_FILE = "policy.json";
 

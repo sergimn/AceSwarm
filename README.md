@@ -16,6 +16,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
   3. move it to another network path.
 - **Only new video.** When a broadcast stops, its engine and its peers keep serving the minutes of it they already have. Ace Swarm follows each engine's live edge, the newest data of the broadcast it knows of, and only publishes video while that edge moves. A stream whose broadcast stopped shows "Waiting for source" instead of old video. It replaces that engine with a new one every so often and plays again once the broadcast is back.
 - **Hot standby.** With more than one network path, every playing stream also runs on each other path. When its engine or path fails, it fails over to a standby that already has the stream, within seconds instead of the minute or so a new engine needs to find peers.
+- **Favourite path.** Name one network path as the favourite, and every stream moves to it once it plays steadily there, without losing its picture.
 - **One engine per path.** One switch lets every stream on the same network path share one engine, which needs much less memory. A shared engine is only replaced when the stream you are watching fails, several of its streams fail at once, all of them fail, it stops answering, or you press **Restart**, and its streams keep their picture while it is replaced.
 - **WireGuard paths.** Upload a provider's `.conf` profile and streams can move to it when the direct connection struggles. Each stream can use a different path.
 - **WireGuard only.** One switch keeps every stream off the direct connection. If no VPN is up, streams wait instead of going direct.
@@ -180,12 +181,24 @@ With more than one network path (add a WireGuard profile), every stream that pla
 - **Failing over takes seconds.** When no new video came for `STANDBY_FAILOVER_SECONDS` (8) and a standby is hot, the stream moves to it make-before-break, before it even counts as stalled. A stalled stream also tries a hot standby before the recovery steps above. The path it left gets a standby again: the engine it played from, when it was one of its own.
 - **A standby also helps without a failover.** Engines on the host can swap pieces over the engines' network, so a stream whose path loses its peers may go on playing, fed by its standby on another path.
 - **Path moves use the standbys too.** When recovery moves a stream to another path, it moves to the standby there, even one that is still warming up.
-- **A healthy stream never moves.** Standbys only take over when the stream's own engine or path fails, and they keep their paths when path scores change, since a standby that moves starts again from no peers.
+- **A healthy stream never moves**, unless you chose a [favourite path](#favourite-path). Standbys only take over when the stream's own engine or path fails, and they keep their paths when path scores change, since a standby that moves starts again from no peers.
 - **Standbys that bring no video start again**, and go after three tries; their path gets a new one later, but not after three rounds of that, until the path goes down or the stream moves. A standby whose path is down stays two minutes in case the path comes back. The stream's **Standby** figure (the player's overlay, and its tile when it has one standby) says why one is not hot when the controller knows, such as "mullvad-de (warming up: ffmpeg decoded no video from it)", and keeps a path that lost its standbys as "failed" (within `STANDBY_MAX_PATHS`, while standbys are wanted), with "gave up" once it gets no more.
 - **Only for streams that play.** A stream that hasn't had video for ten minutes (a broadcast that is off) keeps no standbys; they start again once it plays.
 - **It costs resources.** Each standby is one more engine (or one more session on a shared engine), downloading the stream all the time. Turn **Hot standby on other paths** off under **Settings**, or set `STANDBY_MAX_PATHS` to keep standbys only on each stream's best few other paths. With **One engine per path** on, standbys only add sessions to the engines that are running anyway, which costs much less memory.
 
 The stream's tile and the player's overlay show its standbys and whether they are hot. **Network** counts the standbys that pull through each path next to its streams.
+
+## Favourite path
+
+Streams are sticky: each stays on its network path until that fails, so after an outage they can end up spread over paths you would not have picked. Under **Settings**, **Favourite path** names the one every stream should play on: the direct connection or a WireGuard profile. **None** takes the choice back, and streams stay where they are.
+
+- **A stream moves once it is stable there.** A stream on another path keeps its [hot standby](#hot-standby) on the favourite path, and moves to it once that standby was hot for `FAVOURITE_PATH_STABLE_SECONDS` (20) without a break. The move is make-before-break: the stream keeps playing, and it counts as a path switch, not as a recovery. The engine it left becomes the standby on the path it left.
+- **It needs hot standby.** Only a standby tells whether the stream plays steadily on the favourite path. With **Hot standby on other paths** off, no stream moves by itself, and the setting says so.
+- **New streams start there.** A stream that starts with no path of its own starts on the favourite when it is up. One that played before starts on the path it used last, and moves from there.
+- **A path that is down can be chosen.** The choices show a path no stream can move to in grey, with why: "(down)", "(off)" for the direct connection while **WireGuard only** is on, or "(unknown)" while the network gateway doesn't report it. You can choose it all the same, and streams move once it is back and stable. Until then they stay where they are.
+- **A stream can still leave it.** When the favourite path fails a stream, the stream fails over or recovers as usual, and comes back once its standby there is stable again. A failed move waits before the next try, a little longer each time.
+- **The favourite gets a standby first.** With `STANDBY_MAX_PATHS` set, the favourite path's standby comes before the others, and a failing stream fails over to it first.
+- Removing the favourite's WireGuard profile leaves no favourite.
 
 ## Monitoring
 
@@ -198,9 +211,11 @@ The stream's tile and the player's overlay show its standbys and whether they ar
 Grafana has two dashboards, each with a link to the other at the top:
 
 - **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
-- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken, its traffic with each peer and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
 
 Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
+
+Both dashboards show the traffic with each peer, by its address: how much data went each way in the time range, and how fast it goes. The overview adds up every engine a peer is a peer of, for all streams or the ones you choose. A stream's row says which of its engines each peer is a peer of (the one it plays from, a standby, its path's shared engine). The gateway counts this for every address that exchanged at least 16 KiB with an engine, which leaves out trackers and peers that only shook hands, and Prometheus stores a few series for each. They share its storage with everything else: once the stored data reaches `PROMETHEUS_RETENTION_SIZE` (2 GB), Prometheus drops its oldest data of every metric, so streams with many peers can leave all panels with less history than `PROMETHEUS_RETENTION`. Raise `PROMETHEUS_RETENTION_SIZE` if that happens and the disk has room.
 
 Both dashboards also list every engine that was removed, restarted or that exited: when, why, what it was for and how long it had run. The list comes from the controller's log, so it needs the `logs` profile. The overview counts these by reason and shows how long engines last, which needs only the `metrics` profile.
 
@@ -242,6 +257,7 @@ flowchart LR
   - Like any device on your network, an engine can still reach the host's published ports (the UI and, when enabled, the monitoring ports), which have no login.
   - Blocking engine-to-host traffic with a host firewall rule is a possible follow-up.
 - **No authentication.** Keep the UI on a trusted network. The same goes for the monitoring ports: Prometheus, Loki and Grafana are published on every interface, and Grafana's admin password comes from `GRAFANA_ADMIN_PASSWORD`.
+- **Peer addresses.** The controller's `/metrics` lists the address of every peer its engines exchanged at least 16 KiB with, and Prometheus keeps them for as long as it keeps everything else (`PROMETHEUS_RETENTION`, 90 days, or less once `PROMETHEUS_RETENTION_SIZE` is reached). The UI and its API show countries only.
 
 ## Development
 
