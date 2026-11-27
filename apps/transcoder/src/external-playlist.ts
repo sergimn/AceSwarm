@@ -359,9 +359,9 @@ export class ExternalPlaylist {
    * an outage (see `slateDue`), and a broadcast with key frames far apart would lose every segment
    * until one fits.
    *
-   * The count ends when the stream is late again after it was listed, too briefly for the slate:
-   * what it delivers then makes up for a pause no slate stood in for, while players waited. What it
-   * still had to deliver for the slate's time came before that pause.
+   * The count ends when the stream pauses again after it was listed, too briefly for the slate
+   * (see `pausedAgain`): what it delivers then makes up for a pause no slate stood in for, while
+   * players waited. What it still had to deliver for the slate's time came before that pause.
    */
   private firstListed(batch: readonly Arrival[], at: number, waited: boolean): number {
     const count = this.count;
@@ -369,7 +369,7 @@ export class ExternalPlaylist {
       return 0;
     }
     const first = batch[0];
-    if (this.slateNext === undefined && first !== undefined && first.at - this.lastAt > this.ownTimeAtMost()) {
+    if (this.slateNext === undefined && first !== undefined && this.pausedAgain(first)) {
       this.count = undefined;
       return 0;
     }
@@ -392,12 +392,14 @@ export class ExternalPlaylist {
   }
 
   /**
-   * The longest a segment of the stream in its own time can take to be noticed after the one before
-   * it, in milliseconds: as long as they usually last, and a second more, since the one before it
-   * may have been noticed at once and this one a second late.
+   * Whether the stream paused since its last segment: its next one came later than a segment in its
+   * own time can be noticed, as long as they usually last and a second more (the one before it may
+   * have been noticed at once and this one a second late), or lasts that much longer itself, since
+   * the data of the pause is lost and the segment after it says it lasts the pause as well.
    */
-  private ownTimeAtMost(): number {
-    return usualOf(this.recent) * 1000 + ARRIVAL_SLACK_MS + LOOK_JITTER_MS;
+  private pausedAgain({ segment, at }: Arrival): boolean {
+    const ownTime = usualOf(this.recent) * 1000 + ARRIVAL_SLACK_MS + LOOK_JITTER_MS;
+    return at - this.lastAt > ownTime || segment.duration * 1000 > ownTime;
   }
 
   /** What segments that came together get on top of the time that passed (see `firstListed`), in milliseconds. */

@@ -271,9 +271,14 @@ class Watch {
     const behindSlate = this.seen.get(entry.index - 1)?.slate === true;
     const first = this.arrivals[this.settled];
     const previous = this.arrivals[this.settled - 1];
-    if (!behindSlate && first !== undefined && previous !== undefined && first.at - previous.at > OWN_TIME_AT_MOST) {
-      // The stream paused again after it was back, too briefly for the slate: what it delivers now
-      // makes up for that, while the player waited. It is the player's to play.
+    const pausedAgain =
+      first !== undefined &&
+      previous !== undefined &&
+      (first.at - previous.at > OWN_TIME_AT_MOST || first.duration > OWN_TIME_AT_MOST);
+    if (!behindSlate && pausedAgain) {
+      // The stream paused again after it was back, too briefly for the slate (the segment after the
+      // pause came late, or lasts the pause as well): what it delivers now makes up for that, while
+      // the player waited. It is the player's to play.
       this.before = undefined;
     }
     for (const leftOut of this.arrivals.slice(this.settled, order)) {
@@ -895,6 +900,18 @@ describe("ExternalPlaylist", () => {
     expect(at(20.4)).toBe("g1:1 | s0 s1 s2 | g1:5 g1:6 g1:7 g1:8 g1:9");
     segment(22.4, 1, 10);
     expect(at(22.4)).toBe("g1:1 | s0 s1 s2 | g1:5 g1:6 g1:7 g1:8 g1:9 g1:10");
+    // So it is when the segment after the pause comes in time, but lasts the pause as well.
+    const spans = make();
+    spans.segment(0, 1, 0);
+    spans.segment(2, 1, 1);
+    expect(spans.at(11)).toBe("g1:0 g1:1 | s0 s1 s2");
+    for (const index of [2, 3, 4, 5, 6]) {
+      spans.segment(12, 1, index);
+    }
+    spans.segment(14, 1, 7);
+    spans.segment(16, 1, 8);
+    spans.segment(18.2, 1, 9, 6);
+    expect(spans.at(18.2)).toBe("g1:1 | s0 s1 s2 | g1:6 g1:7 g1:8 g1:9");
   });
 
   it("counts from the stream's last segment each time the slate takes over", () => {
