@@ -24,6 +24,12 @@ const standbySource = z.union([httpUrl, z.object({ source: httpUrl, stat: httpUr
 const standbysBody = z.object({ sources: z.array(standbySource).max(16) });
 /** How many times the pipeline opens a source again that a standby reader just let go of (see `start`). */
 const REOPENS_AFTER_RELEASE = 5;
+/**
+ * The playlist for players outside the page, such as VLC, at `/hls/<id>/external/index.m3u8`: the
+ * full output's, under an address of its own, so that the controller can tell who asks for it. Its
+ * segments are the full output's own files: a playlist names them relative to the stream.
+ */
+const EXTERNAL_PLAYLIST = "external";
 
 /**
  * Owns every pipeline and exposes them over HTTP, together with the HLS output. It also reads the
@@ -380,7 +386,8 @@ export function registerRoutes(service: Service, manager: PipelineManager): void
   });
 
   app.get("/hls/:id/:variant/index.m3u8", async (request, reply) => {
-    const { id, variant } = request.params as { id: string; variant: string };
+    const { id, variant: asked } = request.params as { id: string; variant: string };
+    const variant = asked === EXTERNAL_PLAYLIST ? "full" : asked;
     const pipeline = manager.get(id);
     if (pipeline === undefined || !VARIANTS.includes(variant as Variant)) {
       return reply.code(404).send({ error: "no such stream" });

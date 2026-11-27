@@ -1,4 +1,4 @@
-import { get } from "node:http";
+import { createServer, get } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { BulkAddResponse } from "@aceswarm/shared/api-types";
 import { createLogger } from "@aceswarm/shared/logger";
@@ -60,6 +60,59 @@ test("the API waits until the orchestrator started; the HLS proxy doesn't", asyn
   ready.resolve(undefined);
   expect((await api).statusCode).toBe(200);
   await service.app.close();
+});
+
+test("whoever gets a stream's playlist for external players counts as its viewer; nothing else of the proxy does", async () => {
+  // A transcoder with one stream, which answers everything under it.
+  const transcoder = createServer((request, response) => {
+    const known = request.url?.startsWith("/hls/abcdef/") === true;
+    response.writeHead(known ? 200 : 404, { "content-type": known ? "application/vnd.apple.mpegurl" : "text/plain" });
+    response.end(known ? "#EXTM3U\n" : "no such stream");
+  });
+  await new Promise<void>((resolve) => transcoder.listen(0, "127.0.0.1", resolve));
+  const { port } = transcoder.address() as AddressInfo;
+  const service = createService({ name: "controller", logger: createLogger("test", "silent") });
+  onTestFinished(async () => {
+    await service.app.close();
+    transcoder.close();
+  });
+  const players: unknown[][] = [];
+  const orchestrator = {
+    reportExternalPlayer: (...player: unknown[]) => {
+      players.push(player);
+    },
+  } as unknown as Orchestrator;
+  await registerRoutes(service, orchestrator, {
+    uiDir: "/nonexistent",
+    transcoderUrl: `http://127.0.0.1:${String(port)}`,
+  });
+  const ask = async (url: string, userAgent = "VLC/3.0.20 LibVLC/3.0.20", method: "GET" | "HEAD" = "GET") =>
+    service.app.inject({ method, url, headers: { "user-agent": userAgent }, remoteAddress: "192.0.2.7" });
+
+  const playlist = await ask("/hls/abcdef/external/index.m3u8");
+  expect(playlist.statusCode).toBe(200);
+  expect(playlist.body).toBe("#EXTM3U\n");
+  expect(players).toEqual([["abcdef", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20"]]);
+  // Each request counts, with what the player says of itself.
+  await ask("/hls/abcdef/external/index.m3u8?again", "Lavf/61.7.100");
+  expect(players.at(-1)).toEqual(["abcdef", "192.0.2.7", "Lavf/61.7.100"]);
+  expect(players).toHaveLength(2);
+
+  // The page's playlists and the segments don't: the page reports itself.
+  for (const url of [
+    "/hls/abcdef/full/index.m3u8",
+    "/hls/abcdef/preview/index.m3u8",
+    "/hls/abcdef/g1/full/seg_000001.ts",
+    "/hls/abcdef/thumbnail.jpg",
+    "/hls/abcdef/external/index.m3u8/more",
+    "/hls/abcdef/external/other.m3u8",
+  ]) {
+    expect((await ask(url)).statusCode, url).toBe(200);
+  }
+  // Neither does a playlist the player didn't get, or one it only asked about.
+  expect((await ask("/hls/ghijkl/external/index.m3u8")).statusCode).toBe(404);
+  expect((await ask("/hls/abcdef/external/index.m3u8", "curl/8.5.0", "HEAD")).statusCode).toBe(200);
+  expect(players).toHaveLength(2);
 });
 
 test("restarting a stream with no run says whether it is disabled, not running yet or unknown", async () => {

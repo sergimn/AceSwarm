@@ -458,13 +458,15 @@ export class ControllerMetrics {
 
     const viewers = new Gauge({
       name: "aceswarm_stream_viewers",
-      help: "Players showing the stream full screen",
+      help: "Players showing the stream: pages that show it full screen, and players outside the page (VLC and the like)",
       labelNames: ["stream"],
       registers,
     });
     const watching = new Gauge({
       name: "aceswarm_viewer_watching",
-      help: "What each player shows full screen (value is always 1). Viewer ids are random and last one visit.",
+      help:
+        "What each player shows (value is always 1): a page that shows the stream full screen, or a player outside " +
+        "the page that asks for the stream's playlist. Viewer ids are random and last one visit",
       labelNames: ["viewer", "device", "stream"],
       registers,
     });

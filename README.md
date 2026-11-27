@@ -9,6 +9,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
 - **Paste anything.** Content IDs, infohashes, `acestream://` links and magnet links all work. You don't have to say which kind it is: Ace Swarm works it out.
 - **Add a whole list.** Turn on **Add several at once** and paste a list with one stream per line. It can be untidy, like a list copied from a page or an M3U playlist: Ace Swarm takes the ID from each line and ignores the rest. Lines without an ID don't stop the others: they stay in the box for you to correct. The streams of a list start right away, each downloading its broadcast: for a long list, turn off **Start them right away** to add them disabled, and enable the ones you want under **Streams**.
 - **Built for remotes.** Arrow keys and Back move around the UI, so it works on Android TV and other TV browsers.
+- **Open in an external player.** One button in the full screen player hands the stream to VLC or another player on the same device. See [External players](#external-players).
 - **Self-healing.** Each stream runs in its own engine container. A stalled stream is recovered step by step, without touching the other streams:
   1. restart the stream,
   2. restart its engine,
@@ -157,6 +158,19 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
 ### Who is watching
 
 The player tells Ace Swarm which stream it shows full screen, right away and then every `VIEWER_PING_SECONDS` (60). That is how shared engines know which stream someone is watching. Each page load makes up a random viewer id and keeps it only in memory: there are no cookies and nothing is stored in the browser, so every visit is a new viewer. The "Viewers" dashboard row shows who watches what, with a rough guess of the device (such as "Chrome on TV").
+
+A player outside the page, such as VLC, reports nothing itself. It counts while it asks for the stream's playlist, and for 30 seconds after its last request. It gets a random viewer id too, and shows by its name, such as "VLC". See [External players](#external-players).
+
+## External players
+
+**Open in external player**, in the full screen player, hands the stream to a player outside the browser, such as VLC.
+
+- **On Android** (phones, tablets and TVs) the page asks the system to open the stream in an installed player. This hasn't been tried on a real Android device yet: where no player opens, use **Copy link**.
+- **Elsewhere** the browser downloads a small `.m3u` file named after the stream. Open it from the browser's downloads. A browser in full screen doesn't show them, so the player names the file and says where it is; leave full screen to get to it. Where a browser can't download a file, which a TV's browser may not, there is nothing to open: type the address the player shows into the other player, or go back with **Watch here again**.
+- **The page stops its own video at once**, so that only one player decodes the stream and plays its sound. **Watch here again** plays it in the page again. For a second after either, **Open in external player**, **Watch here again** and **Copy link** ignore another press, so that a double click or a second press of OK doesn't undo the first.
+- **Copy link**, next to it, copies the stream's address, for a browser that can't hand the stream over: open the address in the player as a network stream. Where the browser doesn't let the page copy, the player shows the address under the stream's name for two minutes instead, to write it down. Once the stream is handed over, the player shows the address too.
+- **External players have an address of their own**, `/hls/<stream id>/external/index.m3u8`, which the button and **Copy link** give out. Whoever plays it counts under [Who is watching](#who-is-watching). Two players of the same kind that play the same stream and reach Ace Swarm from one address count as one: two on one computer, or any two behind a reverse proxy.
+- **For now, an external player ends where the page's player waits**: when the stream brings no new video for a while (from about 10 seconds for mpv and other players built on ffmpeg, depending on their version; VLC waits longer), when the stream waits for its broadcast, and when Ace Swarm itself restarts. In VLC, turn **Loop** on and it opens the stream again by itself.
 
 ## Hot standby
 

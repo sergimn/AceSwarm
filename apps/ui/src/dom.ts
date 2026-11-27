@@ -51,6 +51,9 @@ const ICONS = {
   power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
   back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/>',
+  play: '<path d="M7 4.5v15l12-7.5z"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;
