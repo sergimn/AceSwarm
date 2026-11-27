@@ -101,9 +101,10 @@ const RUNS_REMEMBERED = 8;
  * long, with neither the slate nor a segment left out between them, once it left out about as much
  * of the stream's video as the slate stood in for: from then on the playlist is never more than
  * `NOTICE_SLACK_MS` ahead of the time that passed (see `Count.owed`), whatever the stream delivers.
- * One that makes up for its pause slowly delivers more than the time that passed for minutes. One
- * that never makes up for it (it came back late and stays so) is counted until the next slate,
- * which costs it nothing: in its own time it fits.
+ * One that makes up for its pause slowly delivers more than the time that passed for minutes, and
+ * may pause again meanwhile. One that never makes up for it (it came back late and stays so) is
+ * counted on, through the slates that follow too, which costs it next to nothing: in its own time
+ * it fits (see the notes' limits).
  */
 const SETTLED_MS = 30_000;
 
@@ -206,9 +207,11 @@ interface Count {
   looks: Look[];
   /**
    * How much more the playlist listed since the count started than the stream's video that came,
-   * in milliseconds: the slate's time, less the stream's video it left out (or never saw). A stream
-   * never delivers more than the time that passed, so the playlist is never more than this ahead of
-   * the time that passed, whatever it lists from now on.
+   * in milliseconds: the slate's time, less the stream's video it left out (or never saw), and to
+   * start with, as much as the stream was behind then where it was still making up for an earlier
+   * pause (see `addSlate`). A stream never gets ahead of the time that passed, so it can make up
+   * for no more than this: where this is about nothing, nothing it delivers puts the playlist
+   * further ahead of the time that passed since `from` than the count lets it be.
    */
   owed: number;
   /** Whether a segment was listed since the stream is back although it didn't fit (see `firstListed`). */
@@ -435,9 +438,10 @@ export class ExternalPlaylist {
   /**
    * Lists the stream's segments that are not looked at yet, but for the ones that are left out,
    * and the ones older than the stale threshold: their video is old. The ones that waited while the
-   * slate showed are listed as of `now`, the others as of when they came.
+   * slate showed are listed as of `now`, the others as of when they came. With `listing` false,
+   * all of them are left out.
    */
-  private take(now: number): void {
+  private take(now: number, listing = true): void {
     const batch = this.pending;
     const first = batch[0];
     const newest = batch.at(-1);
@@ -447,7 +451,7 @@ export class ExternalPlaylist {
     this.pending = [];
     const waited = this.holding;
     const at = waited ? now : first.at;
-    const from = this.firstListed(batch, waited);
+    const from = listing ? this.firstListed(batch, waited) : batch.length;
     if (first.generation !== this.lastGeneration) {
       // Another ffmpeg run may cut its segments differently: a re-encoded one every two seconds, a
       // copy at the broadcast's key frames.
@@ -616,11 +620,20 @@ export class ExternalPlaylist {
       return;
     }
     if (this.playlist.length === 0 || now - due > CATCH_UP_MS) {
-      // Nothing is listed, or nobody asked for a long time: whoever asks now has nothing to play.
+      // Nothing is listed, or nobody asked for a long time: whoever asks now has nothing to play,
+      // and gets the stream's segments that come after the slate's. The ones that wait are old by
+      // then, and the oldest of them about to go (see `gone`): they are left out.
+      this.take(now, false);
       this.slateDueAt = now - SLATE_SEGMENTS_AHEAD * next.duration * 1000;
       this.count = undefined;
     } else if (starts) {
       this.slateDueAt = due;
+      // A count that still runs hands on as much as the stream is behind then (see `Count.owed`):
+      // one that makes up for a pause slowly may pause again before it has, and then delivers what
+      // it missed of both pauses after this one. Where it is ahead, as another ffmpeg run's first
+      // segments that come together make it, it hands on nothing: less would end the next count
+      // before the stream made up for this pause.
+      const behind = this.count === undefined ? 0 : this.lastAt - this.count.since - this.count.came;
       this.count = {
         from: this.lastAt,
         listed: 0,
@@ -629,7 +642,7 @@ export class ExternalPlaylist {
         since: this.lastAt,
         looks: [],
         overdrawn: false,
-        owed: 0,
+        owed: Math.max(0, behind),
       };
     }
     while (this.slateDueAt <= now) {

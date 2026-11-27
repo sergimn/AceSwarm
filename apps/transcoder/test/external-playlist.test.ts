@@ -180,14 +180,23 @@ function pausingStream(random: () => number, seconds: number): Arrival[] {
       default: {
         // It makes up for the pause at `rate` times real time: at 1.05 to 1.2 now and then, else at
         // 1.2 to 2.5, and within 200 seconds. Each segment takes that much less to come than it
-        // lasts, until it is no more behind.
+        // lasts, until it is no more behind. Half the time, where that takes long, it pauses again
+        // 20 to 80 seconds in, and then makes up for both pauses.
         const drawn = random();
         const rate = Math.max(drawn < 0.15 ? 1.05 + drawn : 1.2 + ((drawn - 0.15) * 1.3) / 0.85, 1 + pause / 200);
-        for (let behind = pause; behind > 0;) {
+        let again = random() < 0.5 ? 20 + random() * 60 : Infinity;
+        for (let behind = pause, spent = 0; behind > 0;) {
+          if (spent >= again) {
+            const more = 5.5 + random() * 5;
+            clock += more;
+            behind += more;
+            again = Infinity;
+          }
           const duration = length();
           // The last one ends where the stream is live: it comes no sooner than that.
           const gained = Math.min(duration - duration / rate, behind);
           clock += duration - gained;
+          spent += duration - gained;
           behind -= gained;
           write(clock, duration, false);
         }
@@ -229,7 +238,12 @@ const FILES_KEPT = 10;
 /** A file a playlist lists is there for this long at least, in seconds: VLC asks for the second segment behind a discontinuity some ten seconds after the first. */
 const FILE_LIFE = 12;
 
-/** How long the random test may take: 150 streams of ten minutes take well under a second here, and a few on a slow CI runner. */
+/**
+ * How long each of the random test's streams lasts, in seconds: long enough for a few pauses after
+ * one that the stream makes up for slowly, and pauses again meanwhile, which can take five minutes.
+ */
+const RANDOM_STREAM_SECONDS = 900;
+/** How long the random test may take: 150 streams of fifteen minutes take about a second here, and a few on a slow CI runner. */
 const LONG_TEST_MS = 30_000;
 
 /** How long after the stream delivered faster than in real time a segment in its own time may be left out, in seconds. */
@@ -238,14 +252,20 @@ const FAST_SPAN = 30;
 /**
  * When a stream's segments of two seconds are written, 60 of them or `segments`: in their own time
  * until 20, then none from 21 to 41 (the engine sends nothing), then what it missed at `rate` times
- * real time, and then in real time again. And when it is no longer behind (`done`).
+ * real time, and then in real time again. And when it is no longer behind (`done`). With `again`,
+ * the engine sends nothing for a while once more, from `again.at`, and then goes on at `rate`.
  */
-function catchingUp(rate: number, segments = 60): { writes: number[]; done: number } {
+function catchingUp(
+  rate: number,
+  segments = 60,
+  again?: { at: number; lasting: number },
+): { writes: number[]; done: number } {
   const writes: number[] = [];
   let done = Infinity;
   for (let index = 0; index < segments; index += 1) {
     const end = 2 * (index + 1);
-    const sent = end <= 21 ? end : 41 + (end - 21) / rate;
+    const made = end <= 21 ? end : 41 + (end - 21) / rate;
+    const sent = again === undefined || made < again.at ? made : made + again.lasting;
     writes.push(Math.max(sent, end));
     if (sent <= end && end > 21) {
       done = Math.min(done, end);
@@ -276,15 +296,16 @@ function firstListed(listed: readonly Entry[], now: number, listedAt: Map<string
  * A stream of two-second segments stops at 2, and at 23 sends what it missed but its last `late`
  * seconds at once: ffmpeg writes more than its playlist lists, and the pipeline sees the newest six.
  * Then it goes on in its own time, that late, while a player asks every half a second, and at 120.5
- * it sends those seconds too, and more, at once. What the playlist lists then.
+ * it sends those seconds too, and more, at once. What the playlist lists then. With `again`, it
+ * pauses once more from 60 to 68, and then sends what it missed of that at once.
  */
-function backlog(late: number): string {
+function backlog(late: number, again = false): string {
   const { at, segment } = make();
   segment(0, 1, 0);
   segment(2, 1, 1);
   let index = Math.floor((23 - late) / 2) - 6;
   for (let now = 2.5; now <= 120; now += 0.5) {
-    for (; now >= 23 && 2 * (index + 1) + late <= now; index += 1) {
+    for (; now >= 23 && !(again && now >= 60 && now < 68) && 2 * (index + 1) + late <= now; index += 1) {
       segment(now, 1, index);
     }
     at(now);
@@ -306,6 +327,76 @@ function placeOf(listed: readonly Entry[], durations: Map<number, number>, name:
     place = entry.uri.endsWith(name) ? entry.index : place;
   }
   return place;
+}
+
+/**
+ * Plays a stream whose segments are written at `writes` (see `catchingUp`) until `until`: the
+ * pipeline looks once a second, at `phase`, and when a player asks, every two seconds. Each is of
+ * the ffmpeg run in `runs` (all of the first where it has none), whose segments are numbered from
+ * its first. How much more than the time that passed the playlist listed at most since each of the
+ * stream's segments in `after` (its last before a pause), and when each file it listed was first
+ * listed.
+ */
+function playedSlowly(
+  writes: readonly number[],
+  phase: number,
+  after: readonly number[],
+  until: number,
+  runs: readonly number[] = [],
+): { most: number[]; listedAt: Map<string, number>; at: (seconds: number) => string; segment: Made["segment"] } {
+  const { at, text, segment } = make();
+  const fileOf = (write: number): [run: number, index: number] => {
+    const run = runs[write] ?? 1;
+    return [run, write - Math.max(0, runs.indexOf(run))];
+  };
+  let next = 0;
+  const came = after.map(() => NaN);
+  const places = after.map(() => NaN);
+  const most = after.map(() => -Infinity);
+  const listedAt = new Map<string, number>();
+  const durations = new Map<number, number>();
+  for (let now = 1; now <= until; now += 0.25) {
+    const asks = now % 2 === 0;
+    if (!asks && !Number.isSafeInteger(now - phase)) {
+      continue;
+    }
+    for (; writes[next] !== undefined && (writes[next] ?? 0) <= now; next += 1) {
+      segment(now, ...fileOf(next));
+      const which = after.indexOf(next);
+      if (which !== -1) {
+        came[which] = now;
+      }
+    }
+    if (!asks) {
+      continue;
+    }
+    const listed = entriesOf(text(now));
+    firstListed(listed, now, listedAt, 0);
+    for (const [which, index] of after.entries()) {
+      const [run, number] = fileOf(index);
+      const name = `g${String(run)}/full/seg_${String(number).padStart(6, "0")}.ts`;
+      places[which] = placeOf(listed, durations, name) ?? places[which] ?? NaN;
+      // What it listed since then, against the time that passed.
+      const since = [...durations]
+        .filter(([place]) => place > (places[which] ?? NaN))
+        .reduce((sum, [, one]) => sum + one, 0);
+      most[which] = Number.isFinite(places[which])
+        ? Math.max(most[which] ?? -Infinity, since - (now - (came[which] ?? NaN)))
+        : (most[which] ?? -Infinity);
+    }
+  }
+  return { most, listedAt, at, segment };
+}
+
+/** How long the files of the stream's segments that were listed at `listedAt` were there at least, written at `writes`. */
+function shortestLife(writes: readonly number[], listedAt: ReadonlyMap<string, number>): number {
+  let shortest = Infinity;
+  for (const [uri, listed] of listedAt) {
+    const index = Number(/g1\/full\/seg_(\d+)/.exec(uri)?.[1] ?? NaN);
+    // ffmpeg deletes a segment's file when it writes the tenth newer one.
+    shortest = Math.min(shortest, (writes[index + 10] ?? Infinity) - listed);
+  }
+  return shortest;
 }
 
 /**
@@ -820,6 +911,31 @@ describe("ExternalPlaylist", () => {
     expect(at(129)).toBe("g1:1 | s0 s1 s2 | s0 | g1:2");
   });
 
+  it("leaves out the segments that waited when a player asks after a minute without requests", () => {
+    const { at, text, segment } = make();
+    for (let index = 0; index < 10; index += 1) {
+      segment(2 * index + 2, 1, index);
+      at(2 * index + 2);
+    }
+    // The stream stops at 20, and a player watches the slate until 40.
+    for (let now = 21; now <= 40; now += 2) {
+      at(now);
+    }
+    expect(at(40)).toBe("g1:9 | s0 s1 s2 | s0 s1 s2 | s0 s1");
+    // Then the stream comes back at 0.4 times real time, which never ends the wait, and nobody asks.
+    let index = 10;
+    for (let now = 45; now <= 160; now += 5) {
+      segment(now, 1, index);
+      index += 1;
+    }
+    // A player that asks now has nothing: it gets three of the slate's segments, and the stream's
+    // next one after them. The ones that waited are old, and the oldest about to go.
+    expect(at(160.5)).toBe("s2 | s0 s1");
+    segment(161, 1, index);
+    expect(at(161)).toBe("s2 | s0 s1 | g1:34");
+    expect(text(161)).toContain("#EXT-X-MEDIA-SEQUENCE:18\n");
+  });
+
   it("keeps the stream's segments waiting while the slate shows, until it made up for what it missed", () => {
     const { at, segment } = make();
     segment(0, 1, 0);
@@ -998,54 +1114,81 @@ describe("ExternalPlaylist", () => {
     // Five seconds late, it would put the playlist four seconds ahead of the time that passed: the
     // count goes on, and leaves out what doesn't fit.
     expect(backlog(5)).toBe("g1:52 g1:53 g1:54 g1:55 g1:56 | g1:59");
+    // So it does where the stream pauses again meanwhile, and makes up for that pause at once:
+    // the count after that pause owes what the stream is still behind, and leaves those seconds out.
+    expect(backlog(9, true)).toBe("g1:49 g1:50 g1:51 g1:52 g1:53 g1:54");
   });
 
   it("counts until the stream made up for its pause, however slowly it does", () => {
     for (const rate of [1.08, 1.1, 1.15, 1.2]) {
       for (const phase of [0, 0.25, 0.5, 0.75]) {
         const where = `${String(rate)}x, looks at ${String(phase)}`;
-        const { at, text, segment } = make();
         const { writes, done } = catchingUp(rate, 200);
-        // The pipeline looks once a second and when a player asks, every two seconds.
-        let next = 0;
-        let before = NaN;
-        const listedAt = new Map<string, number>();
-        const durations = new Map<number, number>();
-        let last = NaN;
-        let most = -Infinity;
-        for (let now = 1; now <= 400; now += 0.25) {
-          const asks = now % 2 === 0;
-          if (!asks && !Number.isSafeInteger(now - phase)) {
-            continue;
-          }
-          for (; writes[next] !== undefined && (writes[next] ?? 0) <= now; next += 1) {
-            segment(now, 1, next);
-            before = next === 9 ? now : before;
-          }
-          if (asks) {
-            const listed = entriesOf(text(now));
-            firstListed(listed, now, listedAt, 0);
-            last = placeOf(listed, durations, "seg_000009.ts") ?? last;
-            // What it listed since the stream's last segment before the slate, against the time that passed.
-            const since = [...durations].filter(([index]) => index > last).reduce((sum, [, one]) => sum + one, 0);
-            most = Number.isFinite(last) ? Math.max(most, since - (now - before)) : most;
-          }
-        }
+        const { most, listedAt, at, segment } = playedSlowly(writes, phase, [9], 400);
         // It makes up for twenty seconds within two minutes or four: the playlist never lists more
         // than the time that passed and the four seconds the count may be off by.
         expect(done, where).toBeLessThan(350);
-        expect(most, where).toBeLessThanOrEqual(4);
+        expect(most[0], where).toBeLessThanOrEqual(4);
         // At that pace every file listed is there long enough.
-        for (const [uri, listed] of listedAt) {
-          const index = Number(/seg_(\d+)/.exec(uri)?.[1] ?? NaN);
-          const gone = writes[index + 10] ?? Infinity;
-          expect(gone - listed, `${where}: ${uri}`).toBeGreaterThanOrEqual(12);
-        }
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(12);
         // Once it made up for its pause, the count ends: all it delivers is listed again.
         for (const index of [200, 201, 202]) {
           segment(401, 1, index);
         }
         expect(at(401), where).toMatch(/g1:199 g1:200 g1:201 g1:202$/);
+      }
+    }
+  });
+
+  it("counts on through another pause while the stream still makes up slowly for the first", () => {
+    for (const rate of [1.05, 1.1, 1.15]) {
+      for (const phase of [0, 0.5]) {
+        const where = `${String(rate)}x, looks at ${String(phase)}`;
+        // It pauses again for six seconds at 70, and then makes up for both pauses.
+        const { writes, done } = catchingUp(rate, 320, { at: 70, lasting: 6 });
+        const second = writes.findLastIndex((one) => one < 70);
+        const { most, listedAt } = playedSlowly(writes, phase, [9, second], 640);
+        expect(done, where).toBeLessThan(620);
+        // Since the stream's last segment before either pause, the playlist never lists more than
+        // the time that passed and four seconds.
+        expect(Math.max(...most), where).toBeLessThanOrEqual(4);
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(12);
+        // Once it made up for both, nothing it delivers in its own time is left out.
+        const uris = listedAt.keys().toArray();
+        const missing = writes
+          .map((one, index) =>
+            one === 2 * (index + 1) && one > done ? `g1/full/seg_${String(index).padStart(6, "0")}.ts` : "",
+          )
+          .filter((name) => name !== "" && uris.every((uri) => !uri.endsWith(name)));
+        expect(missing, where).toEqual([]);
+      }
+    }
+  });
+
+  it("starts the next count owing nothing, not less, where the stream is ahead when the slate takes over again", () => {
+    for (const rate of [1.05, 1.08, 1.1]) {
+      for (const phase of [0, 0.25, 0.5, 0.75]) {
+        const where = `${String(rate)}x, looks at ${String(phase)}`;
+        // The stream stops at 20, and comes back at 30 as another ffmpeg run whose first three
+        // segments come at once. The count takes that run's first segment as on time, so with the
+        // next two its video is four seconds ahead of the time that passed. It stops again at 40,
+        // while the count still runs, and from 48 makes up for that slowly.
+        const writes: number[] = [];
+        const runs: number[] = [];
+        for (let index = 0; index < 10; index += 1) {
+          writes.push(2 * (index + 1));
+          runs.push(1);
+        }
+        for (let index = 0; index < 120; index += 1) {
+          const end = 40 + 2 * (index - 7);
+          writes.push(index < 3 ? 30 : index < 8 ? 30 + 2 * (index - 2) : Math.max(48 + (end - 40) / rate, end));
+          runs.push(2);
+        }
+        const { most } = playedSlowly(writes, phase, [9, 17], 260, runs);
+        // Since the stream's last segment before the second pause, the playlist never lists more
+        // than the time that passed and four seconds: what the stream was ahead doesn't end the
+        // count before it made up for the pause.
+        expect(most[1], where).toBeLessThanOrEqual(4);
       }
     }
   });
@@ -1484,12 +1627,12 @@ describe("ExternalPlaylist", () => {
       for (let seed = 1; seed <= 150; seed += 1) {
         const random = seeded(seed);
         const { text, segment } = make();
-        const written = pausingStream(random, 600);
+        const written = pausingStream(random, RANDOM_STREAM_SECONDS);
         const watch = new Watch(`seed ${String(seed)}`, written);
         const phase = random();
         let next = 0;
         let asked = 0;
-        for (let now = 2; now < 600; now += 0.5 + random() * 1.5) {
+        for (let now = 2; now < RANDOM_STREAM_SECONDS; now += 0.5 + random() * 1.5) {
           const came: Arrival[] = [];
           for (const look of looksUntil(now, asked, phase, random)) {
             for (let one = written[next]; one !== undefined && one.at <= look; one = written[next]) {
