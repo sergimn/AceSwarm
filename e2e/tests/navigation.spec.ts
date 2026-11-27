@@ -182,6 +182,56 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
 });
 
+test("presses a button once while OK is held down on the remote", async ({ page }) => {
+  // Each screen the page opens (the player, a dialog) is a state it pushes onto the browser's history.
+  await page.addInitScript(`(() => {
+    window.screensOpened = 0;
+    const push = history.pushState.bind(history);
+    history.pushState = (...args) => {
+      window.screensOpened += 1;
+      return push(...args);
+    };
+  })()`);
+  await openApp(page);
+  const screensOpened = (): Promise<number> => page.evaluate<number>("window.screensOpened");
+  /** OK held down: the key goes down, and goes down again every 100 ms, as a remote repeats it. */
+  const holdOk = async (repeats: number): Promise<void> => {
+    for (let repeat = 0; repeat < repeats; repeat += 1) {
+      await page.keyboard.down("Enter");
+      await page.waitForTimeout(100);
+    }
+    await page.keyboard.up("Enter");
+  };
+  const player = page.getByRole("dialog", { name: "Player" });
+  const tile = page.locator(".tile", { hasText: "Channel 12" });
+
+  // On a tile, the stream opens once. The repeats find the focus on the player's Back button.
+  await tile.focus();
+  await holdOk(10);
+  await expect(player).toBeVisible();
+  await expect(player.getByRole("button", { name: "Back" })).toBeFocused();
+  expect(await screensOpened()).toBe(1);
+
+  // On Back, the player closes and stays closed. The first press sends the focus back to the tile,
+  // which the repeats would press, to open the stream again.
+  await holdOk(20);
+  await expect(player).toBeHidden();
+  await expect(tile).toBeFocused();
+  expect(await screensOpened()).toBe(1);
+
+  // So does a dialog's close button, whose press leaves the focus on the button that opened it.
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await expect(dialog).toBeVisible();
+  expect(await screensOpened()).toBe(2);
+  await holdOk(20);
+  await expect(dialog).toBeHidden();
+  await expect(settings).toBeFocused();
+  expect(await screensOpened()).toBe(2);
+});
+
 test("hands a stream to an external player, and plays it here again", async ({ page, context, request, baseURL }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await openApp(page);
@@ -914,5 +964,54 @@ test.describe("in a browser on Android", () => {
     await expect(player).toBeHidden();
     // The stream is left as it was found, playing: it was disabled for a moment.
     await waitForPlaying(request, stream!.id);
+  });
+});
+
+test.describe("on a touch screen", () => {
+  test.use({ hasTouch: true, viewport: { width: 412, height: 915 } });
+
+  test("a tap brings the player's controls back and presses nothing, and one tap presses a button that shows", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await page.locator(".tile", { hasText: "Channel 12" }).tap();
+    const player = page.getByRole("dialog", { name: "Player" });
+    await expect(player).toBeVisible();
+    const shown = /show-overlay/;
+    // The buttons that get pressed, by their words.
+    await page.evaluate(`(() => {
+      window.pressed = [];
+      document.querySelector(".player-actions").addEventListener(
+        "click",
+        (event) => window.pressed.push(event.target.closest("button")?.textContent.trim()),
+        true,
+      );
+    })()`);
+    const pressed = (): Promise<string[]> => page.evaluate<string[]>("window.pressed");
+    const centre = async (selector: string): Promise<{ x: number; y: number }> => {
+      const box = await player.locator(selector).boundingBox();
+      return { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+    };
+
+    // The controls fade a few seconds after the last touch, and a finger moves no pointer over the
+    // player to bring them back: a tap on the picture does.
+    await expect(player).not.toHaveClass(shown);
+    const picture = await centre(".player-video");
+    await page.touchscreen.tap(picture.x, picture.y);
+    await expect(player).toHaveClass(shown);
+
+    // So does a tap where Back is, which they hide: it presses nothing, the controls show once it is
+    // over.
+    await expect(player).not.toHaveClass(shown);
+    const back = await centre(".player-actions button:first-child");
+    await page.touchscreen.tap(back.x, back.y);
+    await expect(player).toHaveClass(shown);
+    expect(await pressed()).toEqual([]);
+    await expect(player).toBeVisible();
+
+    // A tap on a button that shows presses it once.
+    await page.touchscreen.tap(back.x, back.y);
+    await expect(player).toBeHidden();
+    expect(await pressed()).toEqual(["Back"]);
   });
 });
