@@ -201,6 +201,14 @@ export class Player {
     this.root.addEventListener("pointermove", () => {
       this.showOverlay();
     });
+    // A finger moves no pointer over the player: a tap brings the controls back, as a key does. The
+    // hidden controls can't be pressed (see the styles), and they show only when the click comes,
+    // after the tap ended: the tap that reveals them presses nothing. A tap on controls that show
+    // presses them as before, and keeps them up. (A second tap within the quarter of a second they
+    // take to fade in can press one, as a second click does.)
+    this.root.addEventListener("click", () => {
+      this.showOverlay();
+    });
     // The picture changes size with the window (full screen included) and with the stream.
     window.addEventListener("resize", () => {
       this.placeStats();
@@ -495,13 +503,11 @@ export class Player {
   private onKey(event: KeyboardEvent): boolean {
     const hidden = !this.root.classList.contains("show-overlay");
     this.showOverlay();
-    const enter = event.key === "Enter";
-    // A held key repeats, and each repeat of Enter (OK on a remote) would press the button with the
-    // focus again. The button that hands the stream over gives its place and the focus to the one
-    // that takes it back, so holding it would hand over, take back, hand over... One press, one go.
-    const held = enter && event.repeat;
     // While the overlay is hidden, the first key only reveals it (so Enter cannot restart by accident).
-    return held || (hidden && (enter || event.key.startsWith("Arrow")));
+    // A held OK presses a button once, whichever it is: the navigator sees to that (it ignores the
+    // repeats of Enter, so that holding Enter on the button that hands the stream over doesn't hand
+    // over, take back, hand over...).
+    return hidden && (event.key === "Enter" || event.key.startsWith("Arrow"));
   }
 
   private showOverlay(): void {

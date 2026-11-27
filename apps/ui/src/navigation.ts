@@ -68,6 +68,11 @@ function isTextField(element: Element | null): element is HTMLInputElement | HTM
   );
 }
 
+/** What OK (Enter) presses: a button or a link. A text field takes the key for itself. */
+function isPressedByEnter(element: Element | null): boolean {
+  return element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement;
+}
+
 /** Lets arrows move the caret inside text fields, and leave the field once the caret is at its edge. */
 function caretKeepsKey(field: HTMLInputElement | HTMLTextAreaElement, direction: Direction): boolean {
   // A field that can't be edited has no caret to move: some browsers leave it where it is, and
@@ -199,6 +204,13 @@ export class Navigator {
       return;
     }
     const active = document.activeElement;
+    // A held OK (Enter) repeats, and each repeat would press the button or link with the focus again,
+    // wherever the first press sent the focus: a button that closes the player or a dialog puts it
+    // back on the tile or the button that opened it, and the repeat opens it again. One press, one go.
+    if (event.key === "Enter" && event.repeat && isPressedByEnter(active)) {
+      event.preventDefault();
+      return;
+    }
     const editing = isTextField(active);
     // Some TV remotes only report the legacy key code for Back.
     // eslint-disable-next-line @typescript-eslint/no-deprecated, unicorn/prefer-keyboard-event-key

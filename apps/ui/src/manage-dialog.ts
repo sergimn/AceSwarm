@@ -155,12 +155,6 @@ export class ManageDialog {
       h("div", { className: "row-pair-buttons" }, [restart, disable]),
       enable,
     ]);
-    // A held OK or Enter key repeats, and each repeat would press whichever button is there by then.
-    pair.addEventListener("keydown", (event) => {
-      if (event.repeat && event.key === "Enter") {
-        event.preventDefault();
-      }
-    });
     const remove = confirmButton("Remove", "Press again to remove", async () => {
       await api.removeStream(stream.id);
       toast("Stream removed");
