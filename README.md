@@ -9,6 +9,7 @@ Ace Swarm collects your Acestream streams in one place. You watch them in a brow
 - **Paste anything.** Content IDs, infohashes, `acestream://` links and magnet links all work. You don't have to say which kind it is: Ace Swarm works it out.
 - **Add a whole list.** Turn on **Add several at once** and paste a list with one stream per line. It can be untidy, like a list copied from a page or an M3U playlist: Ace Swarm takes the ID from each line and ignores the rest. Lines without an ID don't stop the others: they stay in the box for you to correct. The streams of a list start right away, each downloading its broadcast: for a long list, turn off **Start them right away** to add them disabled, and enable the ones you want under **Streams**.
 - **Built for remotes.** Arrow keys and Back move around the UI, so it works on Android TV and other TV browsers.
+- **Open in an external player.** One button in the full screen player hands the stream to VLC or another player on the same device. See [External players](#external-players).
 - **Self-healing.** Each stream runs in its own engine container. A stalled stream is recovered step by step, without touching the other streams:
   1. restart the stream,
   2. restart its engine,
@@ -159,6 +160,19 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
 
 The player tells Ace Swarm which stream it shows full screen, right away and then every `VIEWER_PING_SECONDS` (60). That is how shared engines know which stream someone is watching. Each page load makes up a random viewer id and keeps it only in memory: there are no cookies and nothing is stored in the browser, so every visit is a new viewer. The "Viewers" dashboard row shows who watches what, with a rough guess of the device (such as "Chrome on TV").
 
+A player outside the page, such as VLC, reports nothing itself. It counts while it asks for the stream's playlist, and for 30 seconds after its last request. It gets a random viewer id too, and shows by its name, such as "VLC". See [External players](#external-players).
+
+## External players
+
+**Open in external player**, in the full screen player, hands the stream to a player outside the browser, such as VLC.
+
+- **On Android** (phones, tablets and TVs) the page asks the system to open the stream in an installed player. This hasn't been tried on a real Android device yet: where no player opens, use **Copy link**.
+- **Elsewhere** the browser downloads a small `.m3u` file named after the stream. Open it from the browser's downloads. A browser in full screen doesn't show them, so the player names the file and says where it is; leave full screen to get to it. Where a browser can't download a file, which a TV's browser may not, there is nothing to open: type the address the player shows into the other player, or go back with **Watch here again**.
+- **The page stops its own video at once**, so that only one player decodes the stream and plays its sound. **Watch here again** plays it in the page again. For a second after either, **Open in external player**, **Watch here again** and **Copy link** ignore another press, so that a double click or a second press of OK doesn't undo the first.
+- **Copy link**, next to it, copies the stream's address, for a browser that can't hand the stream over: open the address in the player as a network stream. Where the browser doesn't let the page copy, the player shows the address under the stream's name for two minutes instead, to write it down. Once the stream is handed over, the player shows the address too.
+- **External players have an address of their own**, `/hls/<stream id>/external/index.m3u8`, which the button and **Copy link** give out. Whoever plays it counts under [Who is watching](#who-is-watching). Two players of the same kind that play the same stream and reach Ace Swarm from one address count as one: two on one computer, or any two behind a reverse proxy.
+- **For now, an external player ends where the page's player waits**: when the stream brings no new video for a while (from about 10 seconds for mpv and other players built on ffmpeg, depending on their version; VLC waits longer), when the stream waits for its broadcast, and when Ace Swarm itself restarts. In VLC, turn **Loop** on and it opens the stream again by itself.
+
 ## Hot standby
 
 With more than one network path (add a WireGuard profile), every stream that played keeps a standby on each other path it may use: an engine of its own there, or with **One engine per path** on, a session on that path's shared engine. The transcoder reads each standby and throws the data away, so the engine keeps downloading the stream from its peers as if someone watched it. A standby is _hot_ while video keeps coming: the transcoder checks that the data is MPEG-TS, and about once a minute that ffmpeg decodes its video.
@@ -196,9 +210,11 @@ Streams are sticky: each stays on its network path until that fails, so after an
 Grafana has two dashboards, each with a link to the other at the top:
 
 - **Ace Swarm** shows every stream on one page: stability, viewers, peers, engines, network paths and logs.
-- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
+- **Ace Swarm streams** has one row for each stream: whether it delivers, its network paths, its peers, its engines' memory, the recovery steps taken, its traffic with each peer and the engines it lost. A stream you add gets its row by itself, and a deleted one keeps it while the time range covers its life. A stream that was disabled for the whole range has none.
 
 Engine containers get a new name with every new engine, so both dashboards draw engines by what they are for (the one a stream plays from, a standby, a path's shared engine) and their network path. A line goes on when an engine replaces another.
+
+Both dashboards show the traffic with each peer, by its address: how much data went each way in the time range, and how fast it goes. The overview adds up every engine a peer is a peer of, for all streams or the ones you choose. A stream's row says which of its engines each peer is a peer of (the one it plays from, a standby, its path's shared engine). The gateway counts this for every address that exchanged at least 16 KiB with an engine, which leaves out trackers and peers that only shook hands, and Prometheus stores a few series for each. They share its storage with everything else: once the stored data reaches `PROMETHEUS_RETENTION_SIZE` (2 GB), Prometheus drops its oldest data of every metric, so streams with many peers can leave all panels with less history than `PROMETHEUS_RETENTION`. Raise `PROMETHEUS_RETENTION_SIZE` if that happens and the disk has room.
 
 Both dashboards also list every engine that was removed, restarted or that exited: when, why, what it was for and how long it had run. The list comes from the controller's log, so it needs the `logs` profile. The overview counts these by reason and shows how long engines last, which needs only the `metrics` profile.
 
@@ -240,6 +256,7 @@ flowchart LR
   - Like any device on your network, an engine can still reach the host's published ports (the UI and, when enabled, the monitoring ports), which have no login.
   - Blocking engine-to-host traffic with a host firewall rule is a possible follow-up.
 - **No authentication.** Keep the UI on a trusted network. The same goes for the monitoring ports: Prometheus, Loki and Grafana are published on every interface, and Grafana's admin password comes from `GRAFANA_ADMIN_PASSWORD`.
+- **Peer addresses.** The controller's `/metrics` lists the address of every peer its engines exchanged at least 16 KiB with, and Prometheus keeps them for as long as it keeps everything else (`PROMETHEUS_RETENTION`, 90 days, or less once `PROMETHEUS_RETENTION_SIZE` is reached). The UI and its API show countries only.
 
 ## Development
 
@@ -253,7 +270,7 @@ pipx install pre-commit && pre-commit install
 
 - **End-to-end tests use real engines, no mocks.** They run on three GitHub runners: AceSwarm with real Acestream engines, real broadcasts of dummy streams, and a real WireGuard server. They run on every pull request, and on any branch with "Run workflow" in the E2E workflow. They don't run on one machine. See [e2e/README.md](e2e/README.md), which also has diagrams.
 - **Unit tests use small fakes** (Docker client, iptables, clock) to test logic without Docker.
-- **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions.
+- **Dependencies.** Renovate keeps dependencies current and waits until a release is 30 days old. TypeScript stays on 6.0 until typescript-eslint supports newer versions. npm is the one that comes with Node.js: `packageManager` in package.json names it, and CI fails when a Node.js update brings another npm until the field is set to it in the same pull request.
 
 ## Credits
 

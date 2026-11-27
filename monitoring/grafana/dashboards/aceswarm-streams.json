@@ -727,6 +727,160 @@
       "interval": "5m"
     },
     {
+      "type": "bargauge",
+      "title": "Traffic with each peer in range",
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The data the stream's engines exchanged with each peer in the dashboard's range (aceswarm_engine_peer_bytes_total), by the peer's address and country, with a bar for each direction: down (green) is what the peer sent us, up (blue) what we sent it. The 50 largest. After each peer, the engine it is a peer of, by what that engine is for and its network path: playing (the engine the stream plays from), standby (a hot standby on another path), kept (the engine of a failed move), starting, or shared (the shared engine of a path the stream plays from or has a standby on, whose peers are those of all its streams). A peer of two of the stream's engines shows once for each. From the gateway's connection table, so headers and acknowledgements count too, and only the engines' traffic with the internet: a peer on the engines' own network, such as a hot standby, is not there. A peer counts once it exchanged 16 KiB with an engine, from the first time Prometheus reads it there to the last: what it moved before and after, up to about half a minute each, is left out. An engine that changes what it is for (a failover makes the playing engine a standby) counts each byte once, for what it was for then.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "topk(50, sum by (peer, country, role, path, direction) (increase(aceswarm_engine_peer_bytes_total{stream=\"$stream\"}[$__range]) or increase(aceswarm_engine_peer_bytes_total{role=\"shared\"}[$__range]) * on (path) group_left () max by (path) (max_over_time(aceswarm_stream_path{stream=\"$stream\"}[$__range]) or max_over_time(aceswarm_stream_standby{stream=\"$stream\"}[$__range]))) > 0)",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{direction}} {{peer}} {{country}} · {{role}} {{path}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^up /"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "valueMode": "color",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "manual",
+        "minVizWidth": 8,
+        "minVizHeight": 32,
+        "maxVizHeight": 38,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Speed with each peer",
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How fast the stream's engines exchange data with each peer (aceswarm_engine_peer_speed_bytes), by the peer's address and country: the 20 fastest each way at each moment. It is what the gateway counted between its last two looks at its connection table (5 seconds by default) at the moment Prometheus collects, so a snapshot and not an average. Above zero: from the peer to us. Below zero: from us to the peer. A peer has no line while nothing moves. After each peer, the engine it is a peer of, by what that engine is for and its network path: playing (the engine the stream plays from), standby (a hot standby on another path), kept (the engine of a failed move), starting, or shared (the shared engine of a path the stream plays from or has a standby on, whose peers are those of all its streams). A peer of two of the stream's engines shows once for each. From the gateway's connection table, so headers and acknowledgements count too, and only the engines' traffic with the internet: a peer on the engines' own network, such as a hot standby, is not there.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (peer, country, role, path) (aceswarm_engine_peer_speed_bytes{stream=\"$stream\",direction=\"down\"} or aceswarm_engine_peer_speed_bytes{role=\"shared\",direction=\"down\"} * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"} or aceswarm_stream_standby{stream=\"$stream\"})))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "down {{peer}} {{country}} · {{role}} {{path}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "expr": "topk(20, sum by (peer, country, role, path) (aceswarm_engine_peer_speed_bytes{stream=\"$stream\",direction=\"up\"} or aceswarm_engine_peer_speed_bytes{role=\"shared\",direction=\"up\"} * on (path) group_left () max by (path) (aceswarm_stream_path{stream=\"$stream\"} or aceswarm_stream_standby{stream=\"$stream\"})))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "up {{peer}} {{country}} · {{role}} {{path}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "binBps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "table",
       "title": "Engines restarted or removed",
       "id": 10,
@@ -739,7 +893,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 25
       },
       "targets": [
         {

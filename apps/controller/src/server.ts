@@ -62,6 +62,9 @@ const nameParams = z.object({ name: z.string().min(1).max(64) });
 
 const HOP_HEADERS = ["content-type", "content-length", "cache-control", "last-modified"];
 
+/** The playlist for players outside the page (see `hlsUrls`), with the stream's id. */
+const EXTERNAL_PLAYLIST = /^\/hls\/([a-z0-9]{6,32})\/external\/index\.m3u8(?:\?|$)/;
+
 function badRequest(reply: FastifyReply, error: string, details?: string[]): FastifyReply {
   return reply.code(400).send(details === undefined ? { error } : { error, details });
 }
@@ -342,6 +345,13 @@ export async function registerRoutes(
       });
     } catch (error) {
       return reply.code(502).send({ error: describeError(error) });
+    }
+    // A player outside the page reports nothing, and asks for its playlist every few seconds while
+    // it plays: each one it gets counts it as a viewer. The page's playlists don't count: the
+    // page reports itself.
+    const external = upstream.ok && request.method === "GET" ? EXTERNAL_PLAYLIST.exec(request.url)?.[1] : undefined;
+    if (external !== undefined) {
+      orchestrator.reportExternalPlayer(external, request.ip, request.headers["user-agent"]);
     }
     reply.code(upstream.status);
     for (const header of HOP_HEADERS) {

@@ -1,8 +1,15 @@
-import { STREAM_STATES, type PathStatus, type StreamView, type ViewerView } from "@aceswarm/shared/api-types";
+import {
+  STREAM_STATES,
+  type PathStatus,
+  type PeerTraffic,
+  type StreamView,
+  type ViewerView,
+} from "@aceswarm/shared/api-types";
 import { Counter, Gauge, Histogram, type Registry } from "@prometheus-io/client";
 import type { EngineCount, EngineMemory } from "./engine-resources.ts";
 import type { EnginePlace } from "./engine-places.ts";
 import { ENGINE_END_REASONS } from "./engine-runs.ts";
+import { PeerBytesByPlace, type EnginePeers } from "./peer-traffic.ts";
 import type { SharedEngineView } from "./shared-engines.ts";
 
 /** More sources for the gauges, read at scrape time. */
@@ -18,6 +25,12 @@ export interface MetricSources {
    * for, and its network path. Without it, the engines' role and path labels are empty.
    */
   enginePlaces?: (engines: readonly EngineMemory[], streams: readonly StreamView[]) => EnginePlace[];
+  /**
+   * What the engine with this address exchanged with each of its peers, as the gateway last
+   * counted it; undefined while the gateway has no answer (see `PeerTrafficMonitor.of`). Without
+   * it, there are no peer series.
+   */
+  peerTraffic?: (engineIp: string) => readonly PeerTraffic[] | undefined;
 }
 
 /** Both kinds of engines, even when there are none of one, so their sum is there as soon as it is known. */
@@ -96,13 +109,53 @@ const ENGINE_LABELS = ["stream", "engine", "role", "path"] as const;
 
 type EngineGauges = Record<"memory" | "memoryLimit" | "cache" | "cacheLimit", Gauge<(typeof ENGINE_LABELS)[number]>>;
 
+/**
+ * The labels of an engine's traffic with one peer: the engine's, so the peers of a stream's engines
+ * tell which engine each is a peer of, then the peer's address and country ("" when unknown) and
+ * the direction (down: from the peer to the engine, up: from the engine to the peer).
+ */
+const PEER_LABELS = [...ENGINE_LABELS, "peer", "country", "direction"] as const;
+
+interface PeerMetrics {
+  bytes: Counter<(typeof PEER_LABELS)[number]>;
+  speed: Gauge<(typeof PEER_LABELS)[number]>;
+  /** What the byte counter says: the gateway's totals, counted by the engines' places and the peers' countries. */
+  counted: PeerBytesByPlace;
+}
+
+/**
+ * The engines' traffic with their peers. The bytes are counted from one scrape to the next (see
+ * `PeerBytesByPlace`), so a peer has a value from the first scrape that sees it, zero at first. The
+ * speeds are the gateway's, under the place the engine has now, and only those above zero have a
+ * series: most peers are idle most of the time.
+ */
+function setPeerTraffic(metrics: PeerMetrics, engines: readonly EnginePeers[]): void {
+  const counted = metrics.counted.collect(engines);
+  for (const { labels, bytes } of counted) {
+    metrics.bytes.inc(labels, bytes);
+  }
+  for (const { labels: engine, peers = [] } of engines) {
+    for (const peer of peers) {
+      const labels = { ...engine, peer: peer.ip, country: peer.country ?? "" };
+      if (peer.downBytesPerSecond > 0) {
+        metrics.speed.set({ ...labels, direction: "down" }, peer.downBytesPerSecond);
+      }
+      if (peer.upBytesPerSecond > 0) {
+        metrics.speed.set({ ...labels, direction: "up" }, peer.upBytesPerSecond);
+      }
+    }
+  }
+}
+
 function setEngineGauges(
   gauges: EngineGauges,
+  peers: PeerMetrics,
   engines: readonly EngineMemory[],
   streams: readonly StreamView[],
-  placesOf: MetricSources["enginePlaces"],
+  sources: MetricSources,
 ): void {
-  const places = placesOf?.(engines, streams) ?? [];
+  const places = sources.enginePlaces?.(engines, streams) ?? [];
+  const traffic: EnginePeers[] = [];
   for (const [index, engine] of engines.entries()) {
     const place = places[index];
     const labels = { stream: engine.stream, engine: engine.engine, role: place?.role ?? "", path: place?.path ?? "" };
@@ -112,7 +165,12 @@ function setEngineGauges(
     if (engine.cacheLimitBytes !== null) {
       gauges.cacheLimit.set(labels, engine.cacheLimitBytes);
     }
+    // An engine without an address on the engines network is none the gateway knows peers of.
+    if (engine.ip !== "" && sources.peerTraffic !== undefined) {
+      traffic.push({ ip: engine.ip, labels, peers: sources.peerTraffic(engine.ip) });
+    }
   }
+  setPeerTraffic(peers, traffic);
 }
 
 /**
@@ -204,7 +262,7 @@ export class ControllerMetrics {
         const liveEdge = [liveEdgeAge, liveEdgeStill, sourceQuiet];
         const gauges = [info, state, up, frameAge, ...liveEdge, peers, countries, speed, path];
         const others = [memory, memoryLimit, viewers, cache, cacheLimit, watching, sharedStreams, sharedStandbys];
-        for (const gauge of [...gauges, ...others, standbys]) {
+        for (const gauge of [...gauges, ...others, standbys, peerBytes, peerSpeed]) {
           gauge.reset();
         }
         const now = Date.now();
@@ -260,9 +318,10 @@ export class ControllerMetrics {
         }
         setEngineGauges(
           { memory, memoryLimit, cache, cacheLimit },
+          { bytes: peerBytes, speed: peerSpeed, counted: peerBytesByPlace },
           engineMemory(),
           current.streams,
-          sources.enginePlaces,
+          sources,
         );
         total.set(current.streams.length);
       },
@@ -373,16 +432,41 @@ export class ControllerMetrics {
       labelNames: ENGINE_LABELS,
       registers,
     });
+    // A counter that is filled anew at every scrape, like the gauges, so a peer that left takes its
+    // series with it. What it says is counted in `PeerBytesByPlace`, from the gateway's totals.
+    const peerBytesByPlace = new PeerBytesByPlace();
+    const peerBytes = new Counter({
+      name: "aceswarm_engine_peer_bytes_total",
+      help:
+        "Bytes each engine exchanged with each of its peers while the engine had this role and path and the peer " +
+        "this country, since the scrape that first saw them so, headers included (direction down: from the peer, " +
+        "up: to the peer). Counted at every scrape from the totals of the gateway's connection table. It starts at " +
+        "zero, and again when a peer comes back after its connections ended and when the controller restarts. A " +
+        "peer has a series once it exchanged 16 KiB with the engine. A shared engine's peers are those of all its " +
+        "streams",
+      labelNames: PEER_LABELS,
+      registers,
+    });
+    const peerSpeed = new Gauge({
+      name: "aceswarm_engine_peer_speed_bytes",
+      help:
+        "Bytes per second each engine exchanged with each of its peers between the gateway's last two samples of " +
+        "its connection table (PEERS_INTERVAL_SECONDS), headers included; no value while nothing moved",
+      labelNames: PEER_LABELS,
+      registers,
+    });
 
     const viewers = new Gauge({
       name: "aceswarm_stream_viewers",
-      help: "Players showing the stream full screen",
+      help: "Players showing the stream: pages that show it full screen, and players outside the page (VLC and the like)",
       labelNames: ["stream"],
       registers,
     });
     const watching = new Gauge({
       name: "aceswarm_viewer_watching",
-      help: "What each player shows full screen (value is always 1). Viewer ids are random and last one visit.",
+      help:
+        "What each player shows (value is always 1): a page that shows the stream full screen, or a player outside " +
+        "the page that asks for the stream's playlist. Viewer ids are random and last one visit",
       labelNames: ["viewer", "device", "stream"],
       registers,
     });

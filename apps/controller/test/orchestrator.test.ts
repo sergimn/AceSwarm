@@ -440,6 +440,26 @@ test("shutting down waits a moment for a teardown in progress, not for ever", as
   stuck.resolve(undefined);
 });
 
+test("a player outside the page counts as a viewer of a stream in the list, and goes with the stream", async () => {
+  const { start } = await harness();
+  const { orchestrator } = await start();
+  const added = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
+  // The address it asks at, which the page hands out.
+  expect(added.hls.external).toBe(`/hls/${added.id}/external/index.m3u8`);
+  orchestrator.reportExternalPlayer(added.id, "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
+  // A playlist of a stream that just left the list can still answer for a moment.
+  orchestrator.reportExternalPlayer("zzzzzz", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
+  const viewers = orchestrator.viewers();
+  expect(viewers).toHaveLength(1);
+  expect(viewers[0]).toMatchObject({ stream: added.id, device: "VLC" });
+  expect(viewers[0]?.viewer).toMatch(/^[a-z0-9]{16}$/);
+  expect(orchestrator.getStream(added.id)?.viewers).toBe(1);
+  expect(orchestrator.snapshot().streams.map(({ viewers }) => viewers)).toEqual([1]);
+
+  await orchestrator.removeStream(added.id);
+  expect(orchestrator.viewers()).toEqual([]);
+});
+
 test("a list of streams is added together: the new ones start unless they are added disabled", async () => {
   const { start, events } = await harness();
   const { orchestrator } = await start();

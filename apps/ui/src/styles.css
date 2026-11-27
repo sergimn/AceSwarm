@@ -934,10 +934,13 @@ p.form-error {
   font-size: 1.6em;
 }
 
+/* A reason can have lines of its own, and an address in it that has no place to break. */
 .player-waiting-reason {
   max-width: 40em;
   margin: 8px 0 0;
   color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 .player-overlay {
@@ -988,6 +991,31 @@ p.form-error {
   .player-stats {
     font-size: 1.125em;
   }
+
+  /* The longest reason, a stream handed to an external player, takes several lines there. */
+  .player-waiting-reason,
+  .player-address {
+    font-size: 0.875em;
+  }
+
+  /*
+   * The player's four buttons take one row on a phone held sideways, and two on one held upright:
+   * more rows would take the room of the stats window and of the message above them.
+   */
+  .player-actions {
+    gap: 8px;
+  }
+
+  .player-actions .button {
+    min-height: 2.75em;
+    padding: 4px 10px;
+    font-size: 0.875em;
+  }
+
+  /* Their words say it all, and the icons' room is what a fourth button needs. */
+  .player-actions .button svg {
+    display: none;
+  }
 }
 
 .player-stats dl {
@@ -1028,22 +1056,52 @@ p.form-error {
   vertical-align: 0.08em;
 }
 
-/* The controls paint above the stats window, should a very small screen leave no room between them. */
+/*
+ * The controls paint above the stats window, should a very small screen leave no room between them.
+ * On a narrow screen they take a second line.
+ */
 .player-actions {
   position: relative;
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
 }
 
+/* The field a link is copied from (see `copyText`): on the page for a moment, and never seen. */
+.copy-field {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+}
+
+/* The title and the clock, and under them the stream's address while it shows. */
 .player-top {
   position: relative;
   z-index: 1;
+}
+
+.player-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
+}
+
+/*
+ * The stream's address, for a while when the browser couldn't copy it: the width of the bar, so
+ * that it takes few lines on a narrow screen. An address has no place to break.
+ */
+.player-address {
+  max-width: 40em;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .player-connection {

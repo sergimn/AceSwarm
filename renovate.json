@@ -18,9 +18,15 @@
       "allowedVersions": "<6.1.0"
     },
     {
-      "description": "Keep Node.js in step everywhere: .node-version, package.json engines and the runtime image.",
+      "description": "Keep Node.js in step everywhere: .node-version, package.json engines and the runtime image. If the new Node.js ships another npm, CI fails until packageManager names it: set it in the same PR.",
       "matchPackageNames": ["node", "docker.io/library/node"],
       "groupName": "Node.js"
+    },
+    {
+      "description": "packageManager names the npm that the pinned Node.js ships, which is the npm CI and the images run. It changes with Node.js, never on its own.",
+      "matchDepTypes": ["packageManager"],
+      "matchPackageNames": ["npm"],
+      "enabled": false
     },
     {
       "description": "Monitoring images are optional and change together.",

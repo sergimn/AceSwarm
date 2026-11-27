@@ -83,11 +83,13 @@ export interface StreamView {
   engine: { name: string; shared: boolean } | null;
   /** Engines on other paths that already pull the stream, ready to take over (hot standby). */
   standbys: StandbyView[];
-  /** Players showing the stream full screen right now. */
+  /** Players showing the stream right now: pages that show it full screen, and players outside the page. */
   viewers: number;
   hls: {
     preview: string;
     full: string;
+    /** For players outside the page, such as VLC: whoever asks for it counts as a viewer. */
+    external: string;
     thumbnail: string;
   };
 }
@@ -243,10 +245,13 @@ export interface SharedEnginesView {
 
 /** A player showing a stream full screen. */
 export interface ViewerView {
-  /** Random id the page made up when it loaded; it is kept only in the page's memory. */
+  /**
+   * A random id. A page makes its own up when it loads and keeps it only in memory; the controller
+   * makes one up for a player outside the page.
+   */
   viewer: string;
   stream: string;
-  /** Rough browser and system, such as "Chrome on Android TV". */
+  /** Rough browser and system, such as "Chrome on TV", or the player outside the page, such as "VLC". */
   device: string;
   since: string;
 }
@@ -398,6 +403,40 @@ export interface PeerStats {
   uploading: number | null;
   /** Top countries of the `active` peers, or of the connected ones without conntrack accounting. */
   countries: CountryCount[];
+  updatedAt: string;
+}
+
+/** What one engine exchanged with one of its peers, as the gateway's connection tracking counts it. */
+export interface PeerTraffic {
+  /** The peer's address. */
+  ip: string;
+  /** ISO 3166-1 alpha-2 code, upper case; null when the address is in no country the gateway knows. */
+  country: string | null;
+  /**
+   * Bytes the peer sent the engine since the gateway first saw it with that engine, headers
+   * included. It starts over when the peer comes back after its connections left the table, and
+   * when the gateway restarts.
+   */
+  downBytes: number;
+  /** Bytes the engine sent the peer since then, headers included. */
+  upBytes: number;
+  /** Bytes per second the peer sent the engine between the gateway's last two samples. */
+  downBytesPerSecond: number;
+  /** Bytes per second the engine sent the peer between them. */
+  upBytesPerSecond: number;
+}
+
+/**
+ * The peers of one engine with their traffic (`GET /peer-traffic`): the addresses that answered it
+ * and exchanged at least 16 KiB with it in all. An engine is listed while the gateway's connection
+ * table counts the bytes of a connection of it, so none is without conntrack accounting.
+ */
+export interface EnginePeerTraffic {
+  /** The engine's address. */
+  ip: string;
+  /** Most traffic first. */
+  peers: PeerTraffic[];
+  /** When the gateway last read its connection table. */
   updatedAt: string;
 }
 

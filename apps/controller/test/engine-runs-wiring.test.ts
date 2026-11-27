@@ -107,7 +107,7 @@ function wired(act: { remove?: Act; restart?: Act } = {}) {
   const engines = new EngineManager(docker, ace, options, createLogger("test", "silent"), runs);
   const monitor = new EngineResourceMonitor(
     docker,
-    { stack: "aceswarm", onOomKill: () => undefined, runs, now: () => clock.now },
+    { stack: "aceswarm", network: "engines", onOomKill: () => undefined, runs, now: () => clock.now },
     createLogger("test", "silent"),
   );
   /** A round of the engine sampler, 15 seconds after the last, as main.ts runs it. */
@@ -152,7 +152,7 @@ function stream(over: Partial<StreamView>): StreamView {
     path: "direct",
     recoveries: 0,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: null,
     standbys: [],
     ...over,

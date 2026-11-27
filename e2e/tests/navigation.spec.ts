@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import type { PathStatus, Snapshot } from "../../packages/shared/src/api-types.ts";
-import { addStreamList, openApp, resetStack, snapshot, waitForPlaying } from "./helpers.ts";
+import type { PathStatus, Snapshot, ViewerView } from "../../packages/shared/src/api-types.ts";
+import { addStreamList, openApp, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -41,6 +42,13 @@ function overlap(a: Box, b: Box): { x: number; y: number } | undefined {
   const bottom = Math.min(a.y + a.height, b.y + b.height);
   return left < right && top < bottom ? { x: (left + right) / 2, y: (top + bottom) / 2 } : undefined;
 }
+
+/**
+ * How long, once a stream was handed to an external player or taken back, the player ignores
+ * presses on the buttons that took the pressed one's place (`SWITCH_QUIET_MS` in the player), and a
+ * little more.
+ */
+const SWITCH_QUIET_MS = 1200;
 
 /** The focused element, checked by its accessible label (tiles are labelled "<name>, <state>"). */
 function focused(page: Page) {
@@ -172,6 +180,185 @@ test("opens a stream full screen and goes back with the remote's Back key", asyn
   await expect(focused(page)).toHaveAttribute("aria-label", /Channel 12/);
   // With the remote, the tile it is on shows its details.
   await expect.poll(() => detailsShown(page)).toEqual([expect.stringMatching(/^Channel 12,/)]);
+});
+
+test("hands a stream to an external player, and plays it here again", async ({ page, context, request, baseURL }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openApp(page);
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
+  expect(stream).toBeDefined();
+  // The playlist kept for players outside the page (the next test plays it).
+  const address = new URL(stream!.hls.external, baseURL).href;
+  expect(address).toContain(`/hls/${stream!.id}/external/index.m3u8`);
+  const viewers = async (): Promise<number | undefined> => (await streamById(request, stream!.id))?.viewers;
+  const videoSource = (): Promise<string | null> =>
+    page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
+
+  await page.locator(".tile", { hasText: "Channel 12" }).focus();
+  await page.keyboard.press("Enter");
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  // With the remote: Back has the focus, and the button comes after Restart.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  const open = player.getByRole("button", { name: "Open in external player" });
+  await expect(open).toBeFocused();
+  await expect.poll(() => page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  await expect.poll(viewers).toBe(1);
+  await expect.poll(videoSource).not.toBeNull();
+
+  // Copy link is there from the start, for a browser that can't hand the stream over, and the page
+  // plays on. A home network serves the app over plain HTTP, where browsers have no clipboard API
+  // (here they have one, at 127.0.0.1): without it, the page copies the old way.
+  const copy = player.getByRole("button", { name: "Copy link" });
+  const toast = player.locator(".toast");
+  await page.evaluate(`(() => {
+    window.clipboardApi = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  })()`);
+  // The controls fade after a few seconds, and a click doesn't reach them then: moving the mouse
+  // shows them.
+  await player.hover();
+  await copy.click();
+  await expect(toast).toHaveText("Link copied");
+  expect(await page.evaluate<string>("window.clipboardApi.readText()")).toBe(address);
+  await expect(copy).toBeFocused();
+  expect(await videoSource()).not.toBeNull();
+  // With the clipboard API again, and something else in the clipboard, for the copy further down.
+  await page.evaluate(`(async () => {
+    delete navigator.clipboard;
+    await navigator.clipboard.writeText("something else");
+  })()`);
+
+  // OK held down on the remote repeats the key, here for longer than the moment after a hand-over
+  // in which these buttons do nothing. Only the first press counts: the button gives its place and
+  // the focus to the one that takes the stream back, which each repeat would press.
+  let downloads = 0;
+  page.on("download", () => {
+    downloads += 1;
+  });
+  await open.focus();
+  await player.hover();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    (async () => {
+      await page.keyboard.down("Enter");
+      await page.keyboard.down("Enter");
+      await page.waitForTimeout(SWITCH_QUIET_MS);
+      await page.keyboard.down("Enter");
+      await page.keyboard.up("Enter");
+    })(),
+  ]);
+  // A desktop browser downloads a playlist file with the stream in it, at that address.
+  expect(download.suggestedFilename()).toBe("Channel 12.m3u");
+  expect(await readFile(await download.path(), "utf8")).toBe(`#EXTM3U\n#EXTINF:-1,Channel 12\n${address}\n`);
+
+  // The player says what to do, where its picture was, while it is still full screen: the browser
+  // hides its downloads there.
+  const message = player.locator(".player-waiting");
+  await expect(message).toContainText("Sent to an external player");
+  await expect(message).toContainText(
+    `Open "Channel 12.m3u" from your browser's downloads to start it. Leave full screen to see them.`,
+  );
+  await expect(message).toContainText(address);
+  expect(await page.evaluate<boolean>("document.fullscreenElement !== null")).toBe(true);
+  // The page stopped its own video, and nobody watches here.
+  await expect.poll(videoSource).toBeNull();
+  await expect.poll(viewers).toBe(0);
+  await expect(open).toBeHidden();
+  const resume = player.getByRole("button", { name: "Watch here again" });
+  await expect(resume).toBeFocused();
+  expect(downloads).toBe(1);
+
+  // Copy link stays, for a player that didn't get the stream. The first toast is gone by now, or
+  // goes within its five seconds, and the moment after the hand-over in which presses on these
+  // buttons do nothing passed while OK was held.
+  await expect(toast).toHaveCount(0);
+  await player.hover();
+  await copy.click();
+  await expect(toast).toHaveText("Link copied");
+  expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe(address);
+
+  // And back: the page plays the stream again, and counts as its viewer. Presses that follow the
+  // first at once, on the two buttons that are then where it was, do nothing: the stream isn't
+  // handed over again, and its address isn't copied. The three come from one script in the page,
+  // so that not even a slow runner puts a second between them.
+  await page.evaluate(`navigator.clipboard.writeText("something else")`);
+  await page.evaluate(`(() => {
+    const buttons = [...document.querySelectorAll(".player-actions button")];
+    for (const name of ["Watch here again", "Open in external player", "Copy link"]) {
+      buttons.find((button) => button.textContent.trim() === name).click();
+    }
+  })()`);
+  await expect(message).toBeHidden();
+  await expect(open).toBeFocused();
+  await expect(resume).toBeHidden();
+  await expect.poll(videoSource).not.toBeNull();
+  await expect.poll(viewers).toBe(1);
+
+  expect(await page.evaluate<string>("navigator.clipboard.readText()")).toBe("something else");
+
+  await page.keyboard.press("Escape");
+  await expect(player).toBeHidden();
+  await expect.poll(viewers).toBe(0);
+  expect(downloads).toBe(1);
+});
+
+test("counts a player outside the page as a viewer while it asks for the stream's own playlist", async ({
+  request,
+  playwright,
+  baseURL,
+}) => {
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
+  expect(stream).toBeDefined();
+  const { id, hls } = stream!;
+  /** Who watches the stream: each viewer's id and device, in the order they came. */
+  const watching = async (): Promise<ViewerView[]> =>
+    ((await (await request.get("/api/viewers")).json()) as ViewerView[]).filter((viewer) => viewer.stream === id);
+  const devices = async (): Promise<string[]> => (await watching()).map(({ device }) => device);
+  const count = async (): Promise<number | undefined> => (await streamById(request, id))?.viewers;
+
+  // The page's own playlist counts nobody: the page reports itself, and tests fetch it too.
+  expect((await request.get(hls.full)).ok()).toBe(true);
+  expect(await watching()).toEqual([]);
+
+  // Two players, by what they call themselves.
+  expect(baseURL).toBeDefined();
+  const player = (userAgent: string) => playwright.request.newContext({ baseURL: baseURL!, userAgent });
+  const vlc = await player("VLC/3.0.20 LibVLC/3.0.20");
+  const ffmpeg = await player("Lavf/61.7.100");
+  try {
+    const playlist = await vlc.get(hls.external);
+    expect(playlist.ok(), await playlist.text()).toBe(true);
+    expect(playlist.headers()["content-type"]).toContain("application/vnd.apple.mpegurl");
+    // It lists the full screen output's segments, at addresses that work from this playlist's.
+    const newest = (await playlist.text()).split("\n").findLast((line) => line.endsWith(".ts"));
+    expect(newest).toMatch(/^\.\.\/g\d+\/full\/seg_\d+\.ts$/);
+    const segment = await vlc.get(new URL(newest!, new URL(hls.external, baseURL)).href);
+    expect(segment.ok()).toBe(true);
+    expect(segment.headers()["content-type"]).toBe("video/mp2t");
+
+    // Getting the playlist made it a viewer, under a random id and its player's name.
+    await expect.poll(devices).toEqual(["VLC"]);
+    expect(await count()).toBe(1);
+    const [first] = await watching();
+    expect(first?.viewer).toMatch(/^[0-9a-f]{16}$/);
+    // It asks again every few seconds: still the same viewer.
+    expect((await vlc.get(hls.external)).ok()).toBe(true);
+    expect((await watching()).map(({ viewer, since }) => ({ viewer, since }))).toEqual([
+      { viewer: first?.viewer, since: first?.since },
+    ]);
+    // Another kind of player at the same address is another viewer.
+    expect((await ffmpeg.get(hls.external)).ok()).toBe(true);
+    await expect.poll(devices).toEqual(["VLC", "ffmpeg"]);
+    expect(await count()).toBe(2);
+  } finally {
+    await vlc.dispose();
+    await ffmpeg.dispose();
+  }
+  // They report nothing when they stop: they no longer count 30 seconds after their last request.
+  await expect.poll(count, { timeout: 45_000 }).toBe(0);
+  expect(await watching()).toEqual([]);
 });
 
 test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {
@@ -516,4 +703,193 @@ test("serves previews and thumbnails for the grid", async ({ request }) => {
   await expect
     .poll(async () => (await request.get(first.hls.thumbnail)).headers()["content-type"], { timeout: 15_000 })
     .toContain("image/jpeg");
+});
+
+test("ends the hand-over when the stream is disabled, and plays it in the page once it is enabled", async ({
+  page,
+  request,
+}) => {
+  await openApp(page);
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 13");
+  expect(stream).toBeDefined();
+  const enabled = async (value: boolean): Promise<void> => {
+    const response = await request.patch(`/api/streams/${stream!.id}`, { data: { enabled: value } });
+    expect(response.ok(), await response.text()).toBe(true);
+  };
+  const videoSource = (): Promise<string | null> =>
+    page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
+
+  await page.locator(".tile", { hasText: "Channel 13" }).click();
+  const player = page.getByRole("dialog", { name: "Player" });
+  await expect(player).toBeVisible();
+  const open = player.getByRole("button", { name: "Open in external player" });
+  const resume = player.getByRole("button", { name: "Watch here again" });
+  const copy = player.getByRole("button", { name: "Copy link" });
+  const message = player.locator(".player-waiting");
+  // A double click hands the stream over once: its second click lands where the button that takes
+  // the stream back just went, and does nothing. Both clicks reach the page together, whatever the
+  // runner's speed.
+  let downloads = 0;
+  page.on("download", () => {
+    downloads += 1;
+  });
+  await player.hover();
+  await Promise.all([page.waitForEvent("download"), open.dblclick()]);
+  await expect(message).toContainText("Sent to an external player");
+  await expect(resume).toBeFocused();
+  await expect(player.locator(".toast")).toHaveCount(0);
+  // Long enough for the controls to fade: the focus must not get lost behind them either.
+  await page.waitForTimeout(5000);
+  expect(downloads).toBe(1);
+  expect(await videoSource()).toBeNull();
+
+  try {
+    // Disabled under the external player, which lost its playlist: the page says so, the buttons for
+    // a stream that has an output go, and the focus moves from the one that went to Back.
+    await enabled(false);
+    await expect(message).toContainText("This stream is disabled");
+    await expect(player.getByRole("button", { name: "Enable stream" })).toBeVisible();
+    await expect(open).toBeHidden();
+    await expect(resume).toBeHidden();
+    await expect(copy).toBeHidden();
+    await expect(player.getByRole("button", { name: "Back" })).toBeFocused();
+    expect(await videoSource()).toBeNull();
+  } finally {
+    await enabled(true);
+  }
+  // Enabled again, the page plays it by itself: the hand-over ended with the stream.
+  await expect(message).not.toContainText("This stream is disabled");
+  await expect(message).not.toContainText("Sent to an external player");
+  await expect(open).toBeVisible();
+  await expect(copy).toBeVisible();
+  await expect(resume).toBeHidden();
+  await expect.poll(videoSource).not.toBeNull();
+  await waitForPlaying(request, stream!.id);
+});
+
+test.describe("in a browser on Android", () => {
+  // A TV's browser, by what it says of itself. It is still this desktop browser: the test shows what
+  // the page does there, not what Android then does with the link.
+  test.use({
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 12; BRAVIA 4K VH2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+  });
+
+  test("hands a stream over through an intent link, and keeps its address on screen when it can't copy it", async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    // The links the page follows are noted, not followed: nothing here opens an app. And this
+    // browser can't copy, neither with the clipboard API nor the old way.
+    await page.addInitScript(`(() => {
+      window.followed = [];
+      document.addEventListener(
+        "click",
+        (event) => {
+          if (event.target instanceof HTMLAnchorElement) {
+            const { href, download } = event.target;
+            window.followed.push({ href, download });
+            event.preventDefault();
+          }
+        },
+        true,
+      );
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+      document.execCommand = () => false;
+    })()`);
+    let downloads = 0;
+    page.on("download", () => {
+      downloads += 1;
+    });
+    await openApp(page);
+    const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 11");
+    expect(stream).toBeDefined();
+    const address = new URL(stream!.hls.external, baseURL);
+
+    await page.locator(".tile", { hasText: "Channel 11" }).click();
+    const player = page.getByRole("dialog", { name: "Player" });
+    await expect(player).toBeVisible();
+    const videoSource = (): Promise<string | null> =>
+      page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
+    await expect.poll(videoSource).not.toBeNull();
+
+    // Copy link first, as in a browser that might not come back from the link. The address it
+    // couldn't copy shows under the stream's name, to write down: it stays, and the controls with
+    // it, past the few seconds after which they fade. It is above the stats window, over nothing.
+    const copy = player.getByRole("button", { name: "Copy link" });
+    const note = player.locator(".player-address");
+    await expect(note).toBeHidden();
+    await player.hover();
+    await copy.click();
+    await expect(note).toHaveText(`This browser doesn't let the page copy. The address is ${address.href}`);
+    await page.waitForTimeout(7000);
+    await expect(note).toBeVisible();
+    await expect(player).toHaveClass(/show-overlay/);
+    const noteBox = await note.boundingBox();
+    const statsBox = await player.locator(".player-stats").boundingBox();
+    expect(noteBox!.y + noteBox!.height).toBeLessThanOrEqual(statsBox!.y);
+    expect(await videoSource()).not.toBeNull();
+
+    // Closing the player takes the address away: the stream opens without it.
+    await page.keyboard.press("Escape");
+    await expect(player).toBeHidden();
+    await page.locator(".tile", { hasText: "Channel 11" }).click();
+    await expect(player).toBeVisible();
+    await expect(note).toBeHidden();
+    await expect.poll(videoSource).not.toBeNull();
+
+    // So does disabling the stream, which has no address to give out then.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+    const enabled = async (value: boolean): Promise<void> => {
+      const response = await request.patch(`/api/streams/${stream!.id}`, { data: { enabled: value } });
+      expect(response.ok(), await response.text()).toBe(true);
+    };
+    try {
+      await enabled(false);
+      await expect(copy).toBeHidden();
+      await expect(note).toBeHidden();
+    } finally {
+      await enabled(true);
+    }
+    await expect(copy).toBeVisible();
+
+    // And so does a copy that works, as if the browser had allowed it meanwhile.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+    await page.evaluate("document.execCommand = () => true");
+    await copy.click();
+    await expect(player.locator(".toast")).toHaveText("Link copied");
+    await expect(note).toBeHidden();
+    await page.evaluate("document.execCommand = () => false");
+
+    // The button follows a link that asks Android to open the playlist in an app, and downloads no
+    // file. The message has the address from then on, so the line under the name goes.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+    await player.getByRole("button", { name: "Open in external player" }).click();
+    const message = player.locator(".player-waiting");
+    await expect(message).toContainText("Sent to an external player");
+    await expect(message).toContainText("Pick a player if your device asks for one.");
+    await expect(message).toContainText(`If none opens, open this address in your player: ${address.href}`);
+    await expect(note).toBeHidden();
+    expect(await page.evaluate("window.followed")).toEqual([
+      {
+        href: `intent://${address.host}${address.pathname}#Intent;scheme=http;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end`,
+        download: "",
+      },
+    ]);
+    expect(downloads).toBe(0);
+    await expect(player.getByRole("button", { name: "Watch here again" })).toBeFocused();
+    await expect.poll(videoSource).toBeNull();
+
+    await page.keyboard.press("Escape");
+    await expect(player).toBeHidden();
+    // The stream is left as it was found, playing: it was disabled for a moment.
+    await waitForPlaying(request, stream!.id);
+  });
 });

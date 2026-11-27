@@ -267,6 +267,13 @@ export class Orchestrator {
     return true;
   }
 
+  /** A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`). */
+  reportExternalPlayer(stream: string, address: string, userAgent: string | undefined): void {
+    if (this.deps.store.get(stream) !== undefined) {
+      this.deps.viewers.poll(stream, address, userAgent);
+    }
+  }
+
   viewers(): ViewerView[] {
     return this.deps.viewers.list();
   }

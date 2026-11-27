@@ -116,6 +116,42 @@ test("every panel of the per-stream dashboard says what it shows", () => {
   expect(silent.map(({ title }) => title)).toEqual([]);
 });
 
+test("both dashboards show each peer's traffic in the range and its speed, from what the controller exports", () => {
+  const exported = controllerMetrics();
+  for (const file of ["aceswarm.json", "aceswarm-streams.json"]) {
+    const { panels } = dashboard(file);
+    const exprs = (title: string): string[] =>
+      panels.find((panel) => panel.title === title)?.targets?.map(({ expr }) => expr) ?? [];
+    const traffic = exprs("Traffic with each peer in range");
+    const speed = exprs("Speed with each peer");
+    // One query with a bar for each direction, and a query for each direction: up is drawn below zero.
+    expect(traffic).toHaveLength(1);
+    expect(speed.map((expr) => /direction="(\w+)"/.exec(expr)?.[1])).toEqual(["down", "up"]);
+    for (const expr of [...traffic, ...speed]) {
+      const asked = expr.match(/aceswarm_[a-z_]+/g) ?? [];
+      expect(asked.filter((metric) => !exported.has(metric))).toEqual([]);
+      // The chosen streams' own engines, and the shared engine of the paths they use.
+      expect(expr).toMatch(/\{stream=~?"\$stream"/);
+      expect(expr).toContain('{role="shared"');
+      // By peer, and never by the engine's container, whose name changes with every new engine.
+      expect(expr).toMatch(/sum by \(peer, country[a-z, ]*\) \(/);
+      expect(expr).not.toMatch(/\bby ?\([^)]*\bengine\b/);
+    }
+    // In range: what the totals grew by over the whole range, the bytes the gateway counted.
+    expect(traffic[0]?.match(/\[[^\]]+\]/g)).toEqual(["[$__range]", "[$__range]", "[$__range]", "[$__range]"]);
+    expect(traffic[0]).toContain("increase(aceswarm_engine_peer_bytes_total{");
+    expect(speed.filter((expr) => !expr.includes("aceswarm_engine_peer_speed_bytes{"))).toEqual([]);
+  }
+  // A stream's row tells its engines apart: the one it plays from, a standby, a path's shared engine.
+  const ofStream = dashboard("aceswarm-streams.json").panels.filter(({ title }) => title.includes("each peer"));
+  expect(ofStream).toHaveLength(2);
+  const ofEngines = ofStream.flatMap((panel) => panel.targets ?? []);
+  expect(ofEngines).toHaveLength(3);
+  for (const { expr } of ofEngines) {
+    expect(expr).toMatch(/sum by \(peer, country, role, path(?:, direction)?\) \(/);
+  }
+});
+
 /** The lines the controller logs when runs of engines end, as its JSON logger writes them. */
 function engineRunLines(): string[] {
   const lines: string[] = [];
