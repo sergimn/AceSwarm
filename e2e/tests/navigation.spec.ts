@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import type { Snapshot, ViewerView } from "../../packages/shared/src/api-types.ts";
+import type { PathStatus, Snapshot, ViewerView } from "../../packages/shared/src/api-types.ts";
 import { addStreamList, openApp, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
@@ -433,12 +433,15 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   const thumbnails = previews.getByRole("button", { name: "Thumbnails only" });
   const sharing = dialog.getByRole("switch", { name: "One engine per path" });
   const standby = dialog.getByRole("switch", { name: "Hot standby on other paths" });
+  const favourite = dialog.getByRole("group", { name: "Favourite path" });
   await expect(dialog).toBeVisible();
   await expect(video).toHaveAttribute("aria-pressed", "true");
   await expect(thumbnails).toHaveAttribute("aria-pressed", "false");
-  // `resetStack` turned both off.
+  // `resetStack` turned both off, and left no favourite path.
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(favourite.getByRole("button", { name: "Direct", exact: true })).toHaveAttribute("aria-pressed", "false");
   const saved: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "PATCH") {
@@ -456,8 +459,12 @@ test("reaches Settings at the bottom of the rail with the remote, and the browse
   await expect(sharing).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(standby).toBeFocused();
+  // The choices for the favourite path are under it.
+  await page.keyboard.press("ArrowDown");
+  await expect(favourite.locator(".segment:focus")).toHaveCount(1);
   await expect(sharing).toHaveAttribute("aria-checked", "false");
   await expect(standby).toHaveAttribute("aria-checked", "false");
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toHaveAttribute("aria-pressed", "true");
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -631,6 +638,54 @@ test("shows thumbnails only while the admin allows nothing else, whatever the br
   expect(previewLoads).toHaveLength(loaded);
   expect(await choiceWrites()).toEqual([]);
   expect(saved).toEqual([]);
+  // The page asks for snapshots until it closes, after the test's own request context is gone.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+});
+
+test("the favourite path's choice that has the focus keeps it while paths come and go", async ({ page, request }) => {
+  // The stack has the direct path alone. Here the page gets the snapshots a controller sends with
+  // the WireGuard paths in `profiles` as well, as while profiles are added and removed elsewhere.
+  const real = await snapshot(request);
+  expect(real.paths.map(({ id }) => id)).toEqual(["direct"]);
+  const vpn = (label: string): PathStatus => ({ ...real.paths[0]!, id: `wg:${label}`, kind: "wireguard", label });
+  let profiles = ["zeta"];
+  const current = async (): Promise<Snapshot> => {
+    const now = await snapshot(request);
+    return { ...now, paths: [...now.paths, ...profiles.map((label) => vpn(label))] };
+  };
+  await page.route("**/api/snapshot", async (route) => {
+    await route.fulfill({ json: await current() });
+  });
+  await page.route("**/api/events", async (route) => {
+    // One snapshot, then the browser opens the stream again a second later, as after a dropped one.
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `retry: 1000\nevent: snapshot\ndata: ${JSON.stringify(await current())}\n\n`,
+    });
+  });
+  await openApp(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const favourite = page.getByRole("dialog", { name: "Settings" }).getByRole("group", { name: "Favourite path" });
+  const choices = favourite.getByRole("button");
+  const zeta = favourite.getByRole("button", { name: "zeta", exact: true });
+  await expect(choices).toHaveText(["None", "Direct", "zeta"]);
+  await zeta.focus();
+  await expect(zeta).toBeFocused();
+
+  // A path listed before it: the choices are drawn in their new order, and the focus stays.
+  profiles = ["alpha", "zeta"];
+  await expect(choices).toHaveText(["None", "Direct", "alpha", "zeta"]);
+  await expect(zeta).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(favourite.getByRole("button", { name: "alpha", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(zeta).toBeFocused();
+
+  // Its own path goes: the focus goes to the first choice, not out of the dialog.
+  profiles = ["alpha"];
+  await expect(choices).toHaveText(["None", "Direct", "alpha"]);
+  await expect(favourite.getByRole("button", { name: "None", exact: true })).toBeFocused();
   // The page asks for snapshots until it closes, after the test's own request context is gone.
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });

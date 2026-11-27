@@ -189,6 +189,7 @@ export interface Snapshot {
   wireguardOnly: boolean;
   sharedEngines: SharedEnginesView;
   hotStandby: HotStandbyView;
+  favouritePath: FavouritePathView;
   tilePreviews: TilePreviewsView;
   /** How often players report the stream they show full screen. */
   viewerPingSeconds: number;
@@ -209,6 +210,22 @@ export interface Settings {
   sharedEngines: boolean;
   /** Every stream also pulls its broadcast on the other paths, ready to take over at once. */
   hotStandby: boolean;
+  /**
+   * The network path every stream moves to once it is stable there ("direct" or "wg:<profile>");
+   * null for none. See `FavouritePathView`.
+   */
+  favouritePath: string | null;
+}
+
+/**
+ * The favourite path. With hot standby on, a stream on another path moves to it once its standby
+ * there was hot for `stableSeconds` without a break; a stream that has no path to start on starts
+ * there. Nothing moves while the path is down, or off (the direct path with WireGuard only).
+ */
+export interface FavouritePathView {
+  /** The path's id; null for none. It can be a path that is down, or one the gateway doesn't list. */
+  path: string | null;
+  stableSeconds: number;
 }
 
 export interface HotStandbyView {

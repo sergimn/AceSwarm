@@ -1,40 +1,16 @@
 import type { PathAssignment, StandbyReaderStatus, StandbySource, StandbyView } from "@aceswarm/shared/api-types";
 import { describeError } from "@aceswarm/shared/http";
 import type { Logger } from "@aceswarm/shared/logger";
-import type { AcestreamClient, EngineSession } from "./acestream.ts";
-import type { NetgwClient, TranscoderClient } from "./clients.ts";
+import type { EngineSession } from "./acestream.ts";
 import { EnginePaths } from "./engine-paths.ts";
-import type { EngineHandle, EngineManager } from "./engines.ts";
-import type { ControllerMetrics } from "./metrics.ts";
-import { nextRecovery, type RecoveryPolicy } from "./recovery.ts";
-import type { SharedEngines } from "./shared-engines.ts";
-import { StandbyEngine, type OpenSession, type StandbyEngineDeps } from "./standby-engine.ts";
+import type { EngineHandle } from "./engines.ts";
+import { nextRecovery } from "./recovery.ts";
+import type { StandbyContext, StandbySettings, StreamStandbysDeps, TakenStandby } from "./standby-deps.ts";
+import { StandbyEngine, type StandbyEngineDeps } from "./standby-engine.ts";
 import { readerNote, standbyView, waitingViews } from "./standby-view.ts";
-import type { MoveSlots } from "./stream-paths.ts";
 
-export interface StandbySettings {
-  /** How many other paths each stream keeps a standby on, best first; 0 means all of them. */
-  maxPaths: number;
-  /** A stream with a hot standby fails over after this long without new video. */
-  failoverAfterMs: number;
-  /** A standby whose session brought no data for this long starts again (its engine, or its session). */
-  warmupMs: number;
-  /** A standby is hot while its last data is at most this old. */
-  hotWithinMs: number;
-  /** A standby whose path went down stays this long, in case the path comes back. */
-  downGraceMs: number;
-  /** Waits between tries on a standby that keeps failing. */
-  policy: RecoveryPolicy;
-}
-
-export const DEFAULT_STANDBY_SETTINGS: StandbySettings = {
-  maxPaths: 0,
-  failoverAfterMs: 8000,
-  warmupMs: 90_000,
-  hotWithinMs: 10_000,
-  downGraceMs: 120_000,
-  policy: { baseDelayMs: 5000, maxDelayMs: 300_000 },
-};
+export { DEFAULT_STANDBY_SETTINGS } from "./standby-deps.ts";
+export type { StandbyContext, StandbySettings, StreamStandbysDeps, TakenStandby } from "./standby-deps.ts";
 
 /** Tries a standby gets (starting its engine, opening its session, warming up) before it goes. */
 const STANDBY_MAX_FAILURES = 3;
@@ -43,66 +19,6 @@ const STANDBY_MAX_FAILURES = 3;
  * (it goes down, or the stream moves): a path whose probes look fine can still block the stream.
  */
 const STANDBY_MAX_PATH_ROUNDS = 3;
-
-export interface StreamStandbysDeps {
-  streamId: string;
-  engines: EngineManager;
-  ace: AcestreamClient;
-  transcoder: TranscoderClient;
-  netgw: NetgwClient;
-  metrics: ControllerMetrics;
-  logger: Logger;
-  settings: StandbySettings;
-  shared?: SharedEngines | undefined;
-  /**
-   * Limits how many standbys start at once (shared by every stream): each new one starts an engine,
-   * or a session on a path's shared engine that may have to start first. No limit without it.
-   */
-  startSlots?: MoveSlots | undefined;
-  /** A generation number no other engine of the stream has (see `StreamEngines`). */
-  nextGeneration: () => number;
-  now: () => number;
-}
-
-/** What the stream's supervisor knows on each check (see `StreamStandbys.maintain`). */
-export interface StandbyContext {
-  /** Hot standby is on. */
-  enabled: boolean;
-  /** Engine sharing is on: standbys are sessions on the other paths' shared engines. */
-  sharing: boolean;
-  /** The gateway's paths are known. Until then nothing changes but the transcoder's readers. */
-  known: boolean;
-  /** The path the stream plays on, which gets no standby. */
-  current: string | null;
-  /** The other paths the stream may use that are up, best first. */
-  candidates: readonly string[];
-  /** Whether the stream may use the path at all: the gateway has it, and the policy allows it. */
-  usable: (path: string) => boolean;
-  up: (path: string) => boolean;
-  /**
-   * The stream played lately (see `StreamFailover`): only then do standbys start or start again.
-   * Otherwise they go, since a broadcast that is off for hours would only make them churn.
-   */
-  active: boolean;
-  /** The path of the engine the stream kept from a failed move, which gets no standby of its own. */
-  sparePath: string | undefined;
-  /**
-   * The sources the transcoder reads: the one it plays from, and the one it still tries to hand
-   * the stream over to. After a failover that gave up, that can be a standby's session, which the
-   * transcoder may yet take (see `finishLateFailover`); its reader let go of it meanwhile.
-   */
-  transcoderSources: readonly string[];
-  openSession: OpenSession;
-}
-
-/** A standby taken out for a failover; `restore` puts it back if the failover fails. */
-export interface TakenStandby {
-  path: string;
-  engine: EngineHandle;
-  session: EngineSession;
-  hot: boolean;
-  readonly standby: StandbyEngine;
-}
 
 /**
  * A stream's hot standbys: on every other network path it may use (or the best `maxPaths` of
@@ -134,6 +50,8 @@ export class StreamStandbys {
   private ranking: readonly string[] = [];
   /** The path the stream played on at the last check: a move gives every path a new chance. */
   private lastCurrent: string | null | undefined;
+  /** The favourite path of the last check: a new one gets a new chance. */
+  private lastFavourite: string | undefined;
   /** Whether the stream may use a path, as of the last check. */
   private usable: ((path: string) => boolean) | undefined;
   /** The transcoder told when each standby last got data, on the last check. */
@@ -166,6 +84,7 @@ export class StreamStandbys {
       this.dropUnneeded(context);
     }
     await this.syncReaders();
+    this.noteHot();
     if (!wanted || !context.known) {
       return;
     }
@@ -205,14 +124,13 @@ export class StreamStandbys {
       return;
     }
     const sessions = this.bySource(this.openSessions());
-    let readers: StandbyReaderStatus[] | undefined;
     try {
-      readers = await this.deps.transcoder.standbyStatus(this.deps.streamId);
+      const readers = await this.deps.transcoder.standbyStatus(this.deps.streamId);
+      this.learn(sessions, readers ?? []);
     } catch (error) {
       this.logger.debug({ err: describeError(error) }, "could not reach the transcoder for the standbys");
-      return;
     }
-    this.learn(sessions, readers ?? []);
+    this.noteHot();
   }
 
   /**
@@ -226,6 +144,17 @@ export class StreamStandbys {
   /** The best standby `hasHot` accepts, taken out for a failover. */
   takeHot(eligible: (path: string) => boolean, freshAfter: number): TakenStandby | undefined {
     return this.take(this.hot(eligible, freshAfter));
+  }
+
+  /**
+   * The standby on `path`, taken out for a move there, once it is stable (see
+   * `StandbyEngine.isStable`) and the transcoder answered on this check. One a move to it failed on
+   * waits like after a failed failover, and has to be stable again from then on.
+   */
+  takeStable(path: string): TakenStandby | undefined {
+    const { settings } = this.deps;
+    const stable = (standby: StandbyEngine): boolean => standby.path === path && standby.isStable(settings);
+    return this.readersSynced ? this.take(this.ready().find((standby) => stable(standby))) : undefined;
   }
 
   /** The standby on `path` once its session is open, hot or not, taken out for a move there. */
@@ -253,6 +182,7 @@ export class StreamStandbys {
     standby.failedFailovers += 1;
     standby.blockedUntil = this.retryAfter(standby.failedFailovers);
     standby.lastDataAt = undefined;
+    standby.hotSince = undefined;
     standby.openedAt = this.deps.now();
     if (this.standbys.has(standby.path)) {
       // Another standby took the path meanwhile: this one goes.
@@ -435,26 +365,43 @@ export class StreamStandbys {
     return standby.busy || standby.dropped || taken || now < standby.retryAt || !context.up(standby.path);
   }
 
-  /** A new standby on the best path that has none, one per check, while a start slot is free. */
+  /**
+   * A new standby on the best path that has none, one per check, while a start slot is free. With
+   * as many standbys as `STANDBY_MAX_PATHS` allows, only the favourite path still gets one: the
+   * standby the stream needs least goes for it, once the favourite's has its start slot, so that
+   * the stream is never left without one while it waits for a slot.
+   */
   private startMissing(context: StandbyContext): void {
-    if (this.standbys.size >= this.limit()) {
-      return;
-    }
     const now = this.deps.now();
-    const path = context.candidates.find(
-      (candidate) =>
-        !this.standbys.has(candidate) &&
-        candidate !== context.sparePath &&
-        now >= (this.pathRetries.get(candidate)?.retryAt ?? 0),
-    );
+    const missing = (candidate: string): boolean =>
+      !this.standbys.has(candidate) &&
+      candidate !== context.sparePath &&
+      now >= (this.pathRetries.get(candidate)?.retryAt ?? 0);
+    const full = this.standbys.size >= this.limit();
+    const wanted = full ? [context.favourite].filter((path) => path !== undefined) : context.candidates;
+    const path = wanted.find((candidate) => missing(candidate));
     const slot = path === undefined ? false : this.takeSlot();
     if (path === undefined || slot === false) {
       return;
+    }
+    if (full) {
+      this.makeRoom();
     }
     const standby = new StandbyEngine(path, context.sharing, this.engineDeps);
     this.standbys.set(path, standby);
     this.logger.info({ path, shared: standby.shared }, "starting a standby");
     this.run(standby, "could not start its engine or session", () => standby.start(context.openSession), slot);
+  }
+
+  /** Drops the standby on the worst path, or first one whose path is down, for the favourite path's. */
+  private makeRoom(): void {
+    const worst = this.standbys
+      .values()
+      .toArray()
+      .toSorted((a, b) => this.rank(b.path) - this.rank(a.path))[0];
+    if (worst !== undefined) {
+      this.drop(worst, "the favourite path gets its standby");
+    }
   }
 
   /** A start slot (see `startSlots`): its release, undefined without a limit, false while all are taken. */
@@ -470,8 +417,17 @@ export class StreamStandbys {
       : false;
   }
 
-  /** A path that went down, or a stream that moved, gives every path a new chance. */
+  /**
+   * A path that went down, or a stream that moved, gives every path a new chance. So does making a
+   * path the favourite, for that path.
+   */
   private forgetPathRetries(context: StandbyContext): void {
+    if (context.favourite !== this.lastFavourite) {
+      this.lastFavourite = context.favourite;
+      if (context.favourite !== undefined) {
+        this.pathRetries.delete(context.favourite);
+      }
+    }
     if (context.current !== this.lastCurrent) {
       this.lastCurrent = context.current;
       this.pathRetries.clear();
@@ -655,6 +611,13 @@ export class StreamStandbys {
   }
 
   // ---- helpers --------------------------------------------------------------------------------
+
+  /** Notes since when each standby is hot without a break, as of this check. */
+  private noteHot(): void {
+    for (const standby of this.standbys.values()) {
+      standby.noteHot(this.deps.settings.hotWithinMs);
+    }
+  }
 
   private isHot(standby: StandbyEngine): boolean {
     return standby.isHot(this.deps.settings.hotWithinMs);

@@ -152,6 +152,8 @@ interface Fakes {
   /** While on, the stream keeps hot standbys on the other paths (off by default). */
   hotStandby?: { on: boolean };
   standby?: Partial<StandbySettings>;
+  /** The favourite path from the settings (none by default); a test can change it. */
+  favourite?: { path: string | null };
   /** Slots shared by every stream's starting standbys. */
   standbyStarts?: MoveSlots;
   /** The playback URLs whose standby readers get data (`sources` by default). */
@@ -444,6 +446,7 @@ function supervisor(paths: PathStatus[], fakes: Fakes = {}) {
     ...(fakes.standbyStarts !== undefined && { standbyStarts: fakes.standbyStarts }),
     sharedEngines: () => fakes.sharing?.on === true,
     hotStandby: () => fakes.hotStandby?.on === true,
+    favouritePath: () => fakes.favourite?.path ?? null,
     standby: { ...DEFAULT_STANDBY_SETTINGS, ...fakes.standby },
     viewers: () => fakes.viewers ?? 0,
     pathLoad: () => new Map(),
@@ -2531,6 +2534,21 @@ async function settle(): Promise<void> {
   }
 }
 
+/** Checks the stream once a second, for `seconds`. */
+async function checkFor(fake: { instance: StreamSupervisor; clock: { now: number } }, seconds: number): Promise<void> {
+  for (let second = 0; second < seconds; second += 1) {
+    fake.clock.now += 1000;
+    await fake.instance.tick();
+    await settle();
+  }
+}
+
+/** The stream's path switches, as the metrics count them. */
+async function pathSwitches(fake: { metrics: ControllerMetrics }): Promise<unknown[]> {
+  const { values } = await fake.metrics.pathSwitches.get();
+  return values.map(({ labels, value }) => ({ ...labels, value }));
+}
+
 /** The engine shared by the streams on `path`. */
 function sharedOn(path: string, id: number): EngineHandle {
   const ip = `172.31.250.${String(id)}`;
@@ -2566,6 +2584,17 @@ describe("hot standby on the other paths", () => {
     await settle();
     await fake.instance.tick();
     return { ...fake, paths, sources };
+  }
+
+  /**
+   * A stream playing on the direct path with a hot standby (see `withStandby`), and `path` made
+   * the favourite then: a stream that starts with a favourite starts on it.
+   */
+  async function awayFrom(path: string, fakes: Fakes = {}, paths: PathStatus[] = [direct, vpn]) {
+    const favourite = { path: null as string | null };
+    const fake = await withStandby({ favourite, ...fakes }, paths);
+    favourite.path = path;
+    return fake;
   }
 
   /** A manual restart whose new session never opens until `open` is called. */
@@ -3224,6 +3253,370 @@ describe("hot standby on the other paths", () => {
     expect(fake.readers.at(-1)).toEqual([]);
   });
 
+  describe("with a favourite path", () => {
+    const { favouriteAfterMs } = DEFAULT_STANDBY_SETTINGS;
+
+    test("starts a stream on the favourite path", async () => {
+      const fake = supervisor([direct, vpn], { favourite: { path: "wg:a" } });
+      await fake.instance.tick();
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.assigned).toEqual([{ ip: engine.ip, path: "wg:a" }]);
+    });
+
+    test("moves a stream that plays to it once its standby there was hot for 20 s, as no recovery", async () => {
+      const fake = await awayFrom("wg:a");
+      // The standby is hot since the last check.
+      await checkFor(fake, favouriteAfterMs / 1000 - 1);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.handovers).toEqual([]);
+
+      fake.clock.now += 1000;
+      await fake.instance.tick();
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.handovers).toEqual([play(standbyEngine)]);
+      // It played all along, so it never showed anything else, and nothing started or went.
+      expect(fake.instance.view()).toMatchObject({
+        state: "playing",
+        message: "moving to the favourite path; moving from direct to wg:a",
+        engine: { name: standbyEngine.name, shared: false },
+        recoveries: 0,
+      });
+      expect(fake.creates()).toBe(2);
+      expect(fake.removed).toEqual([]);
+      expect(fake.saved()).toMatchObject({ path: "wg:a", ownEngine: standbyEngine.name });
+      expect(await pathSwitches(fake)).toEqual([{ stream: "s1", from: "direct", to: "wg:a", value: 1 }]);
+
+      // The engine it left is the standby on its path, and the stream stays on the favourite.
+      await checkFor(fake, 60);
+      expect(fake.instance.view()).toMatchObject({ state: "playing", message: null, recoveries: 0 });
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view().standbys).toMatchObject([
+        { path: "direct", state: "hot", engine: { name: main.name } },
+      ]);
+      expect(fake.handovers).toHaveLength(1);
+      expect(await succeeded(fake)).toEqual({});
+    });
+
+    test("moves at once to a path made the favourite while its standby was hot for long", async () => {
+      const favourite = { path: null as string | null };
+      const fake = await withStandby({ favourite });
+      await checkFor(fake, 60);
+      expect(fake.instance.path).toBe("direct");
+      favourite.path = "wg:a";
+      await checkFor(fake, 1);
+      expect(fake.instance.path).toBe("wg:a");
+    });
+
+    test("counts the 20 s again from when a standby that stopped getting data is hot again", async () => {
+      const standbyData = new Set([play(standbyEngine)]);
+      const fake = await awayFrom("wg:a", { standbyData });
+      await checkFor(fake, 15);
+      // No data for longer than a standby stays hot without. It was hot for 20 s meanwhile, but
+      // with no data lately the stream does not move to it.
+      standbyData.clear();
+      await checkFor(fake, DEFAULT_STANDBY_SETTINGS.hotWithinMs / 1000 + 1);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+      standbyData.add(play(standbyEngine));
+      await checkFor(fake, favouriteAfterMs / 1000);
+      expect(fake.instance.path).toBe("direct");
+      await checkFor(fake, 1);
+      expect(fake.instance.path).toBe("wg:a");
+    });
+
+    test("does not move on a check the transcoder did not answer", async () => {
+      const transcoderDown = { on: false };
+      const fake = await awayFrom("wg:a", { transcoderDown });
+      await checkFor(fake, favouriteAfterMs / 1000 - 1);
+      transcoderDown.on = true;
+      await checkFor(fake, 3);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.handovers).toEqual([]);
+
+      // It answers again, and the standby got data all along: the stream moves on that check.
+      transcoderDown.on = false;
+      await checkFor(fake, 1);
+      expect(fake.instance.path).toBe("wg:a");
+    });
+
+    test("leaves a stream that gets no video to its failover, which goes to the favourite path and counts", async () => {
+      const fake = await awayFrom("wg:a");
+      await checkFor(fake, 12);
+      // Its video stops while the standby goes on. Until a failover is due it still counts as playing.
+      fake.sources.delete(play(main));
+      await checkFor(fake, DEFAULT_STANDBY_SETTINGS.failoverAfterMs / 1000 - 1);
+      expect(fake.instance.path).toBe("direct");
+      // The standby is hot for 20 s on this check, and no video came for 8 s: that is a failover.
+      await checkFor(fake, 1);
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view().recoveries).toBe(1);
+      await checkFor(fake, 1);
+      expect(await succeeded(fake)).toEqual({ failover: 1 });
+    });
+
+    test("moves no stream that doesn't play: one that starts again without video fails over instead", async () => {
+      const favourite = { path: null as string | null };
+      const fake = await restarting({ favourite });
+      favourite.path = "wg:a";
+      // Its engine brings no video after the restart, while its standby on the favourite path is
+      // hot for 20 s by the time its new session opens.
+      fake.sources.delete(play(main));
+      fake.clock.now += favouriteAfterMs;
+      await fake.instance.observe();
+      fake.open();
+      await fake.step;
+
+      // It starts, so it doesn't play: nothing moves it while it has the time a start gets.
+      await checkFor(fake, 10);
+      expect(fake.instance.view().state).not.toBe("playing");
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.handovers).toEqual([]);
+
+      // Then it is a stall, and the failover to the favourite path's standby counts as one.
+      await checkFor(fake, settings.startupGraceMs / 1000);
+      expect(fake.instance.path).toBe("wg:a");
+      // The restart by hand, and the failover.
+      expect(fake.instance.view().recoveries).toBe(2);
+      await checkFor(fake, 1);
+      expect(await succeeded(fake)).toEqual({ failover: 1 });
+    });
+
+    test("starts the 20 s over when a standby's data stops for long while a step takes long", async () => {
+      const favourite = { path: null as string | null };
+      const standbyData = new Set([play(standbyEngine)]);
+      const fake = await restarting({ favourite, standbyData });
+      favourite.path = "wg:a";
+      // No check runs while the step waits: only the timer asks the transcoder about the standbys.
+      standbyData.clear();
+      fake.clock.now += DEFAULT_STANDBY_SETTINGS.hotWithinMs + 1000;
+      await fake.instance.observe();
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "warming" }]);
+      standbyData.add(play(standbyEngine));
+      fake.clock.now += 1000;
+      await fake.instance.observe();
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "hot" }]);
+      fake.open();
+      await fake.step;
+
+      // Hot again for a second by now, not for the 12 s since the step began or the time before it.
+      await checkFor(fake, favouriteAfterMs / 1000 - 2);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.handovers).toEqual([]);
+      await checkFor(fake, 2);
+      expect(fake.instance.path).toBe("wg:a");
+    });
+
+    test("finishes a move whose video arrives after it gave up, as no recovery", async () => {
+      const standbyData = new Set([play(standbyEngine)]);
+      const sources = new Set([play(main)]);
+      const arrives = new Map<string, number>();
+      // No second try meanwhile: the move that gave up is the one that finishes.
+      const policy = { baseDelayMs: 600_000, maxDelayMs: 600_000 };
+      const fake = await awayFrom("wg:a", { standbyData, sources, arrives, standby: { policy } });
+      await checkFor(fake, favouriteAfterMs / 1000);
+      expect(fake.handovers).toEqual([play(standbyEngine)]);
+      expect(fake.instance.path).toBe("direct");
+
+      // The transcoder still waits for the standby's video, which comes now.
+      arrives.set(play(standbyEngine), fake.clock.now);
+      await fake.instance.tick();
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view().engine?.name).toBe(standbyEngine.name);
+      expect(fake.handovers).toHaveLength(1);
+      await fake.instance.tick();
+      expect(fake.instance.view()).toMatchObject({ state: "playing", recoveries: 0 });
+      expect(await succeeded(fake)).toEqual({});
+      expect(await pathSwitches(fake)).toEqual([{ stream: "s1", from: "direct", to: "wg:a", value: 1 }]);
+    });
+
+    test("gives a path that was given up a new round of standbys once it is the favourite", async () => {
+      const favourite = { path: null as string | null };
+      const fake = await withStandby({ standbyData: new Set(), favourite });
+      const run = async (): Promise<void> => {
+        for (let tick = 0; tick < 1000; tick += 1) {
+          fake.clock.now += 10_000;
+          await fake.instance.tick();
+          await settle();
+        }
+      };
+      // Three rounds of three tries each, then no more.
+      await run();
+      expect(fake.removed).toHaveLength(3);
+      expect(fake.creates()).toBe(4);
+
+      favourite.path = "wg:a";
+      await run();
+      expect(fake.removed).toHaveLength(6);
+      expect(fake.creates()).toBe(7);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "failed", engine: null }]);
+    });
+
+    test("stays where it is while hot standby is off", async () => {
+      const fake = await awayFrom("wg:a", { hotStandby: { on: false } });
+      await checkFor(fake, 60);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.instance.view().standbys).toEqual([]);
+      expect(fake.creates()).toBe(1);
+    });
+
+    test("stays where it is while the favourite is down, or the policy turned it off", async () => {
+      const down = await awayFrom("wg:b", {}, [direct, vpn, { ...vpnB, up: false }]);
+      await checkFor(down, 60);
+      expect(down.instance.path).toBe("direct");
+      expect(down.instance.view().standbys.map(({ path }) => path)).toEqual(["wg:a"]);
+
+      const off = await awayFrom("wg:a", { pathAllowed: (path) => path !== "wg:a" });
+      await checkFor(off, 60);
+      expect(off.instance.path).toBe("direct");
+      expect(off.instance.view().standbys).toEqual([]);
+    });
+
+    test("leaves a stream where it is when the move brings no video, and tries again once it is stable again", async () => {
+      // The standby's reader gets data, but the stream's pipeline gets no video from it.
+      const standbyData = new Set([play(standbyEngine)]);
+      const sources = new Set([play(main)]);
+      const fake = await awayFrom("wg:a", { standbyData, sources });
+      await checkFor(fake, favouriteAfterMs / 1000);
+      expect(fake.handovers).toEqual([play(standbyEngine)]);
+      expect(fake.instance.path).toBe("direct");
+      expect(fake.instance.view().engine).toEqual({ name: main.name, shared: false });
+      expect(fake.removed).toEqual([]);
+
+      await checkFor(fake, 1);
+      expect(fake.instance.view()).toMatchObject({ state: "playing", message: null, recoveries: 0 });
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", engine: { name: standbyEngine.name } }]);
+
+      // Its video comes now, but it has to be hot for 20 s again first.
+      sources.add(play(standbyEngine));
+      await checkFor(fake, favouriteAfterMs / 1000 - 2);
+      expect(fake.handovers).toHaveLength(1);
+      await checkFor(fake, 5);
+      expect(fake.handovers).toHaveLength(2);
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view().recoveries).toBe(0);
+    });
+
+    test("keeps its standby on the favourite path first, also when another path has the only one", async () => {
+      const favourite = { path: null as string | null };
+      const sources = new Set([play(main), play(standbyEngine), play(own(3))]);
+      const fake = await withStandby({ favourite, sources, standby: { maxPaths: 1 } }, [direct, vpn, vpnB]);
+      expect(fake.instance.view().standbys.map(({ path }) => path)).toEqual(["wg:a"]);
+
+      favourite.path = "wg:b";
+      await checkFor(fake, 2);
+      expect(fake.removed).toEqual([standbyEngine.containerId]);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:b", engine: { name: own(3).name } }]);
+      await checkFor(fake, favouriteAfterMs / 1000 + 2);
+      expect(fake.instance.path).toBe("wg:b");
+    });
+
+    test("leaves the other path its standby until a start slot is free for the favourite's", async () => {
+      const favourite = { path: null as string | null };
+      const standbyStarts = new MoveSlots(1);
+      const sources = new Set([play(main), play(standbyEngine), play(own(3))]);
+      const fake = await withStandby({ favourite, sources, standbyStarts, standby: { maxPaths: 1 } }, [
+        direct,
+        vpn,
+        vpnB,
+      ]);
+      // Another stream's standby starts meanwhile.
+      expect(standbyStarts.tryTake()).toBe(true);
+      favourite.path = "wg:b";
+      await checkFor(fake, 10);
+      expect(fake.removed).toEqual([]);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:a", state: "hot" }]);
+
+      standbyStarts.release();
+      await checkFor(fake, 2);
+      expect(fake.removed).toEqual([standbyEngine.containerId]);
+      expect(fake.instance.view().standbys).toMatchObject([{ path: "wg:b", engine: { name: own(3).name } }]);
+    });
+
+    test("two streams that check at once never drop a standby for a start slot only one of them gets", async () => {
+      const favourite = { path: null as string | null };
+      const standbyStarts = new MoveSlots(1);
+      const paths = [direct, vpn, vpnB];
+      const stream = async () => {
+        const sources = new Set([play(main), play(standbyEngine), play(own(3))]);
+        return withStandby({ favourite, sources, standbyStarts, standby: { maxPaths: 1 } }, paths);
+      };
+      const streams = [await stream(), await stream()];
+      favourite.path = "wg:b";
+      const standbys = (): string[] =>
+        streams.map((fake) =>
+          fake.instance
+            .view()
+            .standbys.map(({ path }) => path)
+            .join(","),
+        );
+      // Both see the favourite path without a standby on the same check, and one slot is free.
+      for (const fake of streams) {
+        fake.clock.now += 1000;
+      }
+      await Promise.all(streams.map(async (fake) => fake.instance.tick()));
+      // Before the background work goes on: one has the slot, and the other still has its standby.
+      expect(standbys().toSorted((a, b) => a.localeCompare(b, "en"))).toEqual(["wg:a", "wg:b"]);
+      await settle();
+      expect(streams.map((fake) => fake.removed.length).toSorted((a, b) => a - b)).toEqual([0, 1]);
+
+      // The slot is free again: the other one follows.
+      for (const fake of streams) {
+        await checkFor(fake, 2);
+      }
+      expect(standbys()).toEqual(["wg:b", "wg:b"]);
+      expect(streams.map((fake) => fake.removed)).toEqual([[standbyEngine.containerId], [standbyEngine.containerId]]);
+    });
+
+    test("leaves the other path its standby while the favourite waits for its next try", async () => {
+      // Only the standbys on wg:a get data: the favourite's never do.
+      const standbyData = new Set<string>();
+      const created = Array.from({ length: 12 }, (_, index) => own(index + 1));
+      const fake = await awayFrom("wg:b", { standbyData, created, standby: { maxPaths: 1 } }, [direct, vpn, vpnB]);
+      const paths: string[] = [];
+      for (let tick = 0; tick < 2000; tick += 1) {
+        standbyData.clear();
+        for (const { ip, path } of fake.instance.assignments()) {
+          if (path === "wg:a") {
+            standbyData.add(`http://${ip}:6878/play`);
+          }
+        }
+        fake.clock.now += 5000;
+        await fake.instance.tick();
+        await settle();
+        paths.push(
+          fake.instance
+            .view()
+            .standbys.filter(({ engine }) => engine !== null)
+            .map(({ path }) => path)
+            .join(","),
+        );
+      }
+      // The favourite got three rounds of standbys, and each took the other path's standby once:
+      // six engines went. While it waited between the rounds, and since it was given up, the other
+      // path has kept its own.
+      expect(fake.removed).toHaveLength(6);
+      expect(fake.creates()).toBe(8);
+      expect(paths.at(-1)).toBe("wg:a");
+      expect(fake.instance.view().standbys.find(({ path }) => path === "wg:a")).toMatchObject({ state: "hot" });
+      expect(fake.instance.path).toBe("direct");
+    });
+
+    test("fails over to the standby on the favourite path before a better one", async () => {
+      const sources = new Set([play(main), play(standbyEngine), play(own(3))]);
+      const fake = await awayFrom("wg:b", { sources }, [direct, vpn, vpnB]);
+      await checkFor(fake, 2);
+      expect(fake.instance.view().standbys).toMatchObject([
+        { path: "wg:a", state: "hot", engine: { name: standbyEngine.name } },
+        { path: "wg:b", state: "hot", engine: { name: own(3).name } },
+      ]);
+      sources.delete(play(main));
+      fake.clock.now += DEFAULT_STANDBY_SETTINGS.failoverAfterMs + 1000;
+      await fake.instance.tick();
+      expect(fake.instance.path).toBe("wg:b");
+      expect(fake.instance.view().recoveries).toBe(1);
+    });
+  });
+
   describe("with engines shared per path", () => {
     const onDirect = sharedOn("direct", 20);
     const onVpn = sharedOn("wg:a", 21);
@@ -3285,6 +3678,22 @@ describe("hot standby on the other paths", () => {
       await fake.instance.tick();
       await settle();
       expect(pool.calls.at(-1)).toBe("acquire direct as standby");
+    });
+
+    test("moves to the favourite path's shared engine once its standby session there is stable", async () => {
+      const pool = sharedEngines();
+      const sources = new Set([play(onDirect), play(onVpn)]);
+      const favourite = { path: null as string | null };
+      const fake = await withStandby({ shared: pool.shared, sharing: { on: true }, sources, favourite });
+      favourite.path = "wg:a";
+      for (let second = 0; second < DEFAULT_STANDBY_SETTINGS.favouriteAfterMs / 1000; second += 1) {
+        fake.clock.now += 1000;
+        await fake.instance.tick();
+      }
+      expect(fake.instance.path).toBe("wg:a");
+      expect(fake.instance.view()).toMatchObject({ engine: { name: onVpn.name, shared: true }, recoveries: 0 });
+      expect(fake.creates()).toBe(0);
+      expect(pool.calls.slice(2)).toEqual(["promote wg:a", "release direct"]);
     });
 
     test("a standby session that brings no data checks its shared engine before it opens again", async () => {

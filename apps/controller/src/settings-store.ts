@@ -8,9 +8,10 @@ const fileSchema = z.object({
   version: z.literal(1),
   sharedEngines: z.boolean().default(false),
   hotStandby: z.boolean().default(true),
+  favouritePath: z.string().min(1).nullable().default(null),
 });
 
-export const DEFAULT_SETTINGS: Settings = { sharedEngines: false, hotStandby: true };
+export const DEFAULT_SETTINGS: Settings = { sharedEngines: false, hotStandby: true, favouritePath: null };
 
 /** Keeps the settings changed from the UI in `<data>/settings.json`, written atomically. */
 export class SettingsStore {
@@ -33,7 +34,11 @@ export class SettingsStore {
       this.current =
         parsed === undefined
           ? { ...DEFAULT_SETTINGS }
-          : { sharedEngines: parsed.data.sharedEngines, hotStandby: parsed.data.hotStandby };
+          : {
+              sharedEngines: parsed.data.sharedEngines,
+              hotStandby: parsed.data.hotStandby,
+              favouritePath: parsed.data.favouritePath,
+            };
       return null;
     } catch (error) {
       return error instanceof SyntaxError

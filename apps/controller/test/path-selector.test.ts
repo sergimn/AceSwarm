@@ -43,6 +43,21 @@ describe("initialPath", () => {
     );
   });
 
+  it("starts on the favourite path while it is up, unless the remembered one is", () => {
+    const input = { strategy: "sticky-best" as const, paths, memory: new Map(), load: noLoad };
+    // Without it, the best path.
+    expect(initialPath({ ...input, remembered: null })).toBe("wg:a");
+    expect(initialPath({ ...input, remembered: null, favourite: "direct" })).toBe("direct");
+    // An engine taken over from a previous run plays through its remembered path.
+    expect(initialPath({ ...input, remembered: "wg:a", favourite: "direct" })).toBe("wg:a");
+    expect(initialPath({ ...input, remembered: "wg:b", favourite: "direct" })).toBe("direct");
+    // A favourite that is down, or that the stream may not use (it is not among its paths).
+    expect(initialPath({ ...input, remembered: null, favourite: "wg:b" })).toBe("wg:a");
+    expect(initialPath({ ...input, remembered: null, favourite: "wg:gone" })).toBe("wg:a");
+    // It comes before spreading the streams.
+    expect(initialPath({ ...input, strategy: "round-robin", remembered: null, favourite: "wg:a" })).toBe("wg:a");
+  });
+
   it("round robin spreads streams by load", () => {
     const load = new Map([
       ["direct", 3],

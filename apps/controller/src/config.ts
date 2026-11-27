@@ -142,6 +142,11 @@ const schema = z
      */
     STANDBY_FAILOVER_SECONDS: z.coerce.number().int().min(1).default(8),
     /**
+     * With a favourite path chosen (under Settings in the UI) and hot standby on, a stream on another
+     * path moves to it once its standby there was hot for this long without a break.
+     */
+    FAVOURITE_PATH_STABLE_SECONDS: z.coerce.number().int().min(1).default(20),
+    /**
      * With engine sharing on, a path's shared engine restarts once more than this many of its streams
      * failed within SHARED_ENGINE_FAILURE_WINDOW_SECONDS (or when the stream someone watches fails).
      */
