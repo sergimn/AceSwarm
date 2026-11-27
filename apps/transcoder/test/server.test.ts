@@ -295,16 +295,49 @@ describe("the transcoder's playlists", () => {
       expect(await at(0)).toEqual(["../g1/full/seg_000000.ts"]);
       // No video for six seconds: the slate takes over, and what the playlist lists is counted.
       expect((await at(6)).slice(-2)).toEqual(["|", "../slate/seg_000.ts"]);
-      await writeSegments(2);
-      await at(6.5);
-      expect((await at(7.9)).slice(-2)).toEqual(["|", "../g1/full/seg_000001.ts"]);
+      // The stream is back with what it missed, and the newest of it is listed.
+      await writeSegments(4);
+      expect((await at(6.5)).slice(-2)).toEqual(["|", "../g1/full/seg_000003.ts"]);
       // The wall clock is set back an hour, and the stream goes on in its own time.
       const wall = Date.now();
       vi.spyOn(Date, "now").mockReturnValue(wall - 3_600_000);
-      await writeSegments(3);
-      expect((await at(9)).at(-1)).toBe("../g1/full/seg_000002.ts");
+      await writeSegments(5);
+      expect((await at(8.5)).at(-1)).toBe("../g1/full/seg_000004.ts");
     } finally {
       vi.restoreAllMocks();
+      await clocked.stopAll();
+      await own.app.close();
+    }
+  });
+
+  test("players outside the page get the segments one look finds as having come together", async () => {
+    // A clock that is a little later each time it is read, as a real one is.
+    let steady = 1_000_000_000;
+    const own = createService({ name: "test", logger });
+    const sources = fakeSources();
+    const clocked = new PipelineManager(own, settings, logger, fakeFfmpeg, undefined, {
+      openSource: sources.open,
+      clock: () => (steady += 300),
+    });
+    const at = async (seconds: number): Promise<string[]> => {
+      steady = 1_000_000_000 + seconds * 1000;
+      return listed((await clocked.externalPlaylist("stream1")) ?? "");
+    };
+    try {
+      await clocked.prepareSlate(fakeSlate);
+      await clocked.start("stream1", "http://e1/play", false);
+      sources.opened[0]?.layout(layoutOf(256));
+      await writeSegments(1);
+      expect(await at(0)).toEqual(["../g1/full/seg_000000.ts"]);
+      expect((await at(6)).slice(-2)).toEqual(["|", "../slate/seg_000.ts"]);
+      await writeSegments(4);
+      expect((await at(6.5)).slice(-2)).toEqual(["|", "../g1/full/seg_000003.ts"]);
+      // Then it delivers more than the time that passed, which the pipeline finds in one look: those
+      // segments came together and make up for something, so of them only the newest fits, with
+      // two seconds to spare.
+      await writeSegments(7);
+      expect((await at(9)).slice(-4)).toEqual(["|", "../g1/full/seg_000003.ts", "|", "../g1/full/seg_000006.ts"]);
+    } finally {
       await clocked.stopAll();
       await own.app.close();
     }

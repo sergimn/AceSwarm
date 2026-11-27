@@ -272,6 +272,9 @@ export class PipelineManager {
     let pipeline = this.pipelines.get(id);
     if (pipeline === undefined) {
       const external = this.externalOf(id, this.clock()).playlist;
+      // One reading of the clock for all the segments one look of the pipeline finds (they come
+      // with the same `at`): the playlist tells by their time which came together.
+      let look: { at: number; now: number } | undefined;
       pipeline = new Pipeline(
         id,
         this.settings,
@@ -289,8 +292,11 @@ export class PipelineManager {
           layoutGap: (stream, ms) => {
             this.layoutGaps.observe({ stream }, ms / 1000);
           },
-          fullSegment: (generation, segment) => {
-            external.add(generation, segment, this.clock());
+          fullSegment: (generation, segment, at) => {
+            if (look?.at !== at) {
+              look = { at, now: this.clock() };
+            }
+            external.add(generation, segment, look.now);
           },
         },
         { spawner: this.spawner, watchLiveEdge: this.watchLiveEdge, openSource: this.openSource },
