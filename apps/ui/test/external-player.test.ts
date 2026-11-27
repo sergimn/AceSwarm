@@ -9,7 +9,7 @@ import {
   m3uPlaylist,
 } from "../src/external-player.ts";
 
-const PLAYLIST = "http://192.0.2.10:8080/hls/s1/full/index.m3u8";
+const PLAYLIST = "http://192.0.2.10:8080/hls/s1/external/index.m3u8";
 
 const CHROME_ON_LINUX =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
@@ -19,9 +19,9 @@ const FIREFOX_ON_ANDROID = "Mozilla/5.0 (Android 14; Mobile; rv:140.0) Gecko/140
 
 describe("absoluteUrl", () => {
   it("puts the page's scheme, host and port before the playlist's path", () => {
-    expect(absoluteUrl("/hls/s1/full/index.m3u8", "http://192.0.2.10:8080/")).toBe(PLAYLIST);
-    expect(absoluteUrl("/hls/s1/full/index.m3u8", "https://tv.example/some/page?x=1#top")).toBe(
-      "https://tv.example/hls/s1/full/index.m3u8",
+    expect(absoluteUrl("/hls/s1/external/index.m3u8", "http://192.0.2.10:8080/")).toBe(PLAYLIST);
+    expect(absoluteUrl("/hls/s1/external/index.m3u8", "https://tv.example/some/page?x=1#top")).toBe(
+      "https://tv.example/hls/s1/external/index.m3u8",
     );
   });
 });
@@ -40,13 +40,13 @@ describe("isAndroid", () => {
 describe("androidIntentUrl", () => {
   it("asks Android to view the playlist as an HLS stream, in no app in particular", () => {
     expect(androidIntentUrl(PLAYLIST)).toBe(
-      "intent://192.0.2.10:8080/hls/s1/full/index.m3u8#Intent;scheme=http;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end",
+      "intent://192.0.2.10:8080/hls/s1/external/index.m3u8#Intent;scheme=http;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end",
     );
   });
 
   it("keeps the scheme and the query of the address", () => {
-    expect(androidIntentUrl("https://tv.example/hls/s1/full/index.m3u8?a=1")).toBe(
-      "intent://tv.example/hls/s1/full/index.m3u8?a=1#Intent;scheme=https;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end",
+    expect(androidIntentUrl("https://tv.example/hls/s1/external/index.m3u8?a=1")).toBe(
+      "intent://tv.example/hls/s1/external/index.m3u8?a=1#Intent;scheme=https;action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;end",
     );
   });
 });

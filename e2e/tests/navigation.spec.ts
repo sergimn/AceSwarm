@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import type { Snapshot } from "../../packages/shared/src/api-types.ts";
+import type { Snapshot, ViewerView } from "../../packages/shared/src/api-types.ts";
 import { addStreamList, openApp, resetStack, snapshot, streamById, waitForPlaying } from "./helpers.ts";
 import { broadcasts } from "./mesh.ts";
 
@@ -187,7 +187,9 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   await openApp(page);
   const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
   expect(stream).toBeDefined();
-  const address = new URL(stream!.hls.full, baseURL).href;
+  // The playlist kept for players outside the page (the next test plays it).
+  const address = new URL(stream!.hls.external, baseURL).href;
+  expect(address).toContain(`/hls/${stream!.id}/external/index.m3u8`);
   const viewers = async (): Promise<number | undefined> => (await streamById(request, stream!.id))?.viewers;
   const videoSource = (): Promise<string | null> =>
     page.evaluate<string | null>(`document.querySelector(".player video").getAttribute("src")`);
@@ -247,16 +249,9 @@ test("hands a stream to an external player, and plays it here again", async ({ p
       await page.keyboard.up("Enter");
     })(),
   ]);
-  // A desktop browser downloads a playlist file with the stream in it, at an address that plays.
+  // A desktop browser downloads a playlist file with the stream in it, at that address.
   expect(download.suggestedFilename()).toBe("Channel 12.m3u");
   expect(await readFile(await download.path(), "utf8")).toBe(`#EXTM3U\n#EXTINF:-1,Channel 12\n${address}\n`);
-  // Asked again while it doesn't answer: a stream whose broadcast pauses has no playlist for a moment.
-  await expect
-    .poll(async () => {
-      const playlist = await request.get(address);
-      return playlist.ok() ? await playlist.text() : "";
-    })
-    .toContain("#EXTINF");
 
   // The player says what to do, where its picture was, while it is still full screen: the browser
   // hides its downloads there.
@@ -307,6 +302,63 @@ test("hands a stream to an external player, and plays it here again", async ({ p
   await expect(player).toBeHidden();
   await expect.poll(viewers).toBe(0);
   expect(downloads).toBe(1);
+});
+
+test("counts a player outside the page as a viewer while it asks for the stream's own playlist", async ({
+  request,
+  playwright,
+  baseURL,
+}) => {
+  const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
+  expect(stream).toBeDefined();
+  const { id, hls } = stream!;
+  /** Who watches the stream: each viewer's id and device, in the order they came. */
+  const watching = async (): Promise<ViewerView[]> =>
+    ((await (await request.get("/api/viewers")).json()) as ViewerView[]).filter((viewer) => viewer.stream === id);
+  const devices = async (): Promise<string[]> => (await watching()).map(({ device }) => device);
+  const count = async (): Promise<number | undefined> => (await streamById(request, id))?.viewers;
+
+  // The page's own playlist counts nobody: the page reports itself, and tests fetch it too.
+  expect((await request.get(hls.full)).ok()).toBe(true);
+  expect(await watching()).toEqual([]);
+
+  // Two players, by what they call themselves.
+  expect(baseURL).toBeDefined();
+  const player = (userAgent: string) => playwright.request.newContext({ baseURL: baseURL!, userAgent });
+  const vlc = await player("VLC/3.0.20 LibVLC/3.0.20");
+  const ffmpeg = await player("Lavf/61.7.100");
+  try {
+    const playlist = await vlc.get(hls.external);
+    expect(playlist.ok(), await playlist.text()).toBe(true);
+    expect(playlist.headers()["content-type"]).toContain("application/vnd.apple.mpegurl");
+    // It lists the full screen output's segments, at addresses that work from this playlist's.
+    const newest = (await playlist.text()).split("\n").findLast((line) => line.endsWith(".ts"));
+    expect(newest).toMatch(/^\.\.\/g\d+\/full\/seg_\d+\.ts$/);
+    const segment = await vlc.get(new URL(newest!, new URL(hls.external, baseURL)).href);
+    expect(segment.ok()).toBe(true);
+    expect(segment.headers()["content-type"]).toBe("video/mp2t");
+
+    // Getting the playlist made it a viewer, under a random id and its player's name.
+    await expect.poll(devices).toEqual(["VLC"]);
+    expect(await count()).toBe(1);
+    const [first] = await watching();
+    expect(first?.viewer).toMatch(/^[0-9a-f]{16}$/);
+    // It asks again every few seconds: still the same viewer.
+    expect((await vlc.get(hls.external)).ok()).toBe(true);
+    expect((await watching()).map(({ viewer, since }) => ({ viewer, since }))).toEqual([
+      { viewer: first?.viewer, since: first?.since },
+    ]);
+    // Another kind of player at the same address is another viewer.
+    expect((await ffmpeg.get(hls.external)).ok()).toBe(true);
+    await expect.poll(devices).toEqual(["VLC", "ffmpeg"]);
+    expect(await count()).toBe(2);
+  } finally {
+    await vlc.dispose();
+    await ffmpeg.dispose();
+  }
+  // They report nothing when they stop: they no longer count 30 seconds after their last request.
+  await expect.poll(count, { timeout: 45_000 }).toBe(0);
+  expect(await watching()).toEqual([]);
 });
 
 test("shows the details of one tile only: the one under the mouse, or the one the remote is on", async ({ page }) => {
@@ -698,7 +750,7 @@ test.describe("in a browser on Android", () => {
     await openApp(page);
     const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 11");
     expect(stream).toBeDefined();
-    const address = new URL(stream!.hls.full, baseURL);
+    const address = new URL(stream!.hls.external, baseURL);
 
     await page.locator(".tile", { hasText: "Channel 11" }).click();
     const player = page.getByRole("dialog", { name: "Player" });
@@ -731,12 +783,39 @@ test.describe("in a browser on Android", () => {
     await expect(player).toBeVisible();
     await expect(note).toBeHidden();
     await expect.poll(videoSource).not.toBeNull();
+
+    // So does disabling the stream, which has no address to give out then.
     await player.hover();
     await copy.click();
     await expect(note).toBeVisible();
+    const enabled = async (value: boolean): Promise<void> => {
+      const response = await request.patch(`/api/streams/${stream!.id}`, { data: { enabled: value } });
+      expect(response.ok(), await response.text()).toBe(true);
+    };
+    try {
+      await enabled(false);
+      await expect(copy).toBeHidden();
+      await expect(note).toBeHidden();
+    } finally {
+      await enabled(true);
+    }
+    await expect(copy).toBeVisible();
+
+    // And so does a copy that works, as if the browser had allowed it meanwhile.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
+    await page.evaluate("document.execCommand = () => true");
+    await copy.click();
+    await expect(player.locator(".toast")).toHaveText("Link copied");
+    await expect(note).toBeHidden();
+    await page.evaluate("document.execCommand = () => false");
 
     // The button follows a link that asks Android to open the playlist in an app, and downloads no
     // file. The message has the address from then on, so the line under the name goes.
+    await player.hover();
+    await copy.click();
+    await expect(note).toBeVisible();
     await player.getByRole("button", { name: "Open in external player" }).click();
     const message = player.locator(".player-waiting");
     await expect(message).toContainText("Sent to an external player");
@@ -755,5 +834,7 @@ test.describe("in a browser on Android", () => {
 
     await page.keyboard.press("Escape");
     await expect(player).toBeHidden();
+    // The stream is left as it was found, playing: it was disabled for a moment.
+    await waitForPlaying(request, stream!.id);
   });
 });

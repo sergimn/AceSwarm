@@ -214,6 +214,11 @@ export class Player {
     document.addEventListener("fullscreenchange", () => {
       if (document.fullscreenElement === null && this.streamId !== undefined) {
         this.navigator.back();
+      } else if (this.handOff !== undefined) {
+        // Handed over before the browser was full screen: the message now says where the
+        // downloads of a browser in full screen are.
+        this.showNoPicture();
+        this.placeStats();
       }
     });
   }
@@ -510,9 +515,10 @@ export class Player {
   }
 
   /**
-   * Hands the stream to an external player, and stops playing it here at once: a TV decodes one
-   * stream at a time, and two players would both have sound. The page says what to do next where
-   * the picture was, since a browser in full screen hides its downloads.
+   * Hands the stream to an external player, and stops playing it here at once: a device that
+   * decodes one stream at a time, as a TV may, would leave the other player without a picture, and
+   * two players would both have sound. The page says what to do next where the picture was, since
+   * a browser in full screen hides its downloads.
    */
   private handOver(): void {
     const stream = this.stream;
@@ -614,9 +620,9 @@ export class Player {
   }
 }
 
-/** The address an external player gets for a stream: its full-quality playlist, with this server's origin. */
+/** The address an external player gets for a stream: the playlist kept for such players, with this server's origin. */
 function externalAddress(stream: StreamView): string {
-  return absoluteUrl(stream.hls.full, location.href);
+  return absoluteUrl(stream.hls.external, location.href);
 }
 
 /** Sets a length in pixels on an element's style, leaving it alone when it already has it. */

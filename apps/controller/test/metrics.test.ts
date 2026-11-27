@@ -60,7 +60,7 @@ test("exports each engine's estimated cache, its cap when it has one, and peers 
     path: "direct",
     recoveries: 0,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: { name: "e1", shared: false },
     standbys: [],
   };
@@ -187,7 +187,7 @@ function streamOnSharedEngine(id: string): StreamView {
     path: "direct",
     recoveries: 0,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: { name: "shared-direct", shared: true },
     standbys: [],
   };
@@ -227,7 +227,7 @@ test("exports the age of a stream's last frame while it runs, not once it is sto
     path: "direct",
     recoveries: 1,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: null,
     standbys: [],
   };
@@ -282,7 +282,7 @@ test("a disabled stream has no up value, so it is neither an outage nor in the a
     path: "direct",
     recoveries: 0,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: null,
     standbys: [],
   };
@@ -341,7 +341,7 @@ test("exports how long the broadcast is quiet from the stream's quiet time, not 
     path: "direct",
     recoveries: 3,
     viewers: 0,
-    hls: { preview: "", full: "", thumbnail: "" },
+    hls: { preview: "", full: "", external: "", thumbnail: "" },
     engine: null,
     standbys: [],
   };
