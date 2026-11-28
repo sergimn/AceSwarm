@@ -276,10 +276,16 @@ const WIDER_SEEDS = [4265, 5335, 7417, 7728];
 /**
  * And two more from those runs: they list more than the time that passed and four seconds where a
  * count is not handed how far behind the stream was when it started (`ExternalPlaylist.behind`).
- * Both lists hold for this test's streams as `pausingStream` makes them: where it changes, they
- * are to be picked again, from runs that take those rules out one at a time.
  */
 const BEHIND_SEEDS = [1763, 2277];
+/**
+ * And two more: they keep the slate over a segment that came in its own time, or leave one out,
+ * where how far behind the stream is doesn't start over at another ffmpeg run's first segment
+ * (`ExternalPlaylist.behind`). The three lists hold for this test's streams as `pausingStream`
+ * makes them: where it changes, they are to be picked again, from runs that take those rules out
+ * one at a time.
+ */
+const NEW_RUN_SEEDS = [826, 6777];
 /**
  * The streams of `pausedOnce` whose count never ended, and that left out a segment in their own
  * time, at one of 1.05, 1.1 and 1.15 times real time, in runs over seeds 1 to 100 where a segment
@@ -2027,7 +2033,12 @@ describe("ExternalPlaylist", () => {
   it(
     "never lists more than the time that passed since the stream's last segment before the slate",
     () => {
-      for (const seed of [...Array.from({ length: 150 }, (_, index) => index + 1), ...WIDER_SEEDS, ...BEHIND_SEEDS]) {
+      for (const seed of [
+        ...Array.from({ length: 150 }, (_, index) => index + 1),
+        ...WIDER_SEEDS,
+        ...BEHIND_SEEDS,
+        ...NEW_RUN_SEEDS,
+      ]) {
         const random = seeded(seed);
         const written = pausingStream(random, RANDOM_STREAM_SECONDS);
         const watch = watched(`seed ${String(seed)}`, written, random, RANDOM_STREAM_SECONDS);
