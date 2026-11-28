@@ -41,7 +41,9 @@ const CATCH_UP_MS = 60_000;
  * For a player that has nothing to play, the slate starts this many of its segments ago, so it
  * gets three at once: a playlist it just opened, before the stream's first segment or with nothing
  * left to list. It then plays a few seconds behind the newest one, as it does on a stream that plays.
- * Nothing is counted for it (see `Count`): it is not behind, so it gets all the stream then delivers.
+ * Nothing is counted for it (see `Count`): it gets all the stream then delivers, as a player that
+ * opens the page's playlist does. A stream's first segments come right behind each other, but one
+ * that still makes up slowly for an earlier pause puts it behind by what is left of that.
  */
 const SLATE_SEGMENTS_AHEAD = 2;
 /**
@@ -49,9 +51,10 @@ const SLATE_SEGMENTS_AHEAD = 2;
  * the stream, a pass of the slate's loop, another ffmpeg run, or segments left out. VLC plays what
  * it has before it goes on behind a discontinuity, and reads the playlist again only then: a
  * discontinuity that came and left the list meanwhile it never sees, and the video behind it ends
- * its playing. This covers a player that plays this far behind the newest segment. But no longer
- * than the files of the segments listed are there (see `gone`): a run that writes faster than in
- * real time deletes them sooner.
+ * its playing. This covers a player that plays this far behind the newest segment: VLC 3.0.20
+ * asked for the second segment behind a discontinuity up to 14 seconds after the first. The
+ * segments whose files ffmpeg deleted go sooner (see `gone`), as a run that writes faster than in
+ * real time deletes them sooner, but the discontinuity stays, with the segments behind it.
  */
 export const KEEP_CHANGES_MS = 20_000;
 /**
@@ -100,9 +103,10 @@ const RUNS_REMEMBERED = 8;
  * The count that starts with a slate (see `Count`) ends when the stream's segments were listed this
  * long, with neither the slate nor a segment left out between them, once it left out about as much
  * of the stream's video as the slate stood in for: from then on the playlist is never more than
- * `NOTICE_SLACK_MS` ahead of the time that passed (see `Count.owed`), whatever the stream delivers.
- * One that makes up for its pause slowly delivers more than the time that passed for minutes, and
- * may pause again meanwhile. One that never makes up for it (it came back late and stays so) is
+ * `NOTICE_SLACK_MS` ahead of the time that passed (see `Count.owed`), whatever the stream delivers,
+ * as far as the count can tell how far it is behind (see the notes' limits). One that makes up for
+ * its pause slowly delivers more than the time that passed for minutes, and may pause again
+ * meanwhile, more than once. One that never makes up for it (it came back late and stays so) is
  * counted on, through the slates that follow too, which costs it next to nothing: in its own time
  * it fits (see the notes' limits).
  */
@@ -208,12 +212,20 @@ interface Count {
   /**
    * How much more the playlist listed since the count started than the stream's video that came,
    * in milliseconds: the slate's time, less the stream's video it left out (or never saw), and to
-   * start with, as much as the stream was behind then where it was still making up for an earlier
-   * pause (see `addSlate`). A stream never gets ahead of the time that passed, so it can make up
-   * for no more than this: where this is about nothing, nothing it delivers puts the playlist
-   * further ahead of the time that passed since `from` than the count lets it be.
+   * start with, as much as the stream was behind then where it was still making up for earlier
+   * pauses, and no less than the count before it still owed (see `handedOn`). A stream never gets
+   * ahead of the time that passed, so it can make up for no more than this: where this is about
+   * nothing, nothing it delivers puts the playlist further ahead of the time that passed since
+   * `from` than the count lets it be.
    */
   owed: number;
+  /**
+   * How far behind the stream was when the count started, in milliseconds, as far as the playlist
+   * can tell: what the count owed then (see `handedOn`). Nothing from another ffmpeg run's first
+   * segment on, as the video before it is missing for good (see `since`): what that run may still
+   * make up for shows in `owed` alone.
+   */
+  carried: number;
   /** Whether a segment was listed since the stream is back although it didn't fit (see `firstListed`). */
   overdrawn: boolean;
 }
@@ -400,6 +412,7 @@ export class ExternalPlaylist {
       // Another ffmpeg run: the video before its first segment is missing for good, and the stream
       // goes on from here, in its own time.
       count.since = at - count.came;
+      count.carried = 0;
     }
     const look = count.looks.at(-1);
     if (look?.at === at) {
@@ -593,6 +606,23 @@ export class ExternalPlaylist {
     return this.lastAt + Math.min(slateAfter(this.recent, this.longestSegmentMs / 1000), listed);
   }
 
+  /**
+   * What a count that still runs when the slate takes over again hands on to the next one, in
+   * milliseconds (see `Count.owed`): how far behind the stream is then. One that makes up for a
+   * pause slowly may pause again before it has, more than once, and then delivers what it missed
+   * of every pause after this one. So it is what the running count owed when it started
+   * (`Count.carried`), and the time that passed since, less the video that came. And no less than
+   * the running count still owed: where the stream's video before another ffmpeg run's first
+   * segment is missing for good, the time it is behind counts from there, and that run may yet
+   * make up for the pause faster than in real time. Never less than nothing, as where the stream is
+   * ahead of the time that passed (another ffmpeg run's first segments that come together make it
+   * so): that would end the next count before the stream made up for this pause.
+   */
+  private handedOn(): number {
+    const count = this.count;
+    return count === undefined ? 0 : Math.max(0, count.carried + this.lastAt - count.since - count.came, count.owed);
+  }
+
   /** When the slate's next segment is due, as of `now`. */
   private nextSlateDue(now: number): number {
     if (this.slateNext !== undefined) {
@@ -621,19 +651,15 @@ export class ExternalPlaylist {
     }
     if (this.playlist.length === 0 || now - due > CATCH_UP_MS) {
       // Nothing is listed, or nobody asked for a long time: whoever asks now has nothing to play,
-      // and gets the stream's segments that come after the slate's. The ones that wait are old by
-      // then, and the oldest of them about to go (see `gone`): they are left out.
+      // and gets the stream's segments that come after the slate's. The ones that wait are left
+      // out: what the stream missed leaves no gap for a player that has nothing, and after a
+      // minute the oldest of them is about to go (see `gone`).
       this.take(now, false);
       this.slateDueAt = now - SLATE_SEGMENTS_AHEAD * next.duration * 1000;
       this.count = undefined;
     } else if (starts) {
       this.slateDueAt = due;
-      // A count that still runs hands on as much as the stream is behind then (see `Count.owed`):
-      // one that makes up for a pause slowly may pause again before it has, and then delivers what
-      // it missed of both pauses after this one. Where it is ahead, as another ffmpeg run's first
-      // segments that come together make it, it hands on nothing: less would end the next count
-      // before the stream made up for this pause.
-      const behind = this.count === undefined ? 0 : this.lastAt - this.count.since - this.count.came;
+      const owed = this.handedOn();
       this.count = {
         from: this.lastAt,
         listed: 0,
@@ -642,7 +668,8 @@ export class ExternalPlaylist {
         since: this.lastAt,
         looks: [],
         overdrawn: false,
-        owed: Math.max(0, behind),
+        owed,
+        carried: owed,
       };
     }
     while (this.slateDueAt <= now) {
