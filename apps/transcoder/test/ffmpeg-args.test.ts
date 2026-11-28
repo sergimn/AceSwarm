@@ -73,16 +73,20 @@ describe("buildFfmpegArgs", () => {
     expect(args).not.toContain("-skip_frame");
   });
 
-  it("keeps a run's newest twenty full segment files, and the preview's newest ten", () => {
+  it("keeps 40 seconds of a run's newest full segment files, and the preview's newest ten", () => {
     // ffmpeg keeps no more files beyond its playlist than the playlist lasts, so the full output
-    // lists sixteen in its own playlist to keep twenty; the playlists served list six.
+    // lists sixteen of two seconds in its own playlist to keep twenty; the playlists served list six.
     const args = buildFfmpegArgs(PLAN);
     expect(hlsOptions(args, "/hls/s1/3/full")).toEqual(["16", "4"]);
     expect(hlsOptions(args, "/hls/s1/3/preview")).toEqual(["6", "4"]);
-    expect(fullFilesKept(6)).toBe(20);
+    expect(fullFilesKept(6, 2)).toBe(20);
+    // Segments of one second: forty of them.
+    expect(hlsOptions(buildFfmpegArgs({ ...PLAN, segmentSeconds: 1 }), "/hls/s1/3/full")).toEqual(["36", "4"]);
+    expect(fullFilesKept(6, 1)).toBe(40);
     // A longer playlist than that keeps four more than it lists, as the preview's does.
     expect(hlsOptions(buildFfmpegArgs({ ...PLAN, playlistSize: 18 }), "/hls/s1/3/full")).toEqual(["18", "4"]);
-    expect(fullFilesKept(18)).toBe(22);
+    expect(fullFilesKept(18, 2)).toBe(22);
+    expect(fullFilesKept(6, 6)).toBe(10);
   });
 
   it("leaves the input timeout to the source's reader: ffmpeg's own does not apply to a pipe", () => {

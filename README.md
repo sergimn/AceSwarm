@@ -58,6 +58,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 | `PATH_STRATEGY`             | `sticky-best`          | `sticky-best` moves a stream only when its path fails. `round-robin` spreads streams over the paths that are up. |
 | `STALE_SOURCE_SECONDS`      | `60`                   | A broadcast whose live edge doesn't move for this long counts as stopped: its stream waits for it.               |
 | `ACESWARM_ENGINES_INTERNAL` | `false`                | Set to `true` on Podman.                                                                                         |
+| `HLS_TMPFS_SIZE`            | `1g`                   | Memory for the video the transcoder serves: about 45 MB per 8 Mbit/s stream. An older `.env` has `512m`.         |
 
 ### Raspberry Pi 5
 

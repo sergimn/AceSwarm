@@ -65,24 +65,32 @@ export function decodesKeyFramesOnly(plan: Pick<FfmpegPlan, "previewMode" | "ful
 export const HLS_DELETE_THRESHOLD = 4;
 
 /**
- * How many segments the full output's own playlist lists at least: with `HLS_DELETE_THRESHOLD`, a
- * run keeps its newest 20 files, 40 seconds of video in its own time (see `fullFilesKept`). The
- * playlists served list fewer (`playlistSize`, see `VirtualPlaylist`). VLC 3.0.20 plays 15 seconds
- * or more behind the newest segment, and asked for a segment up to 19 seconds after the external
- * playlist listed it, once the stream came back from the slate; a stream that makes up for a pause
- * faster than in real time goes through its files that much sooner. The preview's players play near
- * its newest segment, and keep its six.
+ * How many seconds of a run's newest full segments ffmpeg keeps the files of at least, in the
+ * stream's own time: its own playlist lists that much but `HLS_DELETE_THRESHOLD` segments (see
+ * `fullFilesKept`), and the playlists served list fewer (`playlistSize`, see `VirtualPlaylist`).
+ * VLC 3.0.20 plays 15 seconds or more behind the newest segment, and asked for a segment up to 19
+ * seconds after the external playlist listed it, once the stream came back from the slate; a
+ * stream that makes up for a pause faster than in real time goes through its files that much
+ * sooner. The preview's players play near its newest segment, and keep its six.
  */
-const FULL_LISTED_AT_LEAST = 16;
+const FULL_KEPT_SECONDS = 40;
 
-/** How many of a run's newest full segments ffmpeg keeps the files of, with a playlist of `playlistSize`. */
-export function fullFilesKept(playlistSize: number): number {
-  return Math.max(playlistSize, FULL_LISTED_AT_LEAST) + HLS_DELETE_THRESHOLD;
+/**
+ * How many of a run's newest full segments ffmpeg keeps the files of, with a playlist of
+ * `playlistSize` and segments of `segmentSeconds`: twenty of two seconds, forty of one (measured
+ * with ffmpeg 9.0.2). A copied stream whose key frames are further apart than that has longer
+ * segments, and so keeps more of its video.
+ */
+export function fullFilesKept(playlistSize: number, segmentSeconds: number): number {
+  return Math.max(playlistSize + HLS_DELETE_THRESHOLD, Math.ceil(FULL_KEPT_SECONDS / segmentSeconds));
 }
 
 function hlsOutput(plan: FfmpegPlan, variant: "full" | "preview"): string[] {
   const directory = `${plan.directory}/${variant}`;
-  const listed = variant === "full" ? fullFilesKept(plan.playlistSize) - HLS_DELETE_THRESHOLD : plan.playlistSize;
+  const listed =
+    variant === "full"
+      ? fullFilesKept(plan.playlistSize, plan.segmentSeconds) - HLS_DELETE_THRESHOLD
+      : plan.playlistSize;
   return [
     "-f",
     "hls",

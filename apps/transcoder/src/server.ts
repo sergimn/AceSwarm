@@ -6,7 +6,7 @@ import type { Logger } from "@aceswarm/shared/logger";
 import type { Service } from "@aceswarm/shared/service";
 import { Counter, Gauge, Histogram } from "@prometheus-io/client";
 import { z } from "zod";
-import { FULL_MODES } from "./ffmpeg-args.ts";
+import { FULL_MODES, fullFilesKept } from "./ffmpeg-args.ts";
 import { DECODINGS } from "./key-frames.ts";
 import { DEFAULT_LIVE_EDGE_SETTINGS, watchLiveEdge, type WatchLiveEdge } from "./live-edge.ts";
 import { Pipeline, VARIANTS, type PipelineSettings, type Spawner, type Variant } from "./pipeline.ts";
@@ -402,6 +402,7 @@ export class PipelineManager {
       }
       const playlist = new ExternalPlaylist({
         windowSize: this.settings.plan.playlistSize,
+        filesKept: fullFilesKept(this.settings.plan.playlistSize, this.settings.plan.segmentSeconds),
         staleAfterMs: (this.settings.liveEdge ?? DEFAULT_LIVE_EDGE_SETTINGS).staleAfterMs,
         longestSegmentMs: (this.settings.stuck ?? DEFAULT_STUCK_LIMITS).fullOutputStallMs,
         slate: () => this.slate,

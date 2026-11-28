@@ -14,6 +14,8 @@ const SLATE: Slate = {
   segments: [0, 1, 2].map((index) => ({ uri: `../slate/seg_00${String(index)}.ts`, duration: 2 })),
 };
 const STALE_MS = 60_000;
+/** How many of a run's last full segments ffmpeg keeps the files of (`fullFilesKept` in the source). */
+const FILES_KEPT = 20;
 
 interface Made {
   /** What the playlist lists at `seconds`: `s<n>` a segment of the slate, `g<run>:<n>` one of the stream, `|` a discontinuity. */
@@ -30,6 +32,7 @@ function make(slate: () => Slate | undefined = () => SLATE, staleAfterMs = STALE
   let slates = 0;
   const playlist = new ExternalPlaylist({
     windowSize: 6,
+    filesKept: FILES_KEPT,
     staleAfterMs,
     longestSegmentMs,
     slate,
@@ -245,8 +248,6 @@ const NOTICE_SLACK = 2;
  * one more, in case the slate stood in for all the time that passed and the one before doesn't fit.
  */
 const WAITS_AT_MOST = 10 + 2 * (2.5 + NOTICE_SLACK);
-/** How many of a run's last full segments ffmpeg keeps the files of (`fullFilesKept` in the source). */
-const FILES_KEPT = 20;
 /**
  * A file a playlist lists while it counts is there for this long at least, in seconds, in the random
  * test, but for the first behind a discontinuity, which a player fetches at once: ffmpeg keeps a
@@ -281,11 +282,18 @@ const BEHIND_SEEDS = [1763, 2277];
 /**
  * And two more: they keep the slate over a segment that came in its own time, or leave one out,
  * where how far behind the stream is doesn't start over at another ffmpeg run's first segment
- * (`ExternalPlaylist.behind`). The three lists hold for this test's streams as `pausingStream`
- * makes them: where it changes, they are to be picked again, from runs that take those rules out
- * one at a time.
+ * (`ExternalPlaylist.behind`). That rule trades one stream for these two: of the wider runs' 8000,
+ * seed 874 leaves out a segment in its own time with it (see the notes' limits), and passes
+ * without it.
  */
 const NEW_RUN_SEEDS = [826, 6777];
+/**
+ * And one more: it lists a file that goes within 8 seconds where the wait while the slate shows
+ * goes on taking the stream for one that made up for its pause after it fell behind again
+ * (`Count.madeUp`). The four lists hold for this test's streams as `pausingStream` makes them: where
+ * it changes, they are to be picked again, from runs that take those rules out one at a time.
+ */
+const MADE_UP_SEEDS = [1608];
 /**
  * The streams of `pausedOnce` whose count never ended, and that left out a segment in their own
  * time, at one of 1.05, 1.1 and 1.15 times real time, in runs over seeds 1 to 100 where a segment
@@ -387,21 +395,108 @@ function stalling(rate: number, pauses: readonly { at: number; lasting: number }
   return writes;
 }
 
+/** How a stream that is behind makes up for a pause (see `behindThenAtOnce`). */
+interface AtOnce {
+  /** How late the stream came back from its first pause, in seconds. */
+  behind: number;
+  /** How long its second pause lasts. */
+  pause: number;
+  /** How fast it then delivers all it is behind, in times real time... */
+  rate: number;
+  /** ...or in lots of this many seconds of its video, `gap` seconds apart... */
+  lot?: number;
+  gap?: number;
+  /** ...or this many seconds of it at once (13 times real time), and the rest at `rate`... */
+  first?: number;
+  /** ...from this many seconds later. */
+  after?: number;
+}
+
 /**
  * How much of a stream's video ffmpeg wrote by `seconds`: in its own time until 20, then none until
- * the stream comes back 17 seconds late at 37, and stays so; at 99 the engine sends nothing for
- * eight seconds, and then all the stream is behind at once, 13 times real time, until it is in its
- * own time again.
+ * the stream comes back `behind` seconds late, and stays so; at 99 the engine sends nothing for
+ * `pause` seconds, and then all the stream is behind, at `rate` times real time or in lots, until
+ * it is in its own time again.
  */
-function behindThenAtOnce(seconds: number): number {
+function behindThenAtOnce(
+  { behind, pause, rate, lot = 0, gap = 1, first = 0, after = 0 }: AtOnce,
+  seconds: number,
+): number {
   if (seconds <= 20) {
     return seconds;
   }
   if (seconds <= 99) {
-    return Math.max(20, seconds - 17);
+    return Math.max(20, seconds - behind);
   }
-  return seconds <= 107 ? 82 : Math.min(seconds, 82 + 13 * (seconds - 107));
+  const back = 99 + pause;
+  if (seconds <= back) {
+    return 99 - behind;
+  }
+  const burst = Math.min(first, 13 * (seconds - back));
+  const made =
+    lot > 0
+      ? lot * (1 + Math.floor((seconds - back) / gap))
+      : burst + rate * Math.max(0, seconds - back - first / 13 - after);
+  return Math.min(seconds, 99 - behind + made);
 }
+
+/**
+ * Plays a stream of two-second segments that goes as `how` (see `behindThenAtOnce`) until 160: the
+ * pipeline looks every `looks` seconds, and a player asks every `asks`. When each segment was
+ * written, when each was first listed, and which came first behind the slate after 99, and when;
+ * and when the slate was first listed after 99.
+ */
+function playedAtOnce(
+  how: AtOnce,
+  looks: number,
+  asks: number,
+): { writes: number[]; listedAt: Map<string, number>; backs: { index: number; at: number }[]; slateFrom: number } {
+  const writes: number[] = [];
+  for (let t = 0; t <= 160; t = Math.round((t + 0.01) * 100) / 100) {
+    while (2 * (writes.length + 1) <= behindThenAtOnce(how, t) + 1e-9) {
+      writes.push(t);
+    }
+  }
+  const { text, segment } = make();
+  let seen = -1;
+  let slateFrom = Infinity;
+  const listedAt = new Map<string, number>();
+  const backs: { index: number; at: number }[] = [];
+  for (let tick = 1; tick <= 1600; tick += 1) {
+    const now = tick / 10;
+    const looking = Number.isSafeInteger(Math.round(now * 1000) / Math.round(looks * 1000));
+    const asking = Number.isSafeInteger(Math.round(now * 1000) / Math.round(asks * 1000));
+    if (!looking && !asking) {
+      continue;
+    }
+    for (; (writes[seen + 1] ?? Infinity) <= now; seen += 1) {
+      segment(now, 1, seen + 1);
+    }
+    if (!asking) {
+      continue;
+    }
+    const listed = entriesOf(text(now));
+    if (now > 99 && listed.at(-1)?.slate === true) {
+      slateFrom = Math.min(slateFrom, now);
+    }
+    for (const [position, entry] of listed.entries()) {
+      if (entry.slate || listedAt.has(entry.uri)) {
+        continue;
+      }
+      listedAt.set(entry.uri, now);
+      if (listed[position - 1]?.slate === true && now > 99) {
+        backs.push({ index: Number(/seg_(\d+)/.exec(entry.uri)?.[1]), at: now });
+      }
+    }
+  }
+  return { writes, listedAt, backs, slateFrom };
+}
+
+/** The ways the pipeline looks for segments and players ask in the tests of `playedAtOnce`, in seconds. */
+const LOOK_MODELS = [
+  ["the pipeline looks every 0.1 seconds, as players ask so often", 0.1, 0.1],
+  ["the pipeline looks every second, and a player asks every two", 1, 2],
+] as const;
 
 /**
  * Notes in `listedAt` when each entry of `listed` was first listed, at `now`, and returns `now` if
@@ -1518,56 +1613,64 @@ describe("ExternalPlaylist", () => {
   });
 
   it("waits for all a stream that is behind delivers at once after a pause, and lists the newest of it", () => {
-    // The stream stops at 20 and comes back 17 seconds late, and stays so. At 99 the engine sends
-    // nothing for eight seconds, and then all the stream is behind at once: ffmpeg writes its 13
-    // segments within two seconds, 13 times real time, and in its own time from 109 on.
-    const writes: number[] = [];
-    for (let t = 0; t <= 160; t = Math.round((t + 0.01) * 100) / 100) {
-      while (2 * (writes.length + 1) <= behindThenAtOnce(t) + 1e-9) {
-        writes.push(t);
+    // The stream stops at 20 and comes back 17 or 30 seconds late, and stays so. At 99 the engine
+    // sends nothing for 6 to 12 seconds, and then all the stream is behind at once: ffmpeg writes it
+    // at 7 to 15 times real time, or as it comes in lots of 9 seconds 1 to 3 seconds apart, or 9
+    // seconds of it and the rest 1 to 4 seconds later at 3 or 13 times real time, and then in its
+    // own time.
+    const ways: AtOnce[] = [];
+    for (const behind of [17, 30]) {
+      for (const pause of [6, 8, 10, 12]) {
+        ways.push(
+          ...[7, 9, 11, 13, 15].map((rate) => ({ behind, pause, rate })),
+          ...[1, 1.5, 2, 2.5, 3].map((gap) => ({ behind, pause, rate: 0, lot: 9, gap })),
+          ...[3, 13].flatMap((rate) => [1, 2, 3, 4].map((after) => ({ behind, pause, rate, first: 9, after }))),
+        );
       }
     }
-    const lastOfBacklog = writes.findLastIndex((one) => one < 109.1);
-    for (const [name, looks, asks] of [
-      ["the pipeline looks every 0.1 seconds, as players ask so often", 0.1, 0.1],
-      ["the pipeline looks every second, and a player asks every two", 1, 2],
-    ] as const) {
-      const { text, segment } = make();
-      let seen = -1;
-      const listedAt = new Map<string, number>();
-      const firstAfterSlate: number[] = [];
-      for (let tick = 1; tick <= 1600; tick += 1) {
-        const now = tick / 10;
-        const looking = Number.isSafeInteger(Math.round(now * 1000) / Math.round(looks * 1000));
-        const asking = Number.isSafeInteger(Math.round(now * 1000) / Math.round(asks * 1000));
-        if (!looking && !asking) {
-          continue;
-        }
-        for (; (writes[seen + 1] ?? Infinity) <= now; seen += 1) {
-          segment(now, 1, seen + 1);
-        }
-        if (!asking) {
-          continue;
-        }
-        const listed = entriesOf(text(now));
-        for (const [position, entry] of listed.entries()) {
-          if (entry.slate || listedAt.has(entry.uri)) {
-            continue;
+    for (const how of ways) {
+      for (const [model, looks, asks] of LOOK_MODELS) {
+        const name = `${JSON.stringify(how)}, ${model}`;
+        const { writes, listedAt, backs } = playedAtOnce(how, looks, asks);
+        // The newest of what the stream delivers faster than in real time: later than its own time.
+        const lastOfBacklog = writes.findLastIndex((one, index) => one > 2 * (index + 1) + 0.05);
+        // The slate waits until the stream delivered all it is behind, and then the newest of it
+        // are listed: the jump in its video is over at once, and the files of the ones listed last.
+        // (The ones listed before the pause go sooner: 22 seconds after they were listed, as ffmpeg
+        // writes the backlog within a few seconds.)
+        expect(backs, name).toHaveLength(1);
+        expect(backs[0]?.index, name).toBeGreaterThanOrEqual(lastOfBacklog - 2);
+        const after = new Map([...listedAt].filter(([, at]) => at >= 99 + how.pause));
+        expect(shortestLife(writes, after), name).toBeGreaterThanOrEqual(CATCH_UP_LIFE);
+      }
+    }
+  });
+
+  it("gives way to a stream that is behind once it delivers no more than the time that passed after a pause", () => {
+    // As above, but after its pause of eight seconds the stream delivers that and four seconds
+    // more at once, at 107, and the rest of what it is behind at 1.3 to 3 times real time.
+    for (const behind of [16, 20]) {
+      for (const rate of [1.3, 1.4, 1.5, 2, 3]) {
+        const how = { behind, pause: 8, rate, first: 12 };
+        for (const [model, looks, asks] of LOOK_MODELS) {
+          const name = `${JSON.stringify(how)}, ${model}`;
+          const { writes, listedAt, backs } = playedAtOnce(how, looks, asks);
+          const lastOfBacklog = writes.findLastIndex((one, index) => one > 2 * (index + 1) + 0.05);
+          expect(backs, name).toHaveLength(1);
+          if (rate <= 2) {
+            // At up to twice real time it makes up slowly: the slate gives way within nine seconds
+            // of its burst, long before it made up for all it is behind.
+            expect(backs[0]?.at, name).toBeLessThanOrEqual(116);
+            expect(writes[lastOfBacklog], name).toBeGreaterThan(118);
+          } else {
+            // Faster, the slate waits for all of it, as above.
+            expect(backs[0]?.index, name).toBeGreaterThanOrEqual(lastOfBacklog - 2);
           }
-          listedAt.set(entry.uri, now);
-          if (listed[position - 1]?.slate === true && now > 99) {
-            firstAfterSlate.push(Number(/seg_(\d+)/.exec(entry.uri)?.[1]));
-          }
+          // Either way, the files of what is listed from then on last.
+          const after = new Map([...listedAt].filter(([, at]) => at >= 107));
+          expect(shortestLife(writes, after), name).toBeGreaterThanOrEqual(FILE_LIFE);
         }
       }
-      // The slate waits until the stream delivered all it is behind, and then the newest of it
-      // are listed: the jump in its video is over at once, and the files of the ones listed last.
-      // (The ones listed before the pause go sooner: 22 seconds after they were listed, as ffmpeg
-      // writes the 13 within two seconds.)
-      expect(firstAfterSlate, name).toHaveLength(1);
-      expect(firstAfterSlate[0], name).toBeGreaterThanOrEqual(lastOfBacklog - 2);
-      const after = new Map([...listedAt].filter(([, at]) => at >= 107));
-      expect(shortestLife(writes, after), name).toBeGreaterThanOrEqual(FILE_LIFE);
     }
   });
 
@@ -2038,6 +2141,7 @@ describe("ExternalPlaylist", () => {
         ...WIDER_SEEDS,
         ...BEHIND_SEEDS,
         ...NEW_RUN_SEEDS,
+        ...MADE_UP_SEEDS,
       ]) {
         const random = seeded(seed);
         const written = pausingStream(random, RANDOM_STREAM_SECONDS);
