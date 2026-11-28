@@ -249,16 +249,18 @@ const WAITS_AT_MOST = 10 + 2 * (2.5 + NOTICE_SLACK);
 const FILES_KEPT = 10;
 /**
  * A file a playlist lists while it counts is there for this long at least, in seconds, in the random
- * test: ffmpeg keeps a run's newest ten files, which a run that writes faster than in real time,
- * or segments of 1.5 seconds, go through sooner. VLC 3.0.20 asked for the second segment behind a
- * discontinuity up to 14 seconds after it was listed (see the notes' limits).
+ * test, but for the first behind a discontinuity, which a player fetches at once: ffmpeg keeps a
+ * run's newest ten files, which a run that writes faster than in real time, or segments of 1.5
+ * seconds, go through sooner. So it is in the tests of catch-ups at 1.25 to 1.45 times real time.
+ * VLC 3.0.20 asked for the second segment behind a discontinuity 8 to 16.5 seconds after it was
+ * listed, as long as it had to play, so that is not all a player may need (see the notes' limits).
  */
 const FILE_LIFE = 12;
 /**
- * The same for the tests whose streams' segments last two seconds: what VLC 3.0.20 took at most to
- * ask for the second segment behind a discontinuity, during catch-ups at 1.15 to 1.25 times real time.
+ * The same for the tests whose streams' segments last two seconds and make up for a pause at 1.05
+ * to 1.2 times real time, or at 1.5 to 3, for every file listed.
  */
-const VLC_ASKS_WITHIN = 14;
+const CATCH_UP_LIFE = 14;
 
 /**
  * How long each of the random test's streams lasts, in seconds: long enough for a few pauses after
@@ -272,6 +274,13 @@ const RANDOM_STREAM_SECONDS = 900;
  * (`Count.carried`).
  */
 const WIDER_SEEDS = [4265, 5335, 7417, 7728];
+/**
+ * And two more from those runs: they list more than the time that passed and four seconds where a
+ * count is not handed how far behind the stream was when it started (`ExternalPlaylist.behind`).
+ * Both lists hold for this test's streams as `pausingStream` makes them: where it changes, they
+ * are to be picked again, from runs that take those rules out one at a time.
+ */
+const BEHIND_SEEDS = [1763, 2277];
 /** How long the random test may take: 150 streams of fifteen minutes take about a second here, and a few on a slow CI runner. */
 const LONG_TEST_MS = 30_000;
 
@@ -305,6 +314,30 @@ function catchingUp(
     }
   }
   return { writes, done };
+}
+
+/**
+ * When a stream's first 700 segments of two seconds are written: in their own time from 0, but at
+ * each of `pauses`, oldest first, the engine sends nothing for a while from `at` on, and the stream
+ * then makes up for all it is behind at `rate` times real time.
+ */
+function stalling(rate: number, pauses: readonly { at: number; lasting: number }[]): number[] {
+  const writes: number[] = [];
+  const left = [...pauses];
+  let clock = 0;
+  let behind = 0;
+  for (let index = 0; index < 700; index += 1) {
+    for (let pause = left[0]; pause !== undefined && clock + 2 > pause.at; pause = left[0]) {
+      left.shift();
+      clock += pause.lasting;
+      behind += pause.lasting;
+    }
+    const gained = Math.min(2 - 2 / rate, behind);
+    clock += 2 - gained;
+    behind -= gained;
+    writes.push(clock);
+  }
+  return writes;
 }
 
 /**
@@ -367,8 +400,8 @@ function placeOf(listed: readonly Entry[], durations: Map<number, number>, name:
  * pipeline looks once a second, at `phase`, and when a player asks, every two seconds. Each is of
  * the ffmpeg run in `runs` (all of the first where it has none), whose segments are numbered from
  * its first. How much more than the time that passed the playlist listed at most since each of the
- * stream's segments in `after` (its last before a pause), and when each file it listed was first
- * listed.
+ * stream's segments in `after` (its last before a pause), when each file it listed was first
+ * listed, and which it listed right behind a discontinuity, the ones a player fetches at once.
  */
 function playedSlowly(
   writes: readonly number[],
@@ -376,7 +409,13 @@ function playedSlowly(
   after: readonly number[],
   until: number,
   runs: readonly number[] = [],
-): { most: number[]; listedAt: Map<string, number>; at: (seconds: number) => string; segment: Made["segment"] } {
+): {
+  most: number[];
+  listedAt: Map<string, number>;
+  behindBreaks: Set<string>;
+  at: (seconds: number) => string;
+  segment: Made["segment"];
+} {
   const { at, text, segment } = make();
   const fileOf = (write: number): [run: number, index: number] => {
     const run = runs[write] ?? 1;
@@ -387,6 +426,7 @@ function playedSlowly(
   const places = after.map(() => NaN);
   const most = after.map(() => -Infinity);
   const listedAt = new Map<string, number>();
+  const behindBreaks = new Set<string>();
   const durations = new Map<number, number>();
   for (let now = 1; now <= until; now += 0.25) {
     const asks = now % 2 === 0;
@@ -403,8 +443,12 @@ function playedSlowly(
     if (!asks) {
       continue;
     }
-    const listed = entriesOf(text(now));
+    const playlist = text(now) ?? "";
+    const listed = entriesOf(playlist);
     firstListed(listed, now, listedAt, 0);
+    for (const [, uri = ""] of playlist.matchAll(/#EXT-X-DISCONTINUITY\n#EXTINF:[\d.]+,\n(\S+)/g)) {
+      behindBreaks.add(uri);
+    }
     for (const [which, index] of after.entries()) {
       const [run, number] = fileOf(index);
       const name = `g${String(run)}/full/seg_${String(number).padStart(6, "0")}.ts`;
@@ -418,13 +462,23 @@ function playedSlowly(
         : (most[which] ?? -Infinity);
     }
   }
-  return { most, listedAt, at, segment };
+  return { most, listedAt, behindBreaks, at, segment };
 }
 
-/** How long the files of the stream's segments that were listed at `listedAt` were there at least, written at `writes`. */
-function shortestLife(writes: readonly number[], listedAt: ReadonlyMap<string, number>): number {
+/**
+ * How long the files of the stream's segments that were listed at `listedAt` were there at least,
+ * written at `writes`, but for the ones in `fetchedAtOnce`.
+ */
+function shortestLife(
+  writes: readonly number[],
+  listedAt: ReadonlyMap<string, number>,
+  fetchedAtOnce: ReadonlySet<string> = new Set(),
+): number {
   let shortest = Infinity;
   for (const [uri, listed] of listedAt) {
+    if (fetchedAtOnce.has(uri)) {
+      continue;
+    }
     const index = Number(/g1\/full\/seg_(\d+)/.exec(uri)?.[1] ?? NaN);
     // ffmpeg deletes a segment's file when it writes the tenth newer one.
     shortest = Math.min(shortest, (writes[index + 10] ?? Infinity) - listed);
@@ -1154,17 +1208,22 @@ describe("ExternalPlaylist", () => {
         // After the slate the stream is in one piece, and every file listed is there for as long
         // as VLC may take to ask for it.
         expect(at(110).split(" | ").at(-1), where).toMatch(/^g1:\d+( g1:\d+)*$/);
-        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(VLC_ASKS_WITHIN);
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(CATCH_UP_LIFE);
       }
     }
   });
 
-  it("counts on for a stream that came back late until it left out as much as the slate stood in for", () => {
-    // Three seconds late, the count left out as much as the slate stood in for, give or take two
-    // seconds, and ended: all of it is listed.
-    expect(backlog(3)).toBe("g1:55 g1:56 g1:57 g1:58 g1:59 g1:60");
-    // Five seconds late, it would put the playlist four seconds ahead of the time that passed: the
-    // count goes on, and leaves out what doesn't fit.
+  it("counts on for a stream that came back late until it left out as much as the slate stood in for, and is no longer behind", () => {
+    // Its first two segments came two seconds earlier than the ones after the pause would in their
+    // own time, so it is two seconds more behind them than `late`. Not late, the count left out as
+    // much as the slate stood in for, give or take two seconds, and the stream is no more behind
+    // than its segments can be noticed late: the count ended, and all of it is listed.
+    expect(backlog(0)).toBe("g1:57 g1:58 g1:59 g1:60 g1:61 g1:62");
+    // Three seconds late, the count left out as much, but the stream is still behind: the count
+    // goes on, and leaves out what doesn't fit when the stream sends those seconds.
+    expect(backlog(3)).toBe("g1:53 g1:54 g1:55 g1:56 g1:57 | g1:60");
+    // Five seconds late, the count never left out as much: it would put the playlist four seconds
+    // ahead of the time that passed.
     expect(backlog(5)).toBe("g1:52 g1:53 g1:54 g1:55 g1:56 | g1:59");
     // So it does where the stream pauses again meanwhile, and makes up for that pause at once:
     // the count after that pause owes what the stream is still behind, and leaves those seconds out.
@@ -1182,8 +1241,29 @@ describe("ExternalPlaylist", () => {
         expect(done, where).toBeLessThan(350);
         expect(most[0], where).toBeLessThanOrEqual(4);
         // At that pace every file listed is there long enough.
-        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(VLC_ASKS_WITHIN);
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(CATCH_UP_LIFE);
         // Once it made up for its pause, the count ends: all it delivers is listed again.
+        for (const index of [200, 201, 202]) {
+          segment(401, 1, index);
+        }
+        expect(at(401), where).toMatch(/g1:199 g1:200 g1:201 g1:202$/);
+      }
+    }
+  });
+
+  it("counts until the stream made up for its pause at 1.25 to 1.45 times real time, whose files go sooner", () => {
+    for (const rate of [1.25, 1.3, 1.35, 1.38, 1.42]) {
+      for (const phase of [0, 0.25, 0.5, 0.75]) {
+        const where = `${String(rate)}x, looks at ${String(phase)}`;
+        const { writes, done } = catchingUp(rate, 200);
+        const { most, listedAt, behindBreaks, at, segment } = playedSlowly(writes, phase, [9], 400);
+        expect(done, where).toBeLessThan(150);
+        expect(most[0], where).toBeLessThanOrEqual(4);
+        // The wait ends just before the stream made up for its pause, as it doesn't come in its
+        // own time, and ffmpeg writes the last of what it missed fast: those files go sooner. But
+        // for the first behind a discontinuity, which a player fetches at once, every file listed
+        // is there for 12 seconds (see the notes' limits).
+        expect(shortestLife(writes, listedAt, behindBreaks), where).toBeGreaterThanOrEqual(FILE_LIFE);
         for (const index of [200, 201, 202]) {
           segment(401, 1, index);
         }
@@ -1204,7 +1284,7 @@ describe("ExternalPlaylist", () => {
         // Since the stream's last segment before either pause, the playlist never lists more than
         // the time that passed and four seconds.
         expect(Math.max(...most), where).toBeLessThanOrEqual(4);
-        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(VLC_ASKS_WITHIN);
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(CATCH_UP_LIFE);
         // Once it made up for both, nothing it delivers in its own time is left out.
         const uris = listedAt.keys().toArray();
         const missing = writes
@@ -1230,10 +1310,10 @@ describe("ExternalPlaylist", () => {
         const { most, listedAt } = playedSlowly(writes, phase, [9, ...before], 840);
         expect(done, where).toBeLessThan(820);
         // Since the stream's last segment before each pause, the playlist never lists more than the
-        // time that passed and four seconds: the count that starts with the third pause owes what
-        // the stream is still behind of all three.
+        // time that passed and four seconds: the count that starts with the third pause goes on
+        // until the stream made up for all three.
         expect(Math.max(...most), where).toBeLessThanOrEqual(4);
-        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(VLC_ASKS_WITHIN);
+        expect(shortestLife(writes, listedAt), where).toBeGreaterThanOrEqual(CATCH_UP_LIFE);
       }
     }
   });
@@ -1267,7 +1347,50 @@ describe("ExternalPlaylist", () => {
     }
   });
 
-  it("starts the next count owing nothing, not less, where the stream is ahead when the slate takes over again", () => {
+  it("counts on where the stream is still behind when its count owes no more, into the next count", () => {
+    for (const stalls of [2, 5]) {
+      for (const phase of [0, 0.25, 0.5, 0.75]) {
+        const where = `${String(stalls)} stalls, looks at ${String(phase)}`;
+        // The engine sends nothing for four and a half seconds every thirty from 30, as often as
+        // `stalls`, and then for eight, and the stream makes up for all of it at 1.05 times real
+        // time. The slate takes over at some of the stalls, and the count that starts there left
+        // out as much as the slate stood in for long before the stream made up for the stalls.
+        const end = 30 + 30 * stalls;
+        const writes = stalling(1.05, [
+          ...Array.from({ length: stalls }, (_, index) => ({ at: 30 + 30 * index, lasting: 4.5 })),
+          { at: end, lasting: 8 },
+        ]);
+        const { most } = playedSlowly(writes, phase, [writes.findLastIndex((one) => one < end)], 1300);
+        // Since the stream's last segment before the last pause, the playlist never lists more than
+        // the time that passed and four seconds: the count goes on while the stream is behind, and
+        // the next one owes what it still is.
+        expect(most[0], where).toBeLessThanOrEqual(4);
+      }
+    }
+  });
+
+  it("counts how far behind pauses too short for the slate left the stream, into the next count", () => {
+    for (const rate of [1.03, 1.05]) {
+      for (const phase of [0, 0.25, 0.5, 0.75]) {
+        const where = `${String(rate)}x, looks at ${String(phase)}`;
+        // The engine sends nothing for two and a half seconds every twenty from 30, four times:
+        // the slate doesn't take over, as no segment comes more than four and a half seconds after
+        // the one before. The stream makes up for those slowly, and is still behind when the
+        // engine sends nothing for eight seconds at 120.
+        const writes = stalling(rate, [
+          ...Array.from({ length: 4 }, (_, index) => ({ at: 30 + 20 * index, lasting: 2.5 })),
+          { at: 120, lasting: 8 },
+        ]);
+        const { most } = playedSlowly(writes, phase, [writes.findLastIndex((one) => one < 120)], 1300);
+        // The count that starts with the slate owes what the stream was behind then: since the
+        // stream's last segment before it, the playlist never lists more than the time that passed
+        // and four seconds.
+        expect(most[0], where).toBeLessThanOrEqual(4);
+      }
+    }
+  });
+
+  it("counts on until the stream made up for its pause where it is ahead when the slate takes over again", () => {
     for (const rate of [1.05, 1.08, 1.1]) {
       for (const phase of [0, 0.25, 0.5, 0.75]) {
         const where = `${String(rate)}x, looks at ${String(phase)}`;
@@ -1728,7 +1851,7 @@ describe("ExternalPlaylist", () => {
   it(
     "never lists more than the time that passed since the stream's last segment before the slate",
     () => {
-      for (const seed of [...Array.from({ length: 150 }, (_, index) => index + 1), ...WIDER_SEEDS]) {
+      for (const seed of [...Array.from({ length: 150 }, (_, index) => index + 1), ...WIDER_SEEDS, ...BEHIND_SEEDS]) {
         const random = seeded(seed);
         const { text, segment } = make();
         const written = pausingStream(random, RANDOM_STREAM_SECONDS);
