@@ -58,6 +58,7 @@ All settings live in `.env`. `.env.example` explains each one. The most importan
 | `PATH_STRATEGY`             | `sticky-best`          | `sticky-best` moves a stream only when its path fails. `round-robin` spreads streams over the paths that are up. |
 | `STALE_SOURCE_SECONDS`      | `60`                   | A broadcast whose live edge doesn't move for this long counts as stopped: its stream waits for it.               |
 | `ACESWARM_ENGINES_INTERNAL` | `false`                | Set to `true` on Podman.                                                                                         |
+| `HLS_TMPFS_SIZE`            | `1g`                   | Memory for the video the transcoder serves: about 45 MB per 8 Mbit/s stream. An older `.env` has `512m`.         |
 
 ### Raspberry Pi 5
 
@@ -145,7 +146,7 @@ Every stream normally gets an engine of its own. Turn on **One engine per path**
 
 - **One stream failing leaves the engine alone.** Restarting a shared engine would interrupt every stream on it, so a failing stream only restarts its own session, and moves to another path if that doesn't help.
 - **The engine is replaced when:**
-  - the stream someone is watching full screen fails,
+  - the stream someone is watching fails (full screen in the page, or in an [external player](#external-players)),
   - more than `SHARED_ENGINE_MAX_FAILURES` (2) of its streams fail within `SHARED_ENGINE_FAILURE_WINDOW_SECONDS` (60),
   - every stream on it is failing, or
   - it stopped answering.
@@ -170,8 +171,9 @@ A player outside the page, such as VLC, reports nothing itself. It counts while 
 - **Elsewhere** the browser downloads a small `.m3u` file named after the stream. Open it from the browser's downloads. A browser in full screen doesn't show them, so the player names the file and says where it is; leave full screen to get to it. Where a browser can't download a file, which a TV's browser may not, there is nothing to open: type the address the player shows into the other player, or go back with **Watch here again**.
 - **The page stops its own video at once**, so that only one player decodes the stream and plays its sound. **Watch here again** plays it in the page again. For a second after either, **Open in external player**, **Watch here again** and **Copy link** ignore another press, so that a double click or a second press of OK doesn't undo the first.
 - **Copy link**, next to it, copies the stream's address, for a browser that can't hand the stream over: open the address in the player as a network stream. Where the browser doesn't let the page copy, the player shows the address under the stream's name for two minutes instead, to write it down. Once the stream is handed over, the player shows the address too.
-- **External players have an address of their own**, `/hls/<stream id>/external/index.m3u8`, which the button and **Copy link** give out. Whoever plays it counts under [Who is watching](#who-is-watching). Two players of the same kind that play the same stream and reach Ace Swarm from one address count as one: two on one computer, or any two behind a reverse proxy.
-- **For now, an external player ends where the page's player waits**: when the stream brings no new video for a while (from about 10 seconds for mpv and other players built on ffmpeg, depending on their version; VLC waits longer), when the stream waits for its broadcast, and when Ace Swarm itself restarts. In VLC, turn **Loop** on and it opens the stream again by itself.
+- **External players have an address of their own**, `/hls/<stream id>/external/index.m3u8`, which the button and **Copy link** give out. Whoever plays it counts under [Who is watching](#who-is-watching). Two players of the same kind that play the same stream and reach Ace Swarm from one address count as one: two on one computer, or any two where Ace Swarm sees one address for everybody, as it does behind a reverse proxy, and with a container runtime that forwards published ports from an address of its own (rootless Podman does).
+- **While a stream has no video, an external player shows a picture that says "Waiting for video"**, without sound, and goes on with the video by itself once there is some. The page's player waits when a stream stops; other players give up, some within 10 seconds. So their playlist never stops: it has the picture from the moment the stream is enabled until its first video, whenever no new video came for about 5 seconds (longer for a broadcast whose key frames are far apart), and for as long as the stream waits for its broadcast. The picture can also show during a short pause that the player would have played through from what it had buffered, and it stays until the stream has made up for what it missed: a second or so where the stream sends that at once, a few seconds where a few seconds of its data were lost, longer where it sends what it missed faster than it plays, about 10 seconds where the stream goes on without it, and for as long as it comes slower than it plays. Video that comes late for the time the picture showed is left out for external players, which go on with the stream's newest video, where the page's player shows what the stream missed. The dashboard counts how often it took the place of a stream's video (**Waiting picture shown in range**).
+- **A restart of Ace Swarm still ends an external player**, and so does disabling the stream. In VLC, turn **Loop** on and it opens the stream again by itself.
 
 ## Hot standby
 

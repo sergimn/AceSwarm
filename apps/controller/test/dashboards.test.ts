@@ -6,6 +6,7 @@ import { EngineRuns } from "../src/engine-runs.ts";
 import { ControllerMetrics } from "../src/metrics.ts";
 
 interface Panel {
+  id: number;
   title: string;
   description?: string;
   /** The panel's least interval ("Min interval"). */
@@ -44,6 +45,17 @@ function controllerMetrics(): Set<string> {
   );
   return new Set(registry.getMetricsAsArray().map(({ name }) => name));
 }
+
+test("every panel of a dashboard has an id of its own", () => {
+  for (const file of ["aceswarm.json", "aceswarm-streams.json"]) {
+    // Grafana tells panels apart by their id: two with one id share links, edits and "View".
+    const ids = dashboard(file)
+      .panels.flatMap((panel) => [panel, ...(panel.panels ?? [])])
+      .map(({ id }) => id);
+    expect(ids.length).toBeGreaterThan(5);
+    expect(ids.filter((id, index) => ids.indexOf(id) !== index)).toEqual([]);
+  }
+});
 
 test("the per-stream dashboard only asks for metrics the controller exports", () => {
   const exported = controllerMetrics();

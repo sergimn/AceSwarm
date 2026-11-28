@@ -43,6 +43,9 @@ export function segmentIndex(uri: string): number {
 /** How many generations a playlist remembers it went on from: far more than could still write segments. */
 const MAX_LEFT_GENERATIONS = 64;
 
+/** Told of each segment a playlist takes, as it lists it, with the generation it is of and the time it came. */
+export type OnSegment = (generation: number, segment: PlaylistSegment, at: number) => void;
+
 /**
  * A live playlist that survives source changes. Each ffmpeg run ("generation") writes its own
  * playlist; this one stitches them together with `#EXT-X-DISCONTINUITY` markers and keeps the
@@ -51,6 +54,8 @@ const MAX_LEFT_GENERATIONS = 64;
  */
 export class VirtualPlaylist {
   private readonly windowSize: number;
+  private readonly onSegment: OnSegment | undefined;
+  private readonly keepChangesMs: number;
   private segments: VirtualSegment[] = [];
   private mediaSequence = 0;
   private discontinuitySequence = 0;
@@ -59,12 +64,26 @@ export class VirtualPlaylist {
   /** The generations whose segments were followed by another one's, oldest first. */
   private readonly left = new Set<number>();
 
-  constructor(windowSize: number) {
+  /**
+   * With `keepChangesMs`, a discontinuity stays listed for that long, with the segment before it,
+   * although more than `windowSize` segments follow it: a player that reads the playlist again only
+   * after that many came must still find the discontinuity in it. Once the file of the segment
+   * before it is gone, it stays at the head (see `dropGone`). Without, the playlist lists no more
+   * than `windowSize` segments, ever.
+   */
+  constructor(windowSize: number, onSegment?: OnSegment, keepChangesMs = 0) {
     this.windowSize = windowSize;
+    this.onSegment = onSegment;
+    this.keepChangesMs = keepChangesMs;
   }
 
   get length(): number {
     return this.segments.length;
+  }
+
+  /** How long the longest segment it lists lasts, in seconds: 0 when it lists none. */
+  get longest(): number {
+    return Math.max(0, ...this.segments.map((segment) => segment.duration));
   }
 
   /**
@@ -88,20 +107,28 @@ export class VirtualPlaylist {
       if (discontinuity) {
         this.leave(previous);
       }
-      this.segments.push({
-        uri: `${uriPrefix}${segment.uri}`,
-        duration: segment.duration,
-        discontinuity,
-        addedAt: now,
-      });
+      const uri = `${uriPrefix}${segment.uri}`;
+      this.segments.push({ uri, duration: segment.duration, discontinuity, addedAt: now });
       this.lastGeneration = generation;
       this.lastIndex = index;
       added += 1;
+      this.onSegment?.(generation, { uri, duration: segment.duration }, now);
     }
-    while (this.segments.length > this.windowSize) {
+    while (this.segments.length > this.windowSize && !this.keepsHead(now)) {
       this.dropHead();
     }
     return added;
+  }
+
+  /**
+   * Whether the first segment stays although the playlist is full: it or the one after it is
+   * behind a discontinuity that is to stay listed (see the constructor). A discontinuity before the
+   * first segment is written out only where that segment kept its own (see `dropHead`).
+   */
+  private keepsHead(now: number): boolean {
+    const kept = (segment: VirtualSegment | undefined): boolean =>
+      segment?.discontinuity === true && now - segment.addedAt < this.keepChangesMs;
+    return this.keepChangesMs > 0 && (kept(this.segments[0]) || kept(this.segments[1]));
   }
 
   private leave(generation: number): void {
@@ -122,7 +149,22 @@ export class VirtualPlaylist {
     }
   }
 
-  private dropHead(): void {
+  /**
+   * Drops the segments up to the last one whose file is gone, by `gone`: a player must not be sent
+   * to a file that is not there. Only the first segments can leave a live playlist, so the ones
+   * before it go too. A discontinuity behind them stays, before the first segment: the files
+   * behind it are there, and a player that played up to it reads the playlist again later (see
+   * the constructor).
+   */
+  dropGone(gone: (uri: string) => boolean): void {
+    const last = this.segments.findLastIndex((segment) => gone(segment.uri));
+    for (let dropped = 0; dropped <= last; dropped += 1) {
+      this.dropHead(true);
+    }
+  }
+
+  /** Drops the first segment. The discontinuity before the next one goes with it, but with `keepTag`. */
+  private dropHead(keepTag = false): void {
     const dropped = this.segments.shift();
     if (dropped === undefined) {
       return;
@@ -132,10 +174,10 @@ export class VirtualPlaylist {
       // It was the head with its own tag (added to an empty playlist): the tag leaves with it.
       this.discontinuitySequence += 1;
     }
-    if (this.segments[0]?.discontinuity !== true) {
+    if (keepTag || this.segments[0]?.discontinuity !== true) {
       return;
     }
-    // The tag at the new head is dropped from the output (see render), so count it here.
+    // The tag at the new head is dropped from the output, so count it here.
     this.discontinuitySequence += 1;
     this.segments[0] = { ...this.segments[0], discontinuity: false };
   }

@@ -62,10 +62,27 @@ test("the API waits until the orchestrator started; the HLS proxy doesn't", asyn
   await service.app.close();
 });
 
+/**
+ * Other ways to write the address of a stream's playlist for external players, which reach the
+ * transcoder as that playlist: percent-encoded letters, `..`, and `\` for `/`.
+ */
+const otherSpellings = (stream: string): string[] => [
+  `/hls/${stream}/%65xternal/index.m3u8`,
+  `/hls/${stream}/external/index%2Em3u8`,
+  `/hls/${stream}/external/%69ndex.m3u8?again`,
+  `/hls/%${stream.codePointAt(0)?.toString(16) ?? ""}${stream.slice(1)}/external/index.m3u8`,
+  `/hls/other1/../${stream}/external/index.m3u8`,
+  `/hls/${stream}/full/%2e%2e/external/index.m3u8`,
+  String.raw`/hls/${stream}\external\index.m3u8`,
+];
+
 test("whoever gets a stream's playlist for external players counts as its viewer; nothing else of the proxy does", async () => {
-  // A transcoder with one stream, which answers everything under it.
+  // A transcoder with one stream, which answers everything under it. As the real one, it has a
+  // playlist for external players for any stream it is asked about.
+  const asked: string[] = [];
   const transcoder = createServer((request, response) => {
-    const known = request.url?.startsWith("/hls/abcdef/") === true;
+    asked.push(request.url ?? "");
+    const known = request.url?.startsWith("/hls/abcdef/") === true || request.url?.includes("/external/index.m3u8");
     response.writeHead(known ? 200 : 404, { "content-type": known ? "application/vnd.apple.mpegurl" : "text/plain" });
     response.end(known ? "#EXTM3U\n" : "no such stream");
   });
@@ -77,7 +94,10 @@ test("whoever gets a stream's playlist for external players counts as its viewer
     transcoder.close();
   });
   const players: unknown[][] = [];
+  /** The streams that are enabled: `abcdef` is; `mnopqr` is in the list, disabled; `ghijkl` is not in it. */
+  const enabled = new Set(["abcdef"]);
   const orchestrator = {
+    hasExternalPlaylist: (stream: string) => enabled.has(stream),
     reportExternalPlayer: (...player: unknown[]) => {
       players.push(player);
     },
@@ -109,10 +129,65 @@ test("whoever gets a stream's playlist for external players counts as its viewer
   ]) {
     expect((await ask(url)).statusCode, url).toBe(200);
   }
-  // Neither does a playlist the player didn't get, or one it only asked about.
-  expect((await ask("/hls/ghijkl/external/index.m3u8")).statusCode).toBe(404);
+  // Neither does a playlist the player only asked about.
   expect((await ask("/hls/abcdef/external/index.m3u8", "curl/8.5.0", "HEAD")).statusCode).toBe(200);
   expect(players).toHaveLength(2);
+
+  // Only an enabled stream has that playlist. The transcoder is not asked about another: it would
+  // start one, with the slate in it, for a stream that plays nothing.
+  asked.length = 0;
+  for (const stream of ["ghijkl", "mnopqr"]) {
+    const refused = await ask(`/hls/${stream}/external/index.m3u8`);
+    expect(refused.statusCode, stream).toBe(404);
+    expect(refused.json(), stream).toEqual({ error: "no such stream" });
+  }
+  expect(asked).toEqual([]);
+  expect(players).toHaveLength(2);
+  // Its other addresses go to the transcoder as before, which knows what it has.
+  expect((await ask("/hls/mnopqr/full/index.m3u8")).statusCode).toBe(404);
+  expect(asked).toEqual(["/hls/mnopqr/full/index.m3u8"]);
+  // Enabled, it has one, and whoever gets it counts.
+  enabled.add("mnopqr");
+  expect((await ask("/hls/mnopqr/external/index.m3u8")).statusCode).toBe(200);
+  expect(players.at(-1)).toEqual(["mnopqr", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20"]);
+
+  // The same playlist's address can be written in other ways: the proxy's request to the
+  // transcoder resolves `..` and `\`, and the transcoder's router decodes the path. Those are read
+  // here as the transcoder reads them, so they are refused and counted like the plain one. They go
+  // over a real connection: `inject` would tidy the address before the proxy sees it.
+  await service.app.listen({ port: 0, host: "127.0.0.1" });
+  const own = (service.app.server.address() as AddressInfo).port;
+  const raw = async (path: string): Promise<number | undefined> =>
+    new Promise((resolve, reject) => {
+      get({ host: "127.0.0.1", port: own, path, headers: { "user-agent": "VLC/3.0.20 LibVLC/3.0.20" } }, (response) => {
+        response.resume();
+        response.on("end", () => {
+          resolve(response.statusCode);
+        });
+      }).on("error", reject);
+    });
+  asked.length = 0;
+  players.length = 0;
+  for (const path of otherSpellings("ghijkl")) {
+    expect(await raw(path), path).toBe(404);
+  }
+  expect(asked).toEqual([]);
+  for (const path of otherSpellings("abcdef")) {
+    expect(await raw(path), path).toBe(200);
+    expect(players.at(-1), path).toEqual(["abcdef", "127.0.0.1", "VLC/3.0.20 LibVLC/3.0.20"]);
+  }
+  expect(players).toHaveLength(otherSpellings("abcdef").length);
+  expect(asked).toHaveLength(otherSpellings("abcdef").length);
+
+  // Nothing but the transcoder's HLS files is to be had through the proxy, however it is written.
+  asked.length = 0;
+  for (const path of ["/hls/../pipelines", "/hls/%2e%2e/metrics", String.raw`/hls/abcdef/..\..\pipelines`]) {
+    expect(await raw(path), path).toBe(404);
+  }
+  expect(asked).toEqual([]);
+  // Nor from another host's address: it is no address of the transcoder.
+  expect(await raw("http://elsewhere.example/hls/abcdef/full/index.m3u8")).toBe(502);
+  expect(asked).toEqual([]);
 });
 
 test("restarting a stream with no run says whether it is disabled, not running yet or unknown", async () => {

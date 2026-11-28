@@ -67,13 +67,14 @@ jobs:
           docker cp "$container:/ffmpeg" "$RUNNER_TEMP/ffmpeg"
           docker rm "$container"
           "$RUNNER_TEMP/ffmpeg" -version | head -n 1
-      # Also runs the full output that stops on a broadcast without key frames, and the check that
-      # the transcoder finds the key frames ffmpeg can cut a copy at, on the same binary.
+      # Also runs the full output that stops on a broadcast without key frames, the check that the
+      # transcoder finds the key frames ffmpeg can cut a copy at, and the slate for players outside
+      # the page, on the same binary.
       # One file at a time: the first two time real ffmpeg runs, which must not compete for the CPU.
       - run: >-
           npx vitest run --no-file-parallelism
           apps/transcoder/test/ffmpeg-gaps.test.ts apps/transcoder/test/ffmpeg-full-stall.test.ts
-          apps/transcoder/test/ffmpeg-cut-points.test.ts
+          apps/transcoder/test/ffmpeg-cut-points.test.ts apps/transcoder/test/ffmpeg-slate.test.ts
         env:
           FFMPEG_BIN: ${{ runner.temp }}/ffmpeg
 

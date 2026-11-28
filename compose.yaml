@@ -165,7 +165,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs:
       # Writable by the transcoder user on both Docker and Podman (Podman rejects uid=/gid= here).
-      - /hls:mode=1777,size=${HLS_TMPFS_SIZE:-512m}
+      - /hls:mode=1777,size=${HLS_TMPFS_SIZE:-1g}
       - /tmp:size=16m
     networks:
       # The controller calls the API by this backend-only name. Requests from the engines network

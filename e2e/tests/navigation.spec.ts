@@ -362,14 +362,15 @@ test("counts a player outside the page as a viewer while it asks for the stream'
   const stream = (await snapshot(request)).streams.find(({ name }) => name === "Channel 12");
   expect(stream).toBeDefined();
   const { id, hls } = stream!;
-  /** Who watches the stream: each viewer's id and device, in the order they came. */
+  /** Who watches the stream: each viewer's id and device, in the order each was last heard from. */
   const watching = async (): Promise<ViewerView[]> =>
     ((await (await request.get("/api/viewers")).json()) as ViewerView[]).filter((viewer) => viewer.stream === id);
   const devices = async (): Promise<string[]> => (await watching()).map(({ device }) => device);
   const count = async (): Promise<number | undefined> => (await streamById(request, id))?.viewers;
 
   // The page's own playlist counts nobody: the page reports itself, and tests fetch it too.
-  expect((await request.get(hls.full)).ok()).toBe(true);
+  // (It has none for a moment while the stream recovers from a pause: then the next request counts.)
+  await expect.poll(async () => (await request.get(hls.full)).ok(), { timeout: 30_000 }).toBe(true);
   expect(await watching()).toEqual([]);
 
   // Two players, by what they call themselves.
@@ -381,8 +382,14 @@ test("counts a player outside the page as a viewer while it asks for the stream'
     const playlist = await vlc.get(hls.external);
     expect(playlist.ok(), await playlist.text()).toBe(true);
     expect(playlist.headers()["content-type"]).toContain("application/vnd.apple.mpegurl");
-    // It lists the full screen output's segments, at addresses that work from this playlist's.
-    const newest = (await playlist.text()).split("\n").findLast((line) => line.endsWith(".ts"));
+    // It lists the full screen output's segments, at addresses that work from this playlist's. (Its
+    // newest one is the slate's instead while the stream's video is late; then the next one counts.)
+    const newestListed = async (): Promise<string | undefined> =>
+      (await (await vlc.get(hls.external)).text()).split("\n").findLast((line) => line.endsWith(".ts"));
+    await expect.poll(newestListed, { timeout: 30_000 }).toMatch(/^\.\.\/g\d+\/full\/seg_\d+\.ts$/);
+    const newest = (await (await vlc.get(hls.external)).text())
+      .split("\n")
+      .findLast((line) => /\/full\/seg_\d+\.ts$/.test(line));
     expect(newest).toMatch(/^\.\.\/g\d+\/full\/seg_\d+\.ts$/);
     const segment = await vlc.get(new URL(newest!, new URL(hls.external, baseURL)).href);
     expect(segment.ok()).toBe(true);
@@ -804,9 +811,25 @@ test("ends the hand-over when the stream is disabled, and plays it in the page o
     await expect(copy).toBeHidden();
     await expect(player.getByRole("button", { name: "Back" })).toBeFocused();
     expect(await videoSource()).toBeNull();
+    // A disabled stream has no playlist for players outside the page.
+    expect((await request.get(stream!.hls.external)).status()).toBe(404);
   } finally {
     await enabled(true);
   }
+  // Enabled, it has one long before its video, as soon as its earlier run is gone (the playlist of
+  // that run goes with it): with the slate, which a player can fetch.
+  let slate: string | undefined;
+  const newestListed = async (): Promise<string | undefined> => {
+    const waiting = await request.get(stream!.hls.external);
+    slate = waiting.ok() ? (await waiting.text()).split("\n").findLast((line) => line.endsWith(".ts")) : undefined;
+    return slate ?? `status ${String(waiting.status())}`;
+  };
+  await expect.poll(newestListed, { timeout: 30_000 }).toMatch(/^\.\.\/slate\/seg_\d+\.ts$/);
+  const segment = await request.get(new URL(slate!, new URL(stream!.hls.external, "http://host")).pathname);
+  expect(segment.ok()).toBe(true);
+  expect(segment.headers()["content-type"]).toBe("video/mp2t");
+  // MPEG-TS, as the stream's own segments.
+  expect((await segment.body())[0]).toBe(0x47);
   // Enabled again, the page plays it by itself: the hand-over ended with the stream.
   await expect(message).not.toContainText("This stream is disabled");
   await expect(message).not.toContainText("Sent to an external player");

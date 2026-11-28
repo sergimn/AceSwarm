@@ -243,7 +243,7 @@ export interface SharedEnginesView {
   failureWindowSeconds: number;
 }
 
-/** A player showing a stream full screen. */
+/** A player showing a stream: a page that shows it full screen, or a player outside the page. */
 export interface ViewerView {
   /**
    * A random id. A page makes its own up when it loads and keeps it only in memory; the controller

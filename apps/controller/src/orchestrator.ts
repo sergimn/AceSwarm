@@ -51,7 +51,7 @@ export interface OrchestratorDeps {
   settingsStore: SettingsStore;
   /** The engines streams share, one per path, while engine sharing is on. */
   shared: SharedEngines;
-  /** Who watches which stream full screen. */
+  /** Who watches which stream: pages that show it full screen, and players outside the page. */
   viewers: Viewers;
   engines: EngineManager;
   ace: AcestreamClient;
@@ -267,9 +267,21 @@ export class Orchestrator {
     return true;
   }
 
-  /** A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`). */
+  /**
+   * Whether the stream has a playlist for players outside the page: it is in the list and enabled,
+   * and no earlier run of it is still being torn down. The transcoder drops that run's playlist
+   * with its pipeline, so a player that got it would see the next one start over.
+   */
+  hasExternalPlaylist(stream: string): boolean {
+    return this.deps.store.get(stream)?.enabled === true && !this.teardowns.has(stream);
+  }
+
+  /**
+   * A player outside the page got the stream's playlist: it watches the stream (see `Viewers.poll`),
+   * unless the stream was disabled or removed while its request was on the way.
+   */
   reportExternalPlayer(stream: string, address: string, userAgent: string | undefined): void {
-    if (this.deps.store.get(stream) !== undefined) {
+    if (this.hasExternalPlaylist(stream)) {
       this.deps.viewers.poll(stream, address, userAgent);
     }
   }
@@ -357,6 +369,11 @@ export class Orchestrator {
     );
     if (updated === undefined) {
       return undefined;
+    }
+    if (!updated.enabled) {
+      // Nobody watches a stream that is off. A page says so itself once it knows; a player outside
+      // the page says nothing, and would count until its last request is old enough.
+      this.deps.viewers.forgetStream(id);
     }
     const supervisor = this.supervisors.get(id);
     if (updated.enabled && supervisor === undefined) {

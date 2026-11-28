@@ -912,6 +912,104 @@
       "description": "How each stream's ffmpeg decodes the broadcast (aceswarm_pipeline_decoding). With PREVIEW_MODE=keyframes or LOW_CPU_PREVIEWS, while the full stream is copied, it decodes key frames only, which saves CPU. That needs key frames ffmpeg can use: IDR frames, or frames with a recovery point, which some broadcasts never send. Key frames only (green): a frame came of them, so the stream stays this way. Key frames only, no frame yet (yellow): the stream is starting, or its key frames are far apart; after 45 s of data with no frame it switches. Switched to every frame (orange): key frames only gave no frame in time (no key frames ffmpeg can use, or key frames more than about 12 s apart), so the stream decodes every frame from then on, which saves less CPU. It stays so until the stream stops or the transcoder restarts; then it waits again. Every frame (blue): the settings want every frame (PREVIEW_MODE=video), or the full stream is re-encoded, which needs every frame. While no ffmpeg runs for a stream, it shows how its last one decoded; no value while the stream has no pipeline."
     },
     {
+      "type": "bargauge",
+      "title": "Waiting picture shown in range",
+      "id": 58,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How many times each stream's external players got the picture that says \"Waiting for video\" where the stream's video was, in the dashboard's range (aceswarm_pipeline_slates_total), most first. The picture takes over once no new video came for about 5 seconds, and it counts when a player asks for the playlist and gets it: an outage with no external player doesn't count, and neither does the picture a stream starts with. Streams without one are not listed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(round(sum by (stream) (increase(aceswarm_pipeline_slates_total[$__range]))) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"} > 0)",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "No waiting picture in this range",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Waiting picture shown per hour",
+      "id": 59,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream) (increase(aceswarm_pipeline_slates_total[1h])) * on (stream) group_left (name) aceswarm_stream_info{stream=~\"$stream\"}",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "How many times, in the hour before each point, each stream's external players got the picture that says \"Waiting for video\" where the stream's video was (aceswarm_pipeline_slates_total). See Waiting picture shown in range for what counts."
+    },
+    {
       "type": "row",
       "title": "Full screen output and layout changes",
       "id": 50,
@@ -920,7 +1018,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 72
       },
       "panels": []
     },
@@ -936,7 +1034,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -997,7 +1095,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1062,7 +1160,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 89
       },
       "targets": [
         {
@@ -1129,7 +1227,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 89
+        "y": 97
       },
       "targets": [
         {
@@ -1182,7 +1280,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 89
+        "y": 97
       },
       "interval": "1m",
       "targets": [
@@ -1230,7 +1328,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 97
+        "y": 105
       },
       "panels": [
         {
@@ -1245,7 +1343,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 98
+            "y": 106
           },
           "targets": [
             {
@@ -1287,7 +1385,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 106
       },
       "panels": []
     },
@@ -1303,7 +1401,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 99
+        "y": 107
       },
       "targets": [
         {
@@ -1339,7 +1437,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 99
+        "y": 107
       },
       "targets": [
         {
@@ -1375,7 +1473,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 107
+        "y": 115
       },
       "targets": [
         {
@@ -1421,7 +1519,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 107
+        "y": 115
       },
       "targets": [
         {
@@ -1457,7 +1555,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 115
+        "y": 123
       },
       "targets": [
         {
@@ -1494,7 +1592,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 115
+        "y": 123
       },
       "targets": [
         {
@@ -1531,7 +1629,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 123
+        "y": 131
       },
       "targets": [
         {
@@ -1605,7 +1703,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 123
+        "y": 131
       },
       "targets": [
         {
@@ -1681,7 +1779,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 133
+        "y": 141
       },
       "panels": []
     },
@@ -1698,7 +1796,7 @@
         "h": 8,
         "w": 10,
         "x": 0,
-        "y": 134
+        "y": 142
       },
       "targets": [
         {
@@ -1782,7 +1880,7 @@
         "h": 8,
         "w": 10,
         "x": 10,
-        "y": 134
+        "y": 142
       },
       "targets": [
         {
@@ -1853,7 +1951,7 @@
         "h": 8,
         "w": 4,
         "x": 20,
-        "y": 134
+        "y": 142
       },
       "targets": [
         {
@@ -1912,7 +2010,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 142
+        "y": 150
       },
       "targets": [
         {
@@ -1950,7 +2048,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 142
+        "y": 150
       },
       "targets": [
         {
@@ -1987,7 +2085,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 150
+        "y": 158
       },
       "targets": [
         {
@@ -2072,7 +2170,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 150
+        "y": 158
       },
       "targets": [
         {
@@ -2121,7 +2219,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 158
+        "y": 166
       },
       "targets": [
         {
@@ -2158,7 +2256,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 158
+        "y": 166
       },
       "targets": [
         {
@@ -2292,7 +2390,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 166
+        "y": 174
       },
       "targets": [
         {
@@ -2488,7 +2586,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 174
+        "y": 182
       },
       "panels": []
     },
@@ -2504,7 +2602,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 175
+        "y": 183
       },
       "targets": [
         {
@@ -2559,7 +2657,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 181
+        "y": 189
       },
       "targets": [
         {
@@ -2594,7 +2692,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 181
+        "y": 189
       },
       "targets": [
         {
@@ -2629,7 +2727,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 181
+        "y": 189
       },
       "targets": [
         {
@@ -2666,7 +2764,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 189
+        "y": 197
       },
       "targets": [
         {
@@ -2707,7 +2805,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 189
+        "y": 197
       },
       "targets": [
         {
@@ -2743,7 +2841,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 197
+        "y": 205
       },
       "panels": []
     },
@@ -2759,7 +2857,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 198
+        "y": 206
       },
       "targets": [
         {
@@ -2793,7 +2891,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 208
+        "y": 216
       },
       "targets": [
         {

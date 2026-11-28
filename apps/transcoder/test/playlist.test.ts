@@ -47,6 +47,26 @@ describe("VirtualPlaylist", () => {
     expect(text).not.toContain("1/seg_000000.ts");
   });
 
+  it("tells of each segment it takes, once, as it lists it", () => {
+    const taken: unknown[][] = [];
+    const playlist = new VirtualPlaylist(2, (...segment) => {
+      taken.push(segment);
+    });
+    playlist.append(1, segments(0, 1), "../g1/full/", 1000);
+    // Segments it has are not taken again, and the ones that left its window were still taken.
+    playlist.append(1, segments(0, 3), "../g1/full/", 3000);
+    playlist.append(2, segments(0, 0), "../g2/full/", 4000);
+    // A run it went on from adds nothing more.
+    playlist.append(1, segments(4, 4), "../g1/full/", 5000);
+    expect(taken).toEqual([
+      [1, { uri: "../g1/full/seg_000000.ts", duration: 2 }, 1000],
+      [1, { uri: "../g1/full/seg_000001.ts", duration: 2 }, 1000],
+      [1, { uri: "../g1/full/seg_000002.ts", duration: 2 }, 3000],
+      [1, { uri: "../g1/full/seg_000003.ts", duration: 2 }, 3000],
+      [2, { uri: "../g2/full/seg_000000.ts", duration: 2 }, 4000],
+    ]);
+  });
+
   it("stitches generations with discontinuities and keeps counting", () => {
     const playlist = new VirtualPlaylist(4);
     playlist.append(1, segments(0, 2), "1/");
@@ -111,6 +131,109 @@ describe("VirtualPlaylist", () => {
     expect(playlist.append(2, segments(1, 1), "2/")).toBe(0);
     expect(playlist.append(65, segments(1, 1), "65/")).toBe(0);
     expect(playlist.append(1, segments(1, 1), "1/")).toBe(1);
+  });
+
+  it("says how long the longest segment it lists lasts", () => {
+    const playlist = new VirtualPlaylist(3);
+    expect(playlist.longest).toBe(0);
+    playlist.append(1, [{ duration: 11.5, uri: "seg_000000.ts" }], "1/", 1000);
+    playlist.append(1, segments(1, 2), "1/", 2000);
+    expect(playlist.longest).toBe(11.5);
+    // Only the segments it still lists count: not one that left its window, or got old.
+    playlist.append(1, segments(3, 3), "1/", 3000);
+    expect(playlist.longest).toBe(2);
+    playlist.expire(4000);
+    expect(playlist.longest).toBe(0);
+  });
+
+  it("keeps a discontinuity listed for a set time, with the segment before it", () => {
+    const playlist = new VirtualPlaylist(3, undefined, 20_000);
+    const listed = (): string[] =>
+      (playlist.render() ?? "").split("\n").filter((line) => line.endsWith(".ts") || line === "#EXT-X-DISCONTINUITY");
+    playlist.append(1, segments(0, 2), "1/", 0);
+    playlist.append(2, segments(0, 0), "2/", 2000);
+    expect(listed()).toEqual(["1/seg_000001.ts", "1/seg_000002.ts", "#EXT-X-DISCONTINUITY", "2/seg_000000.ts"]);
+    // Four more: the first generation's last segment stays, or the tag would not be written out.
+    playlist.append(2, segments(1, 4), "2/", 10_000);
+    expect(listed()).toEqual([
+      "1/seg_000002.ts",
+      "#EXT-X-DISCONTINUITY",
+      "2/seg_000000.ts",
+      "2/seg_000001.ts",
+      "2/seg_000002.ts",
+      "2/seg_000003.ts",
+      "2/seg_000004.ts",
+    ]);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:2\n");
+    playlist.append(2, segments(5, 5), "2/", 21_999);
+    expect(listed()).toHaveLength(8);
+    // Twenty seconds after the discontinuity came, the list is as short as ever, and counted it.
+    playlist.append(2, segments(6, 6), "2/", 22_000);
+    expect(listed()).toEqual(["2/seg_000004.ts", "2/seg_000005.ts", "2/seg_000006.ts"]);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:7\n");
+    expect(playlist.render()).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:1\n");
+  });
+
+  it("drops the segments up to the last one whose file is gone, and counts the changes it drops", () => {
+    const playlist = new VirtualPlaylist(3, undefined, 20_000);
+    const listed = (): string[] =>
+      (playlist.render() ?? "").split("\n").filter((line) => line.endsWith(".ts") || line === "#EXT-X-DISCONTINUITY");
+    playlist.append(1, segments(0, 2), "1/", 0);
+    playlist.append(2, segments(0, 3), "2/", 2000);
+    playlist.append(3, segments(9, 10), "1/", 3000);
+    expect(listed()).toEqual([
+      "1/seg_000002.ts",
+      "#EXT-X-DISCONTINUITY",
+      ...[0, 1, 2, 3].map((index) => `2/seg_00000${String(index)}.ts`),
+      "#EXT-X-DISCONTINUITY",
+      "1/seg_000009.ts",
+      "1/seg_000010.ts",
+    ]);
+    // The second run's second file is gone: the ones before it go too, the first one listed of all.
+    playlist.dropGone((uri) => uri === "2/seg_000001.ts" || uri === "1/seg_000002.ts");
+    expect(listed()).toEqual([
+      "2/seg_000002.ts",
+      "2/seg_000003.ts",
+      "#EXT-X-DISCONTINUITY",
+      "1/seg_000009.ts",
+      "1/seg_000010.ts",
+    ]);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:5\n");
+    expect(playlist.render()).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:1\n");
+    playlist.dropGone(() => false);
+    expect(listed()).toHaveLength(5);
+  });
+
+  it("keeps a discontinuity at the head once the file of the segment before it is gone, with the ones behind it", () => {
+    const playlist = new VirtualPlaylist(3, undefined, 20_000);
+    const listed = (): string[] =>
+      (playlist.render() ?? "").split("\n").filter((line) => line.endsWith(".ts") || line === "#EXT-X-DISCONTINUITY");
+    playlist.append(1, segments(0, 2), "1/", 0);
+    playlist.append(2, segments(0, 3), "2/", 2000);
+    playlist.dropGone((uri) => uri === "1/seg_000002.ts");
+    const behind = [0, 1, 2, 3].map((index) => `2/seg_00000${String(index)}.ts`);
+    expect(listed()).toEqual(["#EXT-X-DISCONTINUITY", ...behind]);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:3\n");
+    expect(playlist.render()).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:0\n");
+    // Their files are there: a player that played up to the discontinuity still finds them when it
+    // reads the playlist again, until the discontinuity is twenty seconds old.
+    playlist.append(2, segments(4, 5), "2/", 10_000);
+    expect(listed()).toEqual(["#EXT-X-DISCONTINUITY", ...behind, "2/seg_000004.ts", "2/seg_000005.ts"]);
+    playlist.append(2, segments(6, 6), "2/", 22_000);
+    expect(listed()).toEqual(["2/seg_000004.ts", "2/seg_000005.ts", "2/seg_000006.ts"]);
+    expect(playlist.render()).toContain("#EXT-X-MEDIA-SEQUENCE:7\n");
+    expect(playlist.render()).toContain("#EXT-X-DISCONTINUITY-SEQUENCE:1\n");
+  });
+
+  it("never lists more than its window without being asked to keep changes, whatever the clock says", () => {
+    const playlist = new VirtualPlaylist(3);
+    playlist.append(1, segments(0, 0), "1/", 100_000);
+    playlist.append(2, segments(0, 0), "2/", 100_000);
+    // The clock steps back ten seconds.
+    for (let index = 1; index <= 5; index += 1) {
+      playlist.append(2, segments(index, index), "2/", 90_000 + index);
+    }
+    expect(playlist.length).toBe(3);
   });
 
   it("drops segments older than a time, and keeps both sequences counting across the gap", () => {

@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import type { FfmpegPlan } from "./ffmpeg-args.ts";
 import type { LiveEdgeSettings, WatchLiveEdge } from "./live-edge.ts";
+import type { OnSegment } from "./playlist.ts";
 import type { OpenSource } from "./source-reader.ts";
 import type { MemoryReader, StuckLimits } from "./stuck-runs.ts";
 import type { LayoutChangeKind } from "./ts-tables.ts";
@@ -35,6 +36,8 @@ export interface PipelineEvents {
    * (see `Generation.show`).
    */
   layoutGap: (id: string, ms: number) => void;
+  /** The full output's playlist took a segment: players can get it from now on. */
+  fullSegment?: OnSegment;
 }
 
 export type Spawner = (command: string, args: string[]) => ChildProcess;

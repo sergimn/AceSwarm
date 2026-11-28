@@ -73,6 +73,8 @@ COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=transcoder-deps /app/node_modules node_modules
 COPY apps/transcoder/package.json apps/transcoder/
 COPY apps/transcoder/src apps/transcoder/src
+# The picture players outside the page get while a stream has no video (see src/slate.ts).
+COPY apps/transcoder/assets/slate.png apps/transcoder/assets/slate.png
 COPY --from=manifests --chown=node:node /out/hls /hls
 WORKDIR /app/apps/transcoder
 # The node image's "node" user.

@@ -446,6 +446,9 @@ test("a player outside the page counts as a viewer of a stream in the list, and 
   const added = await orchestrator.addStream({ aceId: ACE_ID, name: "One" });
   // The address it asks at, which the page hands out.
   expect(added.hls.external).toBe(`/hls/${added.id}/external/index.m3u8`);
+  // Which a stream has while it is enabled, whatever its state, and no stream that isn't in the list.
+  expect(orchestrator.hasExternalPlaylist(added.id)).toBe(true);
+  expect(orchestrator.hasExternalPlaylist("zzzzzz")).toBe(false);
   orchestrator.reportExternalPlayer(added.id, "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
   // A playlist of a stream that just left the list can still answer for a moment.
   orchestrator.reportExternalPlayer("zzzzzz", "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
@@ -456,8 +459,30 @@ test("a player outside the page counts as a viewer of a stream in the list, and 
   expect(orchestrator.getStream(added.id)?.viewers).toBe(1);
   expect(orchestrator.snapshot().streams.map(({ viewers }) => viewers)).toEqual([1]);
 
+  // A stream that is disabled has no viewers from that moment: its players lost their playlist.
+  await orchestrator.updateStream(added.id, { enabled: false });
+  expect(orchestrator.hasExternalPlaylist(added.id)).toBe(false);
+  expect(orchestrator.viewers()).toEqual([]);
+  expect(orchestrator.getStream(added.id)?.viewers).toBe(0);
+  // A request that was on its way when the stream was disabled counts nobody.
+  orchestrator.reportExternalPlayer(added.id, "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
+  expect(orchestrator.viewers()).toEqual([]);
+  // Enabled again at once, it has no playlist while its earlier run is torn down: the transcoder
+  // still has that run's, which goes with its pipeline.
+  await orchestrator.updateStream(added.id, { enabled: true });
+  expect(orchestrator.hasExternalPlaylist(added.id)).toBe(false);
+  await vi.waitFor(() => {
+    expect(orchestrator.hasExternalPlaylist(added.id)).toBe(true);
+  });
+  orchestrator.reportExternalPlayer(added.id, "192.0.2.7", "VLC/3.0.20 LibVLC/3.0.20");
+  expect(orchestrator.viewers()).toHaveLength(1);
+  // Its name can change under them.
+  await orchestrator.updateStream(added.id, { name: "Renamed" });
+  expect(orchestrator.viewers()).toHaveLength(1);
+
   await orchestrator.removeStream(added.id);
   expect(orchestrator.viewers()).toEqual([]);
+  expect(orchestrator.hasExternalPlaylist(added.id)).toBe(false);
 });
 
 test("a list of streams is added together: the new ones start unless they are added disabled", async () => {

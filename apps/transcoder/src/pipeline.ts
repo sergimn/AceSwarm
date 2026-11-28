@@ -130,7 +130,7 @@ export class Pipeline {
     this.stuck = new StuckRuns(stuck, settings.plan.thumbnailIntervalSeconds, options);
     this.root = join(settings.hlsDir, id);
     this.playlists = {
-      full: new VirtualPlaylist(settings.plan.playlistSize),
+      full: new VirtualPlaylist(settings.plan.playlistSize, events.fullSegment),
       preview: new VirtualPlaylist(settings.plan.playlistSize),
     };
     this.syncTimer = setInterval(() => {

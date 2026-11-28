@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFfmpegArgs, decodesKeyFramesOnly, type FfmpegPlan } from "../src/ffmpeg-args.ts";
+import { buildFfmpegArgs, decodesKeyFramesOnly, fullFilesKept, type FfmpegPlan } from "../src/ffmpeg-args.ts";
 
 const PLAN: FfmpegPlan = {
   directory: "/hls/s1/3",
@@ -19,6 +19,13 @@ const PLAN: FfmpegPlan = {
 function valueAfter(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
+}
+
+/** The `-hls_list_size` and `-hls_delete_threshold` of the HLS output that writes `directory`. */
+function hlsOptions(args: string[], directory: string): [string | undefined, string | undefined] {
+  const output = args.slice(0, args.indexOf(`${directory}/index.m3u8`) + 1);
+  const options = output.slice(output.lastIndexOf("-f"));
+  return [valueAfter(options, "-hls_list_size"), valueAfter(options, "-hls_delete_threshold")];
 }
 
 /** The options of the preview output: from its `-map` up to the thumbnail's, empty without a preview. */
@@ -64,6 +71,22 @@ describe("buildFfmpegArgs", () => {
     expect(formats(args)).toEqual(["hls", "image2"]);
     expect(args.filter((arg) => arg === "libx264")).toHaveLength(1);
     expect(args).not.toContain("-skip_frame");
+  });
+
+  it("keeps 40 seconds of a run's newest full segment files, and the preview's newest ten", () => {
+    // ffmpeg keeps no more files beyond its playlist than the playlist lasts, so the full output
+    // lists sixteen of two seconds in its own playlist to keep twenty; the playlists served list six.
+    const args = buildFfmpegArgs(PLAN);
+    expect(hlsOptions(args, "/hls/s1/3/full")).toEqual(["16", "4"]);
+    expect(hlsOptions(args, "/hls/s1/3/preview")).toEqual(["6", "4"]);
+    expect(fullFilesKept(6, 2)).toBe(20);
+    // Segments of one second: forty of them.
+    expect(hlsOptions(buildFfmpegArgs({ ...PLAN, segmentSeconds: 1 }), "/hls/s1/3/full")).toEqual(["36", "4"]);
+    expect(fullFilesKept(6, 1)).toBe(40);
+    // A longer playlist than that keeps four more than it lists, as the preview's does.
+    expect(hlsOptions(buildFfmpegArgs({ ...PLAN, playlistSize: 18 }), "/hls/s1/3/full")).toEqual(["18", "4"]);
+    expect(fullFilesKept(18, 2)).toBe(22);
+    expect(fullFilesKept(6, 6)).toBe(10);
   });
 
   it("leaves the input timeout to the source's reader: ffmpeg's own does not apply to a pipe", () => {

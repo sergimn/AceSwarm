@@ -39,3 +39,5 @@ await manager.clean();
 registerRoutes(service, manager);
 await runService(service, config.PORT, logger, () => manager.stopAll());
 logger.info({ port: config.PORT, previewMode: previewMode(config) }, "transcoder ready");
+// After the old output is gone, and without holding the start up: it takes ffmpeg a few seconds.
+await manager.prepareSlate();

@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  The source of slate.png, the picture players outside the page get while a stream has no video
+  (see apps/transcoder/src/slate.ts). The picture is what the transcoder uses: after a change here,
+  take it again as a 1280x720 screenshot of this page, in a browser that has the Inter font.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Waiting for video</title>
+    <style>
+      html,
+      body {
+        width: 1280px;
+        height: 720px;
+        margin: 0;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        font-family: Inter, system-ui, sans-serif;
+        color: #e6edf3;
+        background: #0d1117;
+      }
+      svg {
+        width: 104px;
+        height: 104px;
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 60px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0;
+        font-size: 30px;
+        color: #8b98a8;
+      }
+      footer {
+        position: absolute;
+        bottom: 44px;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: #6e7681;
+      }
+    </style>
+  </head>
+  <body>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" aria-hidden="true">
+      <path
+        d="M16 5 6.5 10.5v11L16 27l9.5-5.5v-11z"
+        fill="none"
+        stroke="#4cc2ff"
+        stroke-width="2"
+        stroke-linejoin="round"
+      />
+      <circle cx="16" cy="16" r="3.5" fill="#4cc2ff" />
+    </svg>
+    <h1>Waiting for video</h1>
+    <p>It starts by itself as soon as the stream has some.</p>
+    <footer>Ace Swarm</footer>
+  </body>
+</html>

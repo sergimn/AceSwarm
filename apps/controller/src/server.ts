@@ -10,6 +10,7 @@ import type { Service } from "@aceswarm/shared/service";
 import { toProfileName } from "@aceswarm/shared/wireguard";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { externalPlaylistStream } from "./hls-urls.ts";
 import { NetworkPolicyError, UnknownPathError, type Orchestrator } from "./orchestrator.ts";
 import { DuplicateStreamError, type NewStream } from "./stream-store.ts";
 import { describeDevice } from "./viewers.ts";
@@ -61,9 +62,6 @@ const idParams = z.object({ id: streamIdSchema });
 const nameParams = z.object({ name: z.string().min(1).max(64) });
 
 const HOP_HEADERS = ["content-type", "content-length", "cache-control", "last-modified"];
-
-/** The playlist for players outside the page (see `hlsUrls`), with the stream's id. */
-const EXTERNAL_PLAYLIST = /^\/hls\/([a-z0-9]{6,32})\/external\/index\.m3u8(?:\?|$)/;
 
 function badRequest(reply: FastifyReply, error: string, details?: string[]): FastifyReply {
   return reply.code(400).send(details === undefined ? { error } : { error, details });
@@ -338,19 +336,34 @@ export async function registerRoutes(
   // HLS playlists and segments come from the transcoder; proxying keeps a single origin for the
   // browser and avoids exposing the transcoder.
   app.get("/hls/*", async (request, reply) => {
+    let target: URL;
+    try {
+      target = new URL(`${options.transcoderUrl}${request.url}`);
+    } catch (error) {
+      return reply.code(502).send({ error: describeError(error) });
+    }
+    // Only the transcoder's HLS files are for the browser: not an address that `..` takes past them.
+    if (!target.pathname.startsWith("/hls/")) {
+      return reply.code(404).send({ error: "not found" });
+    }
+    // The transcoder has a playlist for players outside the page for any stream it is asked about,
+    // with the slate until the stream has video (a player may ask before the stream's pipeline is
+    // there). Which streams there are is known here: only an enabled one has that playlist. The
+    // address is read as the transcoder will read it, so that it can't be written past this.
+    const external = externalPlaylistStream(target.pathname);
+    if (external !== undefined && !orchestrator.hasExternalPlaylist(external)) {
+      return reply.code(404).send({ error: "no such stream" });
+    }
     let upstream: Response;
     try {
-      upstream = await fetch(`${options.transcoderUrl}${request.url}`, {
-        signal: AbortSignal.timeout(15_000),
-      });
+      upstream = await fetch(target, { signal: AbortSignal.timeout(15_000) });
     } catch (error) {
       return reply.code(502).send({ error: describeError(error) });
     }
     // A player outside the page reports nothing, and asks for its playlist every few seconds while
     // it plays: each one it gets counts it as a viewer. The page's playlists don't count: the
     // page reports itself.
-    const external = upstream.ok && request.method === "GET" ? EXTERNAL_PLAYLIST.exec(request.url)?.[1] : undefined;
-    if (external !== undefined) {
+    if (external !== undefined && upstream.ok && request.method === "GET") {
       orchestrator.reportExternalPlayer(external, request.ip, request.headers["user-agent"]);
     }
     reply.code(upstream.status);
